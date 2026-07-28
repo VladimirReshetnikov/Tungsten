@@ -417,6 +417,174 @@ void message_list_parity_tests() {
         "move-assigned sessions rebind their history resolver");
 }
 
+void current_message_list_visibility_tests() {
+    const auto held = [](const std::string& head, const std::string& tag) {
+        return "HoldForm[MessageName[" + head + ", \"" + tag + "\"]]";
+    };
+
+    tungsten::EvaluationSession session;
+    const auto mixed = session.evaluate_input(
+        "Message[visible::a]; Quiet[Message[quiet::b]]; $MessageList");
+    check_equal(mixed.result.to_full_form(),
+        "List[" + held("visible", "a") + ", " + held("quiet", "b") + "]",
+        "session $MessageList includes visible and Quiet-suppressed generation");
+    check(mixed.message_names.size() == 1,
+        "session output exposes only the visible generated message");
+    if (mixed.message_names.size() == 1)
+        check_equal(mixed.message_names.front().to_full_form(),
+            "MessageName[visible, \"a\"]",
+            "session visible message retains its canonical name");
+    const auto stored = session.message_names(1);
+    check(stored && stored->size() == 1,
+        "historical message storage retains only visible messages");
+
+    check_equal(session.evaluate_input("{MessageList[1], $MessageList}")
+            .result.to_full_form(),
+        "List[List[" + held("visible", "a") + "], List[]]",
+        "historical MessageList stays visible-only while current $MessageList resets");
+
+    const auto duplicates = session.evaluate_input(
+        "Quiet[Message[duplicate::x]; Message[duplicate::x]]; $MessageList");
+    check_equal(duplicates.result.to_full_form(),
+        "List[" + held("duplicate", "x") + ", "
+            + held("duplicate", "x") + "]",
+        "session $MessageList retains suppressed duplicates in order");
+    check(duplicates.message_names.empty(),
+        "suppressed duplicates remain absent from visible session effects");
+    check_equal(session.evaluate_input("MessageList[3]").result.to_full_form(),
+        "List[]", "suppressed duplicates remain absent from historical MessageList");
+
+    const auto disabled = session.evaluate_input(
+        "Off[disabled::x]; Message[disabled::x]; $MessageList");
+    check_equal(disabled.result.to_full_form(), "List[]",
+        "Off-disabled session messages enter neither generated stream");
+    check(disabled.message_names.empty(),
+        "Off-disabled session messages enter no visible history");
+
+    const auto quiet_inside_check = session.evaluate_input(
+        "{Check[Quiet[Message[checkOuter::x]], fallback], $MessageList}");
+    check_equal(quiet_inside_check.result.to_full_form(),
+        "List[Null, List[" + held("checkOuter", "x") + "]]",
+        "session Check outside Quiet stays untriggered while generation is retained");
+    check(quiet_inside_check.message_names.empty(),
+        "session inner Quiet suppresses the Check message visibly");
+    const auto check_inside_quiet = session.evaluate_input(
+        "Quiet[{Check[Message[checkInner::x], fallback], $MessageList}]");
+    check_equal(check_inside_quiet.result.to_full_form(),
+        "List[fallback, List[" + held("checkInner", "x") + "]]",
+        "session Check inside Quiet triggers and preserves generated history");
+    check(check_inside_quiet.message_names.empty(),
+        "session outer Quiet suppresses the triggered Check message visibly");
+}
+
+void current_message_list_hook_lifetime_tests() {
+    const auto held = [](const std::string& head, const std::string& tag) {
+        return "HoldForm[MessageName[" + head + ", \"" + tag + "\"]]";
+    };
+
+    tungsten::EvaluationSession pre_phases;
+    (void)pre_phases.evaluate_input(
+        "$PreRead = Function[s, Message[preReadPhase::x]; s]; "
+        "$Pre = Function[x, Message[prePhase::x]; x, HoldAll];");
+    const auto before_main = pre_phases.evaluate_input("$MessageList");
+    check_equal(before_main.result.to_full_form(),
+        "List[" + held("preReadPhase", "x") + ", "
+            + held("prePhase", "x") + "]",
+        "$MessageList spans PreRead and held Pre evaluation phases");
+    check(before_main.message_names.size() == 2,
+        "visible PreRead and Pre messages remain public effects");
+    const auto stored_pre_phases = pre_phases.message_names(2);
+    check(stored_pre_phases && stored_pre_phases->size() == 2,
+        "visible PreRead and Pre messages enter historical storage");
+
+    tungsten::EvaluationSession quiet_pre_phases;
+    (void)quiet_pre_phases.evaluate_input(
+        "$PreRead = Function[s, Quiet[Message[quietPreRead::x]]; s]; "
+        "$Pre = Function[x, Quiet[Message[quietPre::x]]; x, HoldAll];");
+    const auto quiet_before_main = quiet_pre_phases.evaluate_input("$MessageList");
+    check_equal(quiet_before_main.result.to_full_form(),
+        "List[" + held("quietPreRead", "x") + ", "
+            + held("quietPre", "x") + "]",
+        "$MessageList retains suppressed PreRead and Pre generation");
+    check(quiet_before_main.message_names.empty(),
+        "suppressed PreRead and Pre messages stay out of visible effects");
+    const auto stored_quiet_pre = quiet_pre_phases.message_names(2);
+    check(stored_quiet_pre && stored_quiet_pre->empty(),
+        "suppressed PreRead and Pre messages stay out of history");
+
+    tungsten::EvaluationSession disabled_pre_phases;
+    (void)disabled_pre_phases.evaluate_input(
+        "Off[offPreRead::x]; Off[offPre::x]; "
+        "$PreRead = Function[s, Message[offPreRead::x]; s]; "
+        "$Pre = Function[x, Message[offPre::x]; x, HoldAll];");
+    check_equal(disabled_pre_phases.evaluate_input("$MessageList")
+            .result.to_full_form(),
+        "List[]", "Off-disabled hook messages enter no current stream");
+
+    tungsten::EvaluationSession post_phase;
+    (void)post_phase.evaluate_input(
+        "$Post = Function[x, {x, (Message[postPhase::x]; $MessageList)}];");
+    const auto after_main = post_phase.evaluate_input("Message[mainPhase::x]; 42");
+    check_equal(after_main.result.to_full_form(),
+        "List[42, List[" + held("mainPhase", "x") + ", "
+            + held("postPhase", "x") + "]]",
+        "$MessageList in Post sees main and Post generation in order");
+    check(after_main.message_names.size() == 2,
+        "visible main and Post messages remain public effects");
+    const auto stored_post = post_phase.message_names(2);
+    check(stored_post && stored_post->size() == 2,
+        "visible Post messages are recorded before history finishes");
+
+    tungsten::EvaluationSession quiet_post_phase;
+    (void)quiet_post_phase.evaluate_input(
+        "$Post = Function[x, {x, (Quiet[Message[quietPost::x]]; "
+        "$MessageList)}];");
+    const auto quiet_after_main = quiet_post_phase.evaluate_input(
+        "Message[visibleMain::x]; 42");
+    check_equal(quiet_after_main.result.to_full_form(),
+        "List[42, List[" + held("visibleMain", "x") + ", "
+            + held("quietPost", "x") + "]]",
+        "$MessageList in Post includes suppressed Post generation");
+    check(quiet_after_main.message_names.size() == 1,
+        "suppressed Post generation does not become a visible effect");
+    const auto stored_quiet_post = quiet_post_phase.message_names(2);
+    check(stored_quiet_post && stored_quiet_post->size() == 1,
+        "suppressed Post generation stays out of historical storage");
+
+    tungsten::EvaluationSession preprint_phase;
+    (void)preprint_phase.evaluate_input(
+        "$PrePrint = Function[x, {x, (Message[prePrintPhase::x]; "
+        "$MessageList)}];");
+    const auto before_preprint = preprint_phase.evaluate_input(
+        "Message[prePrintMain::x]; 42");
+    check_equal(before_preprint.result.to_full_form(), "42",
+        "PrePrint runs after the session result is finalized");
+    check_equal(preprint_phase.preprint(before_preprint.result).to_full_form(),
+        "List[42, List[" + held("prePrintMain", "x") + ", "
+            + held("prePrintPhase", "x") + "]]",
+        "$MessageList in PrePrint sees main and PrePrint generation");
+    const auto stored_preprint = preprint_phase.message_names(2);
+    check(stored_preprint && stored_preprint->size() == 1,
+        "PrePrint messages occur after historical message recording");
+    check_equal(preprint_phase.evaluate_input("$MessageList").result.to_full_form(),
+        "List[]", "the next input clears main and PrePrint generated messages");
+
+    tungsten::EvaluationSession quiet_preprint_phase;
+    (void)quiet_preprint_phase.evaluate_input(
+        "$PrePrint = Function[x, {x, (Quiet[Message[quietPrePrint::x]]; "
+        "$MessageList)}];");
+    const auto quiet_before_preprint = quiet_preprint_phase.evaluate_input(
+        "Message[quietPrePrintMain::x]; 7");
+    check_equal(quiet_preprint_phase.preprint(quiet_before_preprint.result)
+            .to_full_form(),
+        "List[7, List[" + held("quietPrePrintMain", "x") + ", "
+            + held("quietPrePrint", "x") + "]]",
+        "$MessageList in PrePrint includes suppressed PrePrint generation");
+    const auto stored_quiet_preprint = quiet_preprint_phase.message_names(2);
+    check(stored_quiet_preprint && stored_quiet_preprint->size() == 1,
+        "suppressed PrePrint generation is absent from prior history");
+}
+
 void installed_history_api_tests() {
     tungsten::EvaluationSession retained;
     const auto expression = tungsten::call("CompoundExpression", {
@@ -681,6 +849,8 @@ int main() {
     parsed_input_and_exit_diagnostic_tests();
     history_pruning_tests();
     message_list_parity_tests();
+    current_message_list_visibility_tests();
+    current_message_list_hook_lifetime_tests();
     installed_history_api_tests();
     display_and_print_tests();
     hook_and_limit_tests();

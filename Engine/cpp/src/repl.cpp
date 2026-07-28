@@ -671,7 +671,8 @@ EvaluationSession::EvaluationSession(const EvaluationSession& other)
       outputs_(other.outputs_),
       message_history_(other.message_history_),
       message_text_history_(other.message_text_history_),
-      print_history_(other.print_history_) {
+      print_history_(other.print_history_),
+      current_generated_messages_(other.current_generated_messages_) {
     refresh_evaluator_session_context();
 }
 
@@ -683,7 +684,9 @@ EvaluationSession::EvaluationSession(EvaluationSession&& other)
       outputs_(std::move(other.outputs_)),
       message_history_(std::move(other.message_history_)),
       message_text_history_(std::move(other.message_text_history_)),
-      print_history_(std::move(other.print_history_)) {
+      print_history_(std::move(other.print_history_)),
+      current_generated_messages_(
+          std::move(other.current_generated_messages_)) {
     refresh_evaluator_session_context();
     other.refresh_evaluator_session_context();
 }
@@ -699,6 +702,7 @@ EvaluationSession& EvaluationSession::operator=(
     message_history_ = other.message_history_;
     message_text_history_ = other.message_text_history_;
     print_history_ = other.print_history_;
+    current_generated_messages_ = other.current_generated_messages_;
     evaluating_input_history_.clear();
     refresh_evaluator_session_context();
     return *this;
@@ -714,6 +718,8 @@ EvaluationSession& EvaluationSession::operator=(EvaluationSession&& other) {
     message_history_ = std::move(other.message_history_);
     message_text_history_ = std::move(other.message_text_history_);
     print_history_ = std::move(other.print_history_);
+    current_generated_messages_ =
+        std::move(other.current_generated_messages_);
     evaluating_input_history_.clear();
     refresh_evaluator_session_context();
     other.refresh_evaluator_session_context();
@@ -881,6 +887,7 @@ std::string EvaluationSession::apply_pre_read(
 
 SessionOutput EvaluationSession::evaluate_input(const std::string& source) {
     ++line_;
+    current_generated_messages_.clear();
     refresh_evaluator_session_context();
     std::vector<std::string> prints;
     std::vector<Expr> message_names;
@@ -900,6 +907,7 @@ SessionOutput EvaluationSession::evaluate_expression(
     const std::string& source,
     const Expr& expression) {
     ++line_;
+    current_generated_messages_.clear();
     refresh_evaluator_session_context();
     return evaluate_prepared_input(source, expression, {}, {}, {});
 }
@@ -1026,6 +1034,16 @@ void EvaluationSession::refresh_evaluator_session_context() {
                 evaluating_input_history_.erase(*index);
                 throw;
             }
+        },
+        [this](const Expr& name) {
+            current_generated_messages_.push_back(name);
+        },
+        [this] {
+            std::vector<Expr> held;
+            held.reserve(current_generated_messages_.size());
+            for (const auto& message : current_generated_messages_)
+                held.push_back(call("HoldForm", {message}));
+            return list(std::move(held));
         });
 }
 

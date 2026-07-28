@@ -99,7 +99,9 @@ private:
         std::function<Expr(const mpz_class&)> message_list_resolver,
         std::function<Expr(
             const std::string&, const std::optional<mpz_class>&)>
-            history_resolver);
+            history_resolver,
+        std::function<void(const Expr&)> generated_message_sink,
+        std::function<Expr()> current_message_list_resolver);
     [[nodiscard]] bool evaluate_tensor_matrix_call(
         const Expr& head, const std::vector<Expr>& args,
         Expr& result, std::string& error);
@@ -163,6 +165,7 @@ private:
     std::optional<Expr> control_value_;
     std::optional<Expr> control_target_;
     bool aborted_ = false;
+    std::vector<Expr> generated_messages_;
     std::vector<Expr> messages_;
     std::vector<std::string> message_texts_;
     std::vector<std::string> prints_;
@@ -171,6 +174,8 @@ private:
     std::function<Expr(
         const std::string&, const std::optional<mpz_class>&)>
         session_history_resolver_;
+    std::function<void(const Expr&)> generated_message_sink_;
+    std::function<Expr()> current_message_list_resolver_;
 };
 
 [[nodiscard]] Expr evaluate(const Expr& expression);

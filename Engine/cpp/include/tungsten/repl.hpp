@@ -110,6 +110,7 @@ private:
     std::map<std::size_t, std::vector<std::string>> message_text_history_;
     std::map<std::size_t, std::vector<std::string>> print_history_;
     std::set<std::size_t> evaluating_input_history_;
+    std::vector<Expr> current_generated_messages_;
 };
 
 int run_repl(
