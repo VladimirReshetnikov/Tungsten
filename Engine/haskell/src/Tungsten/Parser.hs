@@ -225,12 +225,18 @@ compositionParser =
 applyOperatorParser :: Parser Expr
 applyOperatorParser = chainr1 mapOperatorParser applyOperator
  where
-  applyOperator = binary "@@" (call2 "Apply")
+  applyOperator = choice
+    [ binary "@@@" (call2 "MapApply")
+    , binary "@@" (call2 "Apply")
+    ]
 
 mapOperatorParser :: Parser Expr
 mapOperatorParser = chainr1 replacementParser mapOperator
  where
-  mapOperator = binary "/@" (call2 "Map")
+  mapOperator = choice
+    [ binary "//@" (call2 "MapAll")
+    , binary "/@" (call2 "Map")
+    ]
 
 replacementParser :: Parser Expr
 replacementParser = chainl1 ruleParser replacementOperator
