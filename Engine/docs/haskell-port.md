@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-28T15:32:50Z
-- Repository HEAD: 138333075d9897a3b9c7245a9b0dfe9483dbdb9b
+- Updated (UTC): 2026-07-28T15:35:00Z
+- Repository HEAD: 246116285509020e028057aed96f21dc12b69ea1
 
 ## Purpose
 
@@ -166,6 +166,13 @@ The exact numeric reducer also covers the Python reference's integer combinatori
 ordinary and Gaussian factorization, divisor and prime arithmetic, modular arithmetic and residue
 symbols, continued fractions, integer partitions, digit/base conversion, Chinese remaindering,
 special integer sequences, and arbitrary-precision bit operations.
+
+Exact polynomial support now includes `MonomialList` with implicit, explicit, and partial variable
+sets, all six Python-compatible lexicographic order directions, Gaussian coefficients, and the
+reference's zero conventions. `PolynomialMod` maps integer and invertible rational coefficients into
+positive residue representatives over arbitrary-size moduli while preserving unsupported domains
+symbolically. Shared `Plus` normalization also factors the best common symbolic subset with real or
+complex numeric coefficients, matching the reference's deterministic rebuilt forms.
 
 ## Compatibility boundary
 

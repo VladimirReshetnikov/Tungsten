@@ -36,6 +36,7 @@ reducePolynomialBuiltin compareExpression headName values = case headName of
   "Expand" -> reduceExpand compareExpression values
   "PolynomialQ" -> reducePolynomialQ compareExpression values
   "Variables" -> reduceVariables compareExpression values
+  "MonomialList" -> reduceMonomialList compareExpression values
   "Coefficient" -> reduceCoefficient compareExpression values
   "CoefficientList" -> reduceCoefficientList compareExpression values
   "Numerator" -> reduceFractionPart compareExpression True values
@@ -47,6 +48,7 @@ reducePolynomialBuiltin compareExpression headName values = case headName of
   "FactorList" -> reduceFactor compareExpression True values
   "PolynomialGCD" -> reducePolynomialGcdLcm compareExpression False values
   "PolynomialLCM" -> reducePolynomialGcdLcm compareExpression True values
+  "PolynomialMod" -> reducePolynomialMod compareExpression values
   "PolynomialQuotient" -> reducePolynomialDivision compareExpression True values
   "PolynomialRemainder" -> reducePolynomialDivision compareExpression False values
   _ -> Nothing
@@ -84,6 +86,172 @@ reduceVariables compareExpression [expression] =
         then Just (Call (Symbol "List") variables)
         else Nothing
 reduceVariables _ _ = Nothing
+
+data MonomialOrder
+  = MonomialLexicographic
+  | MonomialDegreeLexicographic
+  | MonomialDegreeReverseLexicographic
+  deriving (Eq, Show)
+
+data MonomialDirection
+  = MonomialDescending
+  | MonomialAscending
+  deriving (Eq, Show)
+
+reduceMonomialList :: CanonicalCompare -> [Expr] -> Maybe Expr
+reduceMonomialList compareExpression arguments = do
+  (expression, explicitVariables, order, direction) <-
+    monomialListArguments arguments
+  let discoveredVariables =
+        discoverVariables compareExpression explicitVariables [expression]
+      orderingDimensions =
+        if monomialListUsesImplicitVariables arguments
+          then length discoveredVariables
+          else length explicitVariables
+  if hasDuplicateExpressions explicitVariables
+    then Nothing
+    else do
+      polynomial <- expressionToPolynomial discoveredVariables expression
+      let grouped
+            | isZeroPolynomial polynomial && orderingDimensions > 0 =
+                Map.singleton
+                  (replicate orderingDimensions 0)
+                  (zeroPolynomial (length discoveredVariables))
+            | otherwise =
+                groupMonomialTerms orderingDimensions polynomial
+          ordered =
+            sortBy
+              (compareMonomialGroups order direction)
+              (Map.toList grouped)
+      pure
+        ( Call
+            (Symbol "List")
+            [ groupedMonomialToExpr
+                compareExpression
+                discoveredVariables
+                orderingDimensions
+                powers
+                groupedCoefficient
+            | (powers, groupedCoefficient) <- ordered
+            ]
+        )
+
+monomialListArguments
+  :: [Expr]
+  -> Maybe (Expr, [Expr], MonomialOrder, MonomialDirection)
+monomialListArguments = \case
+  [expression] ->
+    Just
+      ( expression
+      , []
+      , MonomialLexicographic
+      , MonomialDescending
+      )
+  [expression, possibleOrder]
+    | Just (order, direction) <- monomialOrder possibleOrder ->
+        Just (expression, [], order, direction)
+  [expression, variablesExpression] -> do
+    variables <- variableExpressions variablesExpression
+    Just
+      ( expression
+      , variables
+      , MonomialLexicographic
+      , MonomialDescending
+      )
+  [expression, variablesExpression, orderExpression] -> do
+    variables <- variableExpressions variablesExpression
+    (order, direction) <- monomialOrder orderExpression
+    Just (expression, variables, order, direction)
+  _ -> Nothing
+
+monomialListUsesImplicitVariables :: [Expr] -> Bool
+monomialListUsesImplicitVariables = \case
+  [_] -> True
+  [_, possibleOrder] -> case monomialOrder possibleOrder of
+    Just _ -> True
+    Nothing -> False
+  _ -> False
+
+monomialOrder :: Expr -> Maybe (MonomialOrder, MonomialDirection)
+monomialOrder (Symbol name)
+  | systemHeadIn "Lexicographic" name =
+      Just (MonomialLexicographic, MonomialDescending)
+  | systemHeadIn "DegreeLexicographic" name =
+      Just (MonomialDegreeLexicographic, MonomialDescending)
+  | systemHeadIn "DegreeReverseLexicographic" name =
+      Just (MonomialDegreeReverseLexicographic, MonomialDescending)
+  | systemHeadIn "NegativeLexicographic" name =
+      Just (MonomialLexicographic, MonomialAscending)
+  | systemHeadIn "NegativeDegreeLexicographic" name =
+      Just (MonomialDegreeLexicographic, MonomialAscending)
+  | systemHeadIn "NegativeDegreeReverseLexicographic" name =
+      Just (MonomialDegreeReverseLexicographic, MonomialAscending)
+monomialOrder _ = Nothing
+
+hasDuplicateExpressions :: [Expr] -> Bool
+hasDuplicateExpressions values =
+  length (Set.fromList (map fullForm values)) /= length values
+
+groupMonomialTerms
+  :: Int
+  -> Polynomial
+  -> Map.Map [Int] Polynomial
+groupMonomialTerms orderingDimensions (Polynomial terms) =
+  Map.fromListWith addPolynomial
+    [ ( take orderingDimensions powers
+      , Polynomial
+          (Map.singleton (replicate orderingDimensions 0 <> drop orderingDimensions powers) coefficient)
+      )
+    | (powers, coefficient) <- Map.toList terms
+    ]
+
+compareMonomialGroups
+  :: MonomialOrder
+  -> MonomialDirection
+  -> ([Int], Polynomial)
+  -> ([Int], Polynomial)
+  -> Ordering
+compareMonomialGroups order direction (left, _) (right, _) =
+  case direction of
+    MonomialDescending -> compareKey right left
+    MonomialAscending -> compareKey left right
+ where
+  compareKey = case order of
+    MonomialLexicographic -> compare
+    MonomialDegreeLexicographic ->
+      \leftPowers rightPowers ->
+        compare (sum leftPowers, leftPowers) (sum rightPowers, rightPowers)
+    MonomialDegreeReverseLexicographic ->
+      \leftPowers rightPowers ->
+        compare
+          (sum leftPowers, reverse (map negate leftPowers))
+          (sum rightPowers, reverse (map negate rightPowers))
+
+groupedMonomialToExpr
+  :: CanonicalCompare
+  -> [Expr]
+  -> Int
+  -> [Int]
+  -> Polynomial
+  -> Expr
+groupedMonomialToExpr
+  compareExpression
+  variables
+  orderingDimensions
+  powers
+  groupedCoefficient =
+    makeTimes compareExpression (coefficientExpression : variableFactors)
+ where
+  coefficientExpression =
+    polynomialToExpr compareExpression variables groupedCoefficient
+  variableFactors =
+    [ if exponent == 1
+        then variable
+        else Call (Symbol "Power") [variable, Integer (fromIntegral exponent)]
+    | (variable, exponent) <-
+        take orderingDimensions (zip variables powers)
+    , exponent > 0
+    ]
 
 reduceCoefficient :: CanonicalCompare -> [Expr] -> Maybe Expr
 reduceCoefficient compareExpression arguments = case arguments of
@@ -239,6 +407,58 @@ reducePolynomialGcdLcm compareExpression useLcm expressions = do
             then factorizationExpr compareExpression variables (factorPolynomial variables result)
             else polynomialToExpr compareExpression variables result
         )
+
+reducePolynomialMod :: CanonicalCompare -> [Expr] -> Maybe Expr
+reducePolynomialMod compareExpression [expression, Integer modulus]
+  | modulus > 1 = do
+      let variables = discoverVariables compareExpression [] [expression]
+      Polynomial terms <- expressionToPolynomial variables expression
+      reducedTerms <-
+        traverse
+          (\(powers, coefficient) -> do
+              residue <- polynomialModCoefficient modulus coefficient
+              pure (powers, residue)
+          )
+          (Map.toList terms)
+      pure
+        ( polynomialToExpr
+            compareExpression
+            variables
+            (Polynomial (Map.fromList (filter ((/= zeroGaussian) . snd) reducedTerms)))
+        )
+reducePolynomialMod _ _ = Nothing
+
+polynomialModCoefficient :: Integer -> Gaussian -> Maybe Gaussian
+polynomialModCoefficient
+  modulus
+  (Gaussian (Exact numerator denominator) imaginary)
+    | imaginary /= zeroExact = Nothing
+    | otherwise = do
+        denominatorInverse <- modularInverseInteger denominator modulus
+        let residue = (numerator `mod` modulus * denominatorInverse) `mod` modulus
+        pure (Gaussian (Exact residue 1) zeroExact)
+
+modularInverseInteger :: Integer -> Integer -> Maybe Integer
+modularInverseInteger value modulus =
+  let (greatestCommonDivisor, coefficient, _) =
+        extendedGreatestCommonDivisor (value `mod` modulus) modulus
+   in if greatestCommonDivisor == 1
+        then Just (coefficient `mod` modulus)
+        else Nothing
+
+extendedGreatestCommonDivisor
+  :: Integer
+  -> Integer
+  -> (Integer, Integer, Integer)
+extendedGreatestCommonDivisor left 0 =
+  (abs left, signum left, 0)
+extendedGreatestCommonDivisor left right =
+  let (divisor, rightCoefficient, remainderCoefficient) =
+        extendedGreatestCommonDivisor right (left `mod` right)
+   in ( divisor
+      , remainderCoefficient
+      , rightCoefficient - (left `div` right) * remainderCoefficient
+      )
 
 reducePolynomialDivision :: CanonicalCompare -> Bool -> [Expr] -> Maybe Expr
 reducePolynomialDivision compareExpression selectQuotient [dividendExpr, divisorExpr, variable] = do

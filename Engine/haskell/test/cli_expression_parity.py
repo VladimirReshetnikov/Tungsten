@@ -2809,6 +2809,35 @@ CASES = (
         ),
         0,
     ),
+    (
+        "monomial ordering modular coefficients and additive factoring",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{MonomialList[x y+x^2+3,{x,y}],"
+            "MonomialList[x^2+x y+y^2+x+y+1,{x,y},"
+            "DegreeLexicographic],"
+            "MonomialList[x^2+x y+y^2+x+y+1,"
+            "NegativeLexicographic],"
+            "MonomialList[x y+x z+y+z,x],"
+            "MonomialList[x y+x z+y+z,{}],"
+            "MonomialList[x+y,{}],MonomialList[0],"
+            "MonomialList[0,x],MonomialList[x^2+I x+1,x],"
+            "System`MonomialList[x^2+x,x],"
+            "Global`MonomialList[x^2+x,x],"
+            "PolynomialMod[x^2+2x+3,5],"
+            "PolynomialMod[-x^2-2x-3,5],"
+            "PolynomialMod[x/2+2/3,5],"
+            "PolynomialMod[x y+7x+12,5],"
+            "PolynomialMod[1/5+x,5],PolynomialMod[x+I,5],"
+            "PolynomialMod[3,1],System`PolynomialMod[x+7,5],"
+            "Global`PolynomialMod[x+7,5],2x+x y+2,$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),

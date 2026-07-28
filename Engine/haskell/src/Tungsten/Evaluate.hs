@@ -49,6 +49,7 @@ import qualified Data.ByteString as BS
 import Data.Char (chr, isDigit, ord, toUpper)
 import Data.Functor.Identity (Identity (..))
 import Data.List (findIndex, permutations, sort, sortBy, transpose)
+import qualified Data.List as List
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
@@ -1961,7 +1962,10 @@ reducePlus originalValues =
            in case combined of
                 [] -> Integer 0
                 [single] -> single
-                _ -> Call (Symbol "Plus") combined
+                _ ->
+                  case factorCommonAdditiveTerms combined of
+                    Just factored -> factored
+                    Nothing -> Call (Symbol "Plus") combined
  where
   collectLikeTerms terms = retainFirst Set.empty decomposed
    where
@@ -1988,6 +1992,109 @@ reducePlus originalValues =
         symbolicFactors = filter (not . isExact) factors
      in (coefficient, reduceTimes symbolicFactors)
   termCoefficient term = (Exact 1 1, term)
+
+factorCommonAdditiveTerms :: [Expr] -> Maybe Expr
+factorCommonAdditiveTerms values =
+  case bestCandidate of
+    ([], _) -> Nothing
+    (_, []) -> Nothing
+    (selectedIndices, commonFactors) ->
+      let selected = Set.fromList selectedIndices
+          quotients =
+            [ reduceTimes
+                ( (if exactOne coefficient then [] else [coefficient])
+                    <> removeCommonFactors factors commonFactors
+                )
+            | index <- selectedIndices
+            , let (coefficient, factors) = decomposed !! index
+            ]
+          commonExpression = reduceTimes commonFactors
+          factoredTerm =
+            reduceTimes [commonExpression, reducePlus quotients]
+          rebuilt = rebuildFactored selected factoredTerm 0 False values
+       in if rebuilt == values
+            then Nothing
+            else Just (reducePlus rebuilt)
+ where
+  decomposed = map decomposeAdditiveFactors values
+  uniqueFactors = foldl' retainUnique [] (concatMap snd decomposed)
+  candidates =
+    [ let indices =
+              [ index
+              | (index, (_, factors)) <- zip [0 ..] decomposed
+              , factor `elem` factors
+              ]
+          common
+            | length indices < 2 = []
+            | otherwise =
+                commonFactorList
+                  [ factors
+                  | (index, (_, factors)) <- zip [0 ..] decomposed
+                  , index `elem` indices
+                  ]
+       in (indices, common)
+    | factor <- uniqueFactors
+    ]
+  bestCandidate = foldl' chooseBetter ([], []) candidates
+
+  retainUnique retained value
+    | value `elem` retained = retained
+    | otherwise = retained <> [value]
+
+  chooseBetter current candidate
+    | candidateScore candidate > candidateScore current = candidate
+    | otherwise = current
+  candidateScore (indices, factors) = (length indices, length factors)
+
+decomposeAdditiveFactors :: Expr -> (Expr, [Expr])
+decomposeAdditiveFactors expression
+  | isExplicitNumberAtom expression = (expression, [])
+decomposeAdditiveFactors (Call (Symbol timesHead) factors)
+  | systemHeadIn ["Times"] timesHead =
+      ( reduceTimes (filter isExplicitNumberAtom factors)
+      , filter (not . isExplicitNumberAtom) factors
+      )
+decomposeAdditiveFactors expression = (Integer 1, [expression])
+
+isExplicitNumberAtom :: Expr -> Bool
+isExplicitNumberAtom = \case
+  Integer _ -> True
+  Rational _ _ -> True
+  Real _ -> True
+  SpecialReal _ -> True
+  Complex _ _ -> True
+  _ -> False
+
+commonFactorList :: [[Expr]] -> [Expr]
+commonFactorList [] = []
+commonFactorList (first : remaining) =
+  foldl' intersectFactorLists first remaining
+
+intersectFactorLists :: [Expr] -> [Expr] -> [Expr]
+intersectFactorLists [] _ = []
+intersectFactorLists (factor : rest) available
+  | factor `elem` available =
+      factor : intersectFactorLists rest (List.delete factor available)
+  | otherwise = intersectFactorLists rest available
+
+removeCommonFactors :: [Expr] -> [Expr] -> [Expr]
+removeCommonFactors = foldl' (flip List.delete)
+
+rebuildFactored
+  :: Set.Set Int
+  -> Expr
+  -> Int
+  -> Bool
+  -> [Expr]
+  -> [Expr]
+rebuildFactored _ _ _ _ [] = []
+rebuildFactored selected replacement index inserted (value : rest)
+  | Set.member index selected =
+      (if inserted then id else (replacement :))
+        (rebuildFactored selected replacement (index + 1) True rest)
+  | otherwise =
+      value
+        : rebuildFactored selected replacement (index + 1) inserted rest
 
 reduceTimes :: [Expr] -> Expr
 reduceTimes originalValues =

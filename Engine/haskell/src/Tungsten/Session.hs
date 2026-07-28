@@ -1296,6 +1296,7 @@ qualifiedAliasDispatchHeads =
   , "Min"
   , "MissingQ"
   , "Mod"
+  , "MonomialList"
   , "ModularInverse"
   , "MoebiusMu"
   , "Multinomial"
@@ -1326,6 +1327,7 @@ qualifiedAliasDispatchHeads =
   , "PolynomialQ"
   , "PolynomialGCD"
   , "PolynomialLCM"
+  , "PolynomialMod"
   , "PolynomialQuotient"
   , "PolynomialRemainder"
   , "PrimitiveRoot"
@@ -2949,6 +2951,13 @@ reduceSessionEvaluatedCall depth session = \case
     Just $ do
       parsed <- liftPureEvaluation session (reduceEvaluatedCall expression)
       evaluateSessionAt (depth + 1) session parsed
+  expression@(Call (Symbol normalizationHead) _)
+    | normalizationHead `elem` ["MonomialList", "PolynomialMod"] ->
+    Just $ do
+      reduced <- liftPureEvaluation session (reduceEvaluatedCall expression)
+      if reduced == expression
+        then Right (reduced, session)
+        else evaluateSessionAt (depth + 1) session reduced
   Call (Symbol "Symbol") values ->
     Just (evaluateSessionSymbol session values)
   Call (Symbol "SymbolName") values ->

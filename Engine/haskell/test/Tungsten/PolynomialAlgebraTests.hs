@@ -27,6 +27,22 @@ valueCases =
     , "Variables[(x+y)^2+3z]"
     , "List[x, y, z]"
     )
+  , ( "monomial lists and Gaussian coefficients"
+    , "{MonomialList[x y+x^2+3,{x,y}],MonomialList[x^2+I x+1,x]}"
+    , "List[List[Power[x, 2], Times[x, y], 3], List[Power[x, 2], Times[Complex[0, 1], x], 1]]"
+    )
+  , ( "monomial orders"
+    , "{MonomialList[x^2+x y+y^2+x+y+1,{x,y},DegreeLexicographic],MonomialList[x^2+x y+y^2+x+y+1,NegativeLexicographic],MonomialList[x^2+x y+y^2+x+y+1,{x,y},NegativeDegreeReverseLexicographic]}"
+    , "List[List[Power[x, 2], Times[x, y], Power[y, 2], x, y, 1], List[1, y, Power[y, 2], x, Times[x, y], Power[x, 2]], List[1, y, x, Power[y, 2], Times[x, y], Power[x, 2]]]"
+    )
+  , ( "monomial coefficient grouping and zero conventions"
+    , "{MonomialList[x y+x z+y+z,x],MonomialList[x y+x z+y+z,{}],MonomialList[x+y,{}],MonomialList[0],MonomialList[0,x],MonomialList[3,x]}"
+    , "List[List[Times[x, Plus[y, z]], Plus[y, z]], List[Times[Plus[1, x], Plus[y, z]]], List[Plus[x, y]], List[], List[0], List[3]]"
+    )
+  , ( "qualified monomial dispatch"
+    , "{System`MonomialList[x^2+x,x],Global`MonomialList[x^2+x,x]}"
+    , "List[List[Power[x, 2], x], Global`MonomialList[Plus[x, Power[x, 2]], x]]"
+    )
   , ( "single coefficients"
     , "{Coefficient[2x^2 y+3x y+y,x,1],Coefficient[x^2y^2+3x y+1,x y,2]}"
     , "List[Times[3, y], 1]"
@@ -58,6 +74,18 @@ valueCases =
   , ( "polynomial gcd lcm and division"
     , "{PolynomialGCD[x^2-1,x^2-x],PolynomialLCM[x-1,x+1],PolynomialQuotient[x^3-1,x-1,x],PolynomialRemainder[x^3-1,x-1,x]}"
     , "List[Plus[-1, x], Times[Plus[-1, x], Plus[1, x]], Plus[1, x, Power[x, 2]], 0]"
+    )
+  , ( "polynomial modular coefficients"
+    , "{PolynomialMod[x^2+2x+3,5],PolynomialMod[-x^2-2x-3,5],PolynomialMod[x/2+2/3,5],PolynomialMod[x y+7x+12,5],PolynomialMod[3,5]}"
+    , "List[Plus[3, Power[x, 2], Times[2, x]], Plus[2, Times[3, x], Times[4, Power[x, 2]]], Plus[4, Times[3, x]], Plus[2, Times[x, Plus[2, y]]], 3]"
+    )
+  , ( "polynomial modular domain and qualification boundaries"
+    , "{PolynomialMod[1/5+x,5],PolynomialMod[x+I,5],PolynomialMod[3,1],System`PolynomialMod[x+7,5],Global`PolynomialMod[x+7,5]}"
+    , "List[PolynomialMod[Plus[Rational[1, 5], x], 5], PolynomialMod[Plus[Complex[0, 1], x], 5], PolynomialMod[3, 1], Plus[2, x], Global`PolynomialMod[Plus[7, x], 5]]"
+    )
+  , ( "best-subset additive factoring with real and complex coefficients"
+    , "{2x+x y+2,I x+I y+x y,(1+I)x+(1+I)y}"
+    , "List[Plus[2, Times[x, Plus[2, y]]], Plus[Times[Complex[0, 1], y], Times[x, Plus[Complex[0, 1], y]]], Plus[Times[Complex[1, 1], x], Times[Complex[1, 1], y]]]"
     )
   , ( "qualified algebra dispatch"
     , "{System`Expand[(x+1)^2],System`Coefficient[x^2+2x+1,x],System`PolynomialQ[x^2,x],System`Cancel[(x^2-1)/(x-1)]}"
