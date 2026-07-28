@@ -1061,6 +1061,10 @@ checkEvaluatorErrors = do
     assertLeft
       "reject incompatible pure Listable argument lengths"
       (parseInputForm "Re[{1,2},{3}]" >>= mapLeftEvaluation . evaluate)
+  fifteenth <-
+    assertLeft
+      "reject unequal Thread argument lengths"
+      (parseInputForm "Thread[f[{a,b},{c}]]" >>= mapLeftEvaluation . evaluate)
   pure
     ( and
         [ first
@@ -1077,6 +1081,7 @@ checkEvaluatorErrors = do
         , twelfth
         , thirteenth
         , fourteenth
+        , fifteenth
         ]
     )
  where
@@ -1308,6 +1313,7 @@ checkEvaluationSession = do
   let cases =
         [ ("immediate assignment", "x = 1 + 2; x^3", "27")
         , ("listable complex projections evaluate each element once", "c=0; f[x_]:=(c++;x); {Re[{f[1+I],f[2+3I]}],c}", "List[List[1, 2], 2]")
+        , ("thread constructs callback calls without eager reentry", "ClearAll[f,y];y=0;f[x_?AtomQ]:=(y=y+1;x);{Thread[f[{a,b}]],y}", "List[List[f[a], f[b]], 0]")
         , ( "failure and missing predicates preserve the Python value domain"
           , "{FailureQ[Failure[\"x\", <||>]], FailureQ[$Failed], FailureQ[$Canceled], FailureQ[$Aborted], FailureQ[Missing[\"x\"]], MissingQ[Missing[\"x\"]], MissingQ[$Failed], System`FailureQ[System`Failure[\"x\", <||>]]}"
           , "List[True, True, True, True, False, True, False, True]"
@@ -1529,6 +1535,8 @@ checkEvaluationSession = do
         , ("downvalue pattern callbacks share one effectful match", "c = 0; q[x_] := (c = c + 1; x > 1); f[x_ /; q[x]] := x; {f[1], f[2], c}", "List[f[1], 2, 2]")
         , ("downvalue PatternTest and Condition callbacks run once", "c = 0; f[(x_?(c = c + 1; IntegerQ)) /; (c = c + 10; True)] := x; {f[1], c}", "List[1, 11]")
         , ("map callbacks thread session state", "y = 0; {Map[Function[x, y = y + 1; x], {a, b}], y}", "List[List[a, b], 2]")
+        , ("thread distributes matching immediate heads", "{Thread[f[{a,b},{c,d}]],Thread[f[h[a,b],c],h],Thread[f[{},c]],Thread[f[a,b]],Thread[a],Thread[Unevaluated[f[{a,b}]]]}", "List[List[f[a, c], f[b, d]], h[f[a, c], f[b, c]], List[], f[a, b], a, List[f[a], f[b]]]")
+        , ("thread preserves exact target heads and qualification boundaries", "{Thread[f[System`List[a,b],c]],Thread[f[{a,b},c],System`List],System`Thread[Unevaluated[f[{a,b}]]],Global`Thread[Unevaluated[f[{a,b}]]]}", "List[f[System`List[a, b], c], f[List[a, b], c], System`Thread[f[List[a, b]]], Global`Thread[Unevaluated[f[List[a, b]]]]]")
         , ("map level specifications", "{Map[f, {a, b}, {0}], Map[f, {a, {b, c}}, {2}], Map[f, {a, {b, c}}, {1, 2}]}", "List[f[List[a, b]], List[a, List[f[b], f[c]]], List[f[a], f[List[f[b], f[c]]]]]")
         , ("apply level specifications", "{Apply[f, {a, b}, {0}], Apply[f, {a, {b, c}}, {2}], Apply[f, {a, {b, c}}, {1, 2}]}", "List[f[a, b], List[a, List[b, c]], List[a, f[b, c]]]")
         , ("map normalizes generated Nothing", "Map[Nothing &, {a, b}]", "List[]")
@@ -1913,6 +1921,19 @@ checkEvaluationSession = do
           , [ ( "Re::error"
               , "MessageName[Re, \"error\"]"
               , "Re::error: Listable Function arguments have incompatible list lengths."
+              )
+            ]
+          )
+        , ( "thread reports unequal argument lengths and invalid arity"
+          , "{Thread[f[{a,b},{c}]],Thread[],$MessageList}"
+          , "List[Thread[f[List[a, b], List[c]]], Thread[], List[HoldForm[MessageName[Thread, \"error\"]], HoldForm[MessageName[Thread, \"error\"]]]]"
+          , [ ( "Thread::error"
+              , "MessageName[Thread, \"error\"]"
+              , "Thread::error: Thread expects all threaded arguments to have the same length."
+              )
+            , ( "Thread::error"
+              , "MessageName[Thread, \"error\"]"
+              , "Thread::error: Thread expects an expression and an optional thread head."
               )
             ]
           )

@@ -9482,6 +9482,7 @@ stripSessionTransparentUnevaluatedArguments expressionHead
       , "Plus"
       , "RealValuedNumberQ"
       , "RightComposition"
+      , "Thread"
       ]
       expressionHead =
       map stripSessionDirectUnevaluated

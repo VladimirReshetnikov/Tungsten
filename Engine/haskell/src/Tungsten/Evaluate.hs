@@ -181,7 +181,11 @@ evaluateAt depth expression
                   )
           _ -> do
             evaluatedArguments <- traverse (evaluateAt (depth + 1)) arguments'
-            let evaluatedCall = normalizeEvaluatedCall evaluatedHead evaluatedArguments
+            let transparentArguments =
+                  stripPureTransparentUnevaluatedArguments
+                    evaluatedHead
+                    evaluatedArguments
+                evaluatedCall = normalizeEvaluatedCall evaluatedHead transparentArguments
             threaded <- threadPureListableCall depth evaluatedCall
             case threaded of
               Just result -> Right result
@@ -209,6 +213,32 @@ threadPureListableCall depth (Call expressionHead values)
               argumentRows
           Right (Just (evaluatedList results))
 threadPureListableCall _ _ = Right Nothing
+
+stripPureTransparentUnevaluatedArguments :: Expr -> [Expr] -> [Expr]
+stripPureTransparentUnevaluatedArguments expressionHead
+  | pureHeadExpressionIsAny
+      [ "Composition"
+      , "ExactNumberQ"
+      , "InexactNumberQ"
+      , "MachineIntegerQ"
+      , "MachineNumberQ"
+      , "NumberQ"
+      , "Plus"
+      , "RealValuedNumberQ"
+      , "RightComposition"
+      , "Thread"
+      ]
+      expressionHead =
+      map stripDirectUnevaluated
+  | otherwise = id
+ where
+  pureHeadExpressionIsAny expected = \case
+    Symbol actual -> systemHeadIn expected actual
+    _ -> False
+  stripDirectUnevaluated = \case
+    Call (Symbol unevaluatedHead) [value]
+      | systemHeadIn ["Unevaluated"] unevaluatedHead -> value
+    value -> value
 
 staticSystemHeadHasAttribute :: SymbolAttribute -> Expr -> Bool
 staticSystemHeadHasAttribute attribute (Symbol name) =
@@ -598,7 +628,8 @@ pureReducerDispatchView expression = case expression of
   Call (Symbol originalHead) values
     | isSystemSymbol originalHead
     , Just shortName <- normalizeSystemSymbolName originalHead
-    , originalHead /= shortName ->
+    , originalHead /= shortName
+    , shortName /= "Thread" ->
         let barrierName = pureReducerBarrierName shortName expression
             dispatchedValues =
               map (shieldPureReducerArgument shortName barrierName) values
@@ -690,7 +721,7 @@ restorePureQualifiedOperatorHead qualifiedName shortName = \case
 
 preservesFinalReducerResult :: Expr -> Bool
 preservesFinalReducerResult = \case
-  Symbol headName -> systemHeadIn ["Sqrt", "Level"] headName
+  Symbol headName -> systemHeadIn ["Sqrt", "Level", "Thread"] headName
   _ -> False
 
 -- | Reduce one call whose head and arguments have already been evaluated and
@@ -961,6 +992,7 @@ reduceBuiltin headName values = case headName of
   "Insert" -> reduceInsert values
   "ReplacePart" -> Right (reduceReplacePart values)
   "Map" -> Right (reduceMap values)
+  "Thread" -> reduceThread values
   "MapAll" -> reduceMapAll values
   "MapApply" -> reduceMapApply values
   "MapAt" -> Right (reduceMapAt values)
@@ -10595,6 +10627,45 @@ reduceMap [function, association]
 reduceMap [function, Call expressionHead values] =
   Call expressionHead [Call function [value] | value <- values]
 reduceMap values = Call (Symbol "Map") values
+
+reduceThread :: [Expr] -> Either EvaluationError Expr
+reduceThread = \case
+  [subject] -> threadOverHead subject (Symbol "List")
+  [subject, threadHead] -> threadOverHead subject threadHead
+  _ -> Left (EvaluationError "Thread expects an expression and an optional thread head.")
+
+threadOverHead :: Expr -> Expr -> Either EvaluationError Expr
+threadOverHead subject@(Call expressionHead values) threadHead =
+  case threadedArguments of
+    [] -> Right subject
+    firstElements : remaining
+      | all ((== length firstElements) . length) remaining ->
+          Right
+            ( Call
+                threadHead
+                [ Call
+                    expressionHead
+                    [ case value of
+                        Call argumentHead elements
+                          | argumentHead == threadHead -> elements !! index
+                        scalar -> scalar
+                    | value <- values
+                    ]
+                | index <- [0 .. length firstElements - 1]
+                ]
+            )
+      | otherwise ->
+          Left
+            ( EvaluationError
+                "Thread expects all threaded arguments to have the same length."
+            )
+ where
+  threadedArguments =
+    [ elements
+    | Call argumentHead elements <- values
+    , argumentHead == threadHead
+    ]
+threadOverHead subject _ = Right subject
 
 reduceMapAll :: [Expr] -> Either EvaluationError Expr
 reduceMapAll values =

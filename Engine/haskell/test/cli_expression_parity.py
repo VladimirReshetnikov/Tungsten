@@ -96,6 +96,23 @@ CASES = (
         0,
     ),
     (
+        "structural Thread and qualification boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f,y];y=0;f[x_?AtomQ]:=(y=y+1;x);"
+            "{Thread[f[{a,b}]],y,Thread[f[h[a,b],c],h],"
+            "Thread[Unevaluated[g[{a,b}]]],"
+            "System`Thread[Unevaluated[g[{a,b}]]],"
+            "Global`Thread[Unevaluated[g[{a,b}]]],"
+            "Thread[g[{a,b},{c}]],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "flat one-identity downvalue",
         (
             "expr",
