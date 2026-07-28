@@ -6,15 +6,46 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import Tungsten.Evaluate (EvaluationError (..), evaluate)
-import Tungsten.Expression (Expr, fullForm)
+import Tungsten.Expression (Expr (..), fullForm, inputForm)
 import Tungsten.Parser (parseInputForm)
 import Tungsten.Session (emptySession, evaluateInSession)
+import qualified Tungsten.TextualForms as TextualForms
 
 checkTextualFormsEvaluator :: IO Bool
 checkTextualFormsEvaluator = do
   values <- traverse checkValue valueCases
   errors <- traverse checkError errorCases
-  pure (and (values <> errors))
+  renderers <- traverse checkRenderer rendererCases
+  standardForms <- traverse checkStandardForm standardFormCases
+  pure (and (values <> errors <> renderers <> standardForms))
+
+rendererCases :: [(Text, Expr, Text)]
+rendererCases =
+  [ ( "named union operator"
+    , Call (Symbol "Union") [Symbol "a", Symbol "b", Symbol "c"]
+    , "a \\[Union] b \\[Union] c"
+    )
+  , ( "named intersection operator"
+    , Call (Symbol "Intersection") [Symbol "a", Symbol "b"]
+    , "a \\[Intersection] b"
+    )
+  , ( "named cross operator"
+    , Call (Symbol "Cross") [Symbol "a", Symbol "b"]
+    , "a \\[Cross] b"
+    )
+  ]
+
+standardFormCases :: [(Text, Text, Text)]
+standardFormCases =
+  [ ( "grouped named-operator RowBox"
+    , "RowBox[{RowBox[{\"(\",RowBox[{\"a\",\"+\",\"b\"}],\")\"}],\"\\\\[CirclePlus]\",\"c\"}]"
+    , "CirclePlus[Plus[a, b], c]"
+    )
+  , ("SubscriptBox", "SubscriptBox[\"x\",\"i\"]", "Subscript[x, i]")
+  , ("SubsuperscriptBox", "SubsuperscriptBox[\"x\",\"i\",\"2\"]", "Subsuperscript[x, i, 2]")
+  , ("OverscriptBox string operand", "OverscriptBox[\"x\",\"~\"]", "Overscript[x, \"~\"]")
+  , ("UnderoverscriptBox", "UnderoverscriptBox[\"x\",\"a\",\"b\"]", "Underoverscript[x, a, b]")
+  ]
 
 valueCases :: [(Text, Text, Text)]
 valueCases =
@@ -107,6 +138,22 @@ checkError (label, source, expected) = case parseInputForm source of
       | message == expected -> pure True
       | otherwise -> failCheck label ("expected error " <> expected <> ", got " <> message)
     Right result -> failCheck label ("expected an evaluation error, got " <> fullForm result)
+
+checkRenderer :: (Text, Expr, Text) -> IO Bool
+checkRenderer (label, expression, expected)
+  | actual == expected = pure True
+  | otherwise = failCheck label ("expected " <> expected <> ", got " <> actual)
+ where
+  actual = inputForm expression
+
+checkStandardForm :: (Text, Text, Text) -> IO Bool
+checkStandardForm (label, source, expected) = case TextualForms.parseStandardFormSource source of
+  Left message -> failCheck label ("parse error: " <> message)
+  Right expression ->
+    let actual = fullForm expression
+     in if actual == expected
+          then pure True
+          else failCheck label ("expected " <> expected <> ", got " <> actual)
 
 failCheck :: Text -> Text -> IO Bool
 failCheck label detail = do

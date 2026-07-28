@@ -20,7 +20,7 @@ import qualified Data.ByteString as BS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Set as Set
-import Tungsten.NamedCharacters (encodePrintableAscii)
+import Tungsten.NamedCharacters (encodePrintableAscii, namedInfixOperatorEscape)
 import Tungsten.WolframString (wlString)
 
 -- | The kernel-free expression model.  Every constructor is immutable, and
@@ -380,7 +380,7 @@ escapedInfixInputOperator name = case name of
   "CirclePlus" -> Just ("\\[CirclePlus]", 125)
   "CircleTimes" -> Just ("\\[CircleTimes]", 142)
   "Diamond" -> Just ("\\[Diamond]", 144)
-  _ -> Nothing
+  _ -> fmap (\operator -> (operator, precedenceCompare)) (namedInfixOperatorEscape name)
 
 formatBlank :: Text -> [Expr] -> Maybe Text
 formatBlank headName values = do

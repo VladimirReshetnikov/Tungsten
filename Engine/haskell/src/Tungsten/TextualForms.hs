@@ -14,6 +14,7 @@ module Tungsten.TextualForms
   , importStringExpr
   , makeBoxesExpr
   , makeExpressionExpr
+  , parseStandardFormSource
   , stripBoxesExpr
   , syntaxLengthExpr
   , syntaxQExpr
@@ -62,6 +63,16 @@ import Tungsten.SystemSymbols (normalizeSystemSymbolName)
 import Tungsten.WolframString (wlString)
 
 type Conversion = Either Text Expr
+
+-- | Parse StandardForm source and interpret box constructors when the parsed
+-- tree is a box expression.  Plain StandardForm text shares InputForm's
+-- surface grammar; boxes add a semantic projection after that syntax pass.
+parseStandardFormSource :: Text -> Either Text Expr
+parseStandardFormSource source = case parseInputForm source of
+  Left parseError -> Left (parseErrorMessage parseError)
+  Right expression
+    | looksLikeBoxes expression -> interpretBoxes expression
+    | otherwise -> Right expression
 
 shortSystemName :: Text -> Text
 shortSystemName name = maybe name id (normalizeSystemSymbolName name)
@@ -1089,10 +1100,30 @@ interpretBoxes expression = case expression of
       , Just parsed <- interpretNamedRow rowItems -> Right parsed
     (wrapper, first : _)
       | wrapper `elem` ["AdjustmentBox", "BoxData", "FormBox", "FrameBox", "PaneBox", "StyleBox", "TagBox", "TooltipBox"] -> interpretBoxes first
+    ("SubscriptBox", arguments') -> interpretScriptBox "Subscript" 2 arguments'
+    ("SubsuperscriptBox", arguments') -> interpretScriptBox "Subsuperscript" 3 arguments'
+    ("OverscriptBox", arguments') -> interpretScriptBox "Overscript" 2 arguments'
+    ("UnderscriptBox", arguments') -> interpretScriptBox "Underscript" 2 arguments'
+    ("UnderoverscriptBox", arguments') -> interpretScriptBox "Underoverscript" 3 arguments'
     _ -> boxText expression >>= firstText "box parse failure" . parseInputForm
   _ -> Left "unsupported box expression"
  where
   firstText message = either (const (Left message)) Right
+
+interpretScriptBox :: Text -> Int -> [Expr] -> Either Text Expr
+interpretScriptBox headName arity values
+  | length values < arity = Left (headName <> " box has too few operands")
+  | otherwise = Call (Symbol headName) <$> traverse interpretBoxOperand (take arity values)
+
+interpretBoxOperand :: Expr -> Either Text Expr
+interpretBoxOperand (String source)
+  | T.null (T.strip source) = Right (String source)
+  | otherwise = case parseInputForm (T.strip source) of
+      Right expression -> Right expression
+      Left _ -> Right (String source)
+interpretBoxOperand expression
+  | looksLikeBoxes expression = interpretBoxes expression
+  | otherwise = Right expression
 
 interpretNamedRow :: [Expr] -> Maybe Expr
 interpretNamedRow values = firstMatch operators

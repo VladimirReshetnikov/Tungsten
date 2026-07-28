@@ -9,6 +9,7 @@ module Tungsten.NamedCharacters
   , encodePrintableAscii
   , symbolAliasForCharacter
   , isNamedOperatorCharacter
+  , namedInfixOperatorEscape
   , namedOperatorSpellings
   ) where
 
@@ -105,6 +106,18 @@ namedOperatorSpellings normalized =
       , spelling <- ["\\[" <> name <> "]", maybe "" T.singleton (namedCharacter name)]
       , not (T.null spelling)
       ]
+
+-- | Return the canonical escaped spelling for a named infix operator head.
+-- Keeping this projection beside the parser's operator catalog prevents the
+-- renderer and lexer from silently drifting to different named-character
+-- subsets.
+namedInfixOperatorEscape :: Text -> Maybe Text
+namedInfixOperatorEscape name
+  | Set.member name infixOperatorNameSet = Just ("\\[" <> name <> "]")
+  | otherwise = Nothing
+
+infixOperatorNameSet :: Set Text
+infixOperatorNameSet = Set.fromList infixOperatorNames
 
 tokenNames :: [Text]
 tokenNames = map fst tokenAliases

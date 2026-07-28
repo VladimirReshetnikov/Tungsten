@@ -63,6 +63,7 @@ import Tungsten.Session
   )
 import Tungsten.WolframString
 import Tungsten.Parser (parseErrorMessage, parseFullForm, parseInputForm)
+import qualified Tungsten.TextualForms as TextualForms
 
 -- | JSON numbers retain their source lexeme.  This avoids silently rounding
 -- arbitrary integers or decimal reals before the evaluator sees them.
@@ -469,6 +470,8 @@ requestExpression request = case protocolExpression request of
       "inputform" -> parseWith parseInputForm source
       "full" -> parseWith parseFullForm source
       "fullform" -> parseWith parseFullForm source
+      "standard" -> TextualForms.parseStandardFormSource source
+      "standardform" -> TextualForms.parseStandardFormSource source
       other -> Left ("unsupported expression form: " <> other)
  where
   normalizedForm = T.toLower (T.strip (maybe "input" id (protocolForm request)))

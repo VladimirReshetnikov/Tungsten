@@ -61,6 +61,7 @@ import Tungsten.Json
 import Tungsten.Kernel
 import Tungsten.Notebook
 import Tungsten.Parser
+import qualified Tungsten.TextualForms as TextualForms
 import Tungsten.WolframString (parseWolframStringLiteral, wlString)
 
 data CorpusFile = CorpusFile
@@ -832,7 +833,8 @@ parseExpression sourceForm source = case T.toLower (T.strip sourceForm) of
   "inputform" -> mapParseError (parseInputForm source)
   "full" -> mapParseError (parseFullForm source)
   "fullform" -> mapParseError (parseFullForm source)
-  "standard" -> Left "StandardForm parsing is not implemented by the Haskell parser"
+  "standard" -> TextualForms.parseStandardFormSource source
+  "standardform" -> TextualForms.parseStandardFormSource source
   other -> Left ("unsupported parser corpus source form: " <> other)
  where
   mapParseError = either (Left . parseErrorMessage) Right
