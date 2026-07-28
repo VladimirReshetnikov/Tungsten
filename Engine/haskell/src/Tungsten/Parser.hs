@@ -329,7 +329,7 @@ timesParser :: Parser Expr
 timesParser = do
   firstFactor <- unaryParser
   operations <- many timesTail
-  pure (foldl' applyTimes firstFactor operations)
+  pure (fst (foldl' applyTimes (firstFactor, False) operations))
  where
   timesTail = choice
     [ (,) Multiply <$> (operator "*" "*^*=" *> unaryParser)
@@ -338,8 +338,13 @@ timesParser = do
         notFollowedBy (char '-')
         (,) Multiply <$> powerParser
     ]
-  applyTimes lhs (Multiply, rhs) = flatCall2 "Times" lhs rhs
-  applyTimes lhs (Divide, rhs) = divideExpression lhs rhs
+  applyTimes (lhs, isUngroupedTimes) (Multiply, rhs) =
+    case (isUngroupedTimes, lhs) of
+      (True, Call (Symbol "Times") values) ->
+        (Call (Symbol "Times") (values <> [rhs]), True)
+      _ -> (Call (Symbol "Times") [lhs, rhs], True)
+  applyTimes (lhs, isUngroupedTimes) (Divide, rhs) =
+    divideExpression isUngroupedTimes lhs rhs
 
 data TimesOperation = Multiply | Divide
 
@@ -567,13 +572,20 @@ negateExpression expression = case expression of
     _ -> "-" <> source
   _ -> Call (Symbol "Times") [Integer (-1), expression]
 
-divideExpression :: Expr -> Expr -> Expr
-divideExpression (Integer numerator) (Integer denominator)
-  | denominator /= 0 = either (const fallback) id (rational numerator denominator)
- where
-  fallback = Call (Symbol "Times") [Integer numerator, Call (Symbol "Power") [Integer denominator, Integer (-1)]]
-divideExpression lhs rhs =
-  flatCall2 "Times" lhs (Call (Symbol "Power") [rhs, Integer (-1)])
+divideExpression :: Bool -> Expr -> Expr -> (Expr, Bool)
+divideExpression isUngroupedTimes lhs rhs =
+  case (isUngroupedTimes, lhs) of
+    (True, Call (Symbol "Times") values@(_ : _)) ->
+      let reciprocal = Call (Symbol "Power") [rhs, Integer (-1)]
+          prefix = init values
+          dividedFactor = Call (Symbol "Times") [last values, reciprocal]
+       in (Call (Symbol "Times") (prefix <> [dividedFactor]), True)
+    _ ->
+      ( Call
+          (Symbol "Times")
+          [lhs, Call (Symbol "Power") [rhs, Integer (-1)]]
+      , False
+      )
 
 expressionParser :: Parser Expr
 expressionParser = do
@@ -590,8 +602,17 @@ canonicalCall :: Expr -> [Expr] -> Parser Expr
 canonicalCall (Symbol "Rational") [Integer numerator, Integer denominator] =
   either (fail . T.unpack . expressionErrorMessage) pure (rational numerator denominator)
 canonicalCall (Symbol "Complex") [realPart, imaginaryPart] =
-  pure (Complex realPart imaginaryPart)
+  pure (Complex (canonicalComplexPart realPart) (canonicalComplexPart imaginaryPart))
 canonicalCall expressionHead arguments' = pure (Call expressionHead arguments')
+
+canonicalComplexPart :: Expr -> Expr
+canonicalComplexPart expression = case expression of
+  Call
+    (Symbol "Times")
+    [Integer numerator, Call (Symbol "Power") [Integer denominator, Integer (-1)]]
+      | denominator /= 0 ->
+          either (const expression) id (rational numerator denominator)
+  _ -> expression
 
 argumentsParser :: Parser [Expr]
 argumentsParser =

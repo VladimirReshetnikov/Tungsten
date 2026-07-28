@@ -556,7 +556,9 @@ checkInputFormParser = do
   let cases =
         [ ("implicit multiplication and power", "1 + 2 x^3", "Plus[1, Times[2, Power[x, 3]]]")
         , ("numeric adjacency", "2x", "Times[2, x]")
-        , ("exact division", "1/6 + 1/3", "Plus[Rational[1, 6], Rational[1, 3]]")
+        , ("structural exact division", "1/2 + 1/3", "Plus[Times[1, Power[2, -1]], Times[1, Power[3, -1]]]")
+        , ("grouped exact division product", "(2/3)(9/4)", "Times[Times[2, Power[3, -1]], Times[9, Power[4, -1]]]")
+        , ("structural exact division power", "(1/2)^-2", "Power[Times[1, Power[2, -1]], -2]")
         , ("right associative power", "a^b^c", "Power[a, Power[b, c]]")
         , ("unary minus precedence", "-x^2", "Times[-1, Power[x, 2]]")
         , ("lists and calls", "f[{a, b}, g[x]]", "f[List[a, b], g[x]]")
@@ -621,7 +623,9 @@ checkEvaluator :: IO Bool
 checkEvaluator = do
   let inputCases =
         [ ("integer arithmetic", "1 + 2*3", "7")
-        , ("exact rational arithmetic", "1/6 + 1/3", "Rational[1, 2]")
+        , ("exact rational sum", "1/2 + 1/3", "Rational[5, 6]")
+        , ("exact rational product", "(2/3)(9/4)", "Rational[3, 2]")
+        , ("exact rational reciprocal power", "(1/2)^-2", "4")
         , ("scalar floor and ceiling", "{Floor[3.7], Floor[-3.7], Ceiling[3.2], Ceiling[-3.2], Floor[7, 3], Floor[7, -3], Ceiling[7, 3]}", "List[3, -4, 4, -3, 6, 9, 9]")
         , ("exact rational rounding", "{Floor[7/2], Ceiling[7/2], Floor[7/2, 2/3], Ceiling[7/2, 2/3], Round[7/2, 2/3]}", "List[3, 4, Rational[10, 3], 4, Rational[10, 3]]")
         , ("banker rounding", "{Round[3.5], Round[2.5], Round[7/2], Round[5/2], Round[5, 2], Round[7, 3], Round[-2.5], Round[-3.5]}", "List[4, 2, 4, 2, 4, 6, -2, -4]")
@@ -3798,7 +3802,7 @@ checkFullForms = do
 checkInputForms :: IO Bool
 checkInputForms = do
   let cases =
-        [ ("list and association", "{a, <|x -> 1/2|>}", "{a, <|x -> 1/2|>}")
+        [ ("list and association", "{a, <|x -> 1/2|>}", "{a, <|x -> 1 / 2|>}")
         , ("operator precedence", "(a + b) * c^(-2)", "(a + b) * c^(-2)")
         , ("singleton negative Times", "Times[-1]", "-Times[]")
         , ("slots", "{#, #2, ##, ##3}", "{#, #2, ##, ##3}")
