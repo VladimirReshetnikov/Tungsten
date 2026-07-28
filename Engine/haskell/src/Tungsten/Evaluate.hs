@@ -735,6 +735,8 @@ reduceBuiltin :: Text -> [Expr] -> Either EvaluationError Expr
 reduceBuiltin headName values = case headName of
   "Rational" -> Right (reduceRationalConstructor values)
   "Complex" -> Right (reduceComplexConstructor values)
+  "Overflow" -> Right (reduceSpecialRealConstructor OverflowReal values)
+  "Underflow" -> Right (reduceSpecialRealConstructor UnderflowReal values)
   "Re" -> Right (reduceComplexComponent "Re" values)
   "Im" -> Right (reduceComplexComponent "Im" values)
   "ReIm" -> Right (reduceReIm values)
@@ -1364,6 +1366,8 @@ argFromComponents realPart imaginaryPart = do
           realValue <- explicitRealDouble realPart
           imaginaryValue <- explicitRealDouble imaginaryPart
           pure (Real (formatMachineReal (pythonAtan2 imaginaryValue realValue)))
+      | isSpecialRealValue realPart || isSpecialRealValue imaginaryPart ->
+          Just (Call (Symbol "ArcTan") [realPart, imaginaryPart])
       | containsInexactReal realPart || containsInexactReal imaginaryPart -> Nothing
       | equalExplicitMagnitude realPart imaginaryPart ->
           Just
@@ -1419,12 +1423,20 @@ reduceRationalConstructor values = case values of
     | otherwise -> fromExact (normalizeExact numerator denominator)
   _ -> Call (Symbol "Rational") values
 
+reduceSpecialRealConstructor :: SpecialRealKind -> [Expr] -> Expr
+reduceSpecialRealConstructor kind = \case
+  [] -> SpecialReal kind
+  values -> Call (Symbol (specialRealName kind)) values
+
 reduceComplexConstructor :: [Expr] -> Expr
 reduceComplexConstructor values = case values of
   [realPart, imaginaryPart]
-    | isExplicitReal realPart
-    , isExplicitReal imaginaryPart -> makeComplex realPart imaginaryPart
+    | isRealNumberAtom realPart
+    , isRealNumberAtom imaginaryPart -> makeComplex realPart imaginaryPart
   _ -> Call (Symbol "Complex") values
+
+isRealNumberAtom :: Expr -> Bool
+isRealNumberAtom value = isExplicitReal value || isSpecialRealValue value
 
 isMachineReal :: Expr -> Bool
 isMachineReal (Real source) = case parseRealInfo source of
@@ -5411,6 +5423,7 @@ numericKindRank :: Expr -> Int
 numericKindRank Integer {} = 0
 numericKindRank Rational {} = 1
 numericKindRank Real {} = 2
+numericKindRank SpecialReal {} = 2
 numericKindRank Complex {} = 3
 numericKindRank Root {} = 4
 numericKindRank _ = 5
@@ -5420,6 +5433,7 @@ expressionKindRank expression = case expression of
   Integer {} -> 0
   Rational {} -> 0
   Real {} -> 0
+  SpecialReal {} -> 0
   Complex {} -> 0
   Root {} -> 0
   String {} -> 1
@@ -11691,6 +11705,7 @@ numericValueReality = \case
   Integer {} -> Just True
   Rational {} -> Just True
   Real {} -> Just True
+  SpecialReal {} -> Just True
   Complex {} -> Just False
   rootValue@Root {} -> Just (rootValueIsReal rootValue)
   Symbol name -> Map.lookup name numericConstantReality
@@ -11883,8 +11898,7 @@ containsInexactReal (Call _ values) = any containsInexactReal values
 containsInexactReal _ = False
 
 isSpecialRealValue :: Expr -> Bool
-isSpecialRealValue (Call (Symbol headName) []) =
-  systemHeadIn ["Overflow", "Underflow"] headName
+isSpecialRealValue SpecialReal {} = True
 isSpecialRealValue _ = False
 
 rootValueIsReal :: Expr -> Bool

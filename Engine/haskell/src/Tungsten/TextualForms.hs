@@ -444,7 +444,7 @@ renderTextualForm form expression =
       FortranForm -> cLikeText True expression
       TraditionalForm -> "\\!\\(\\*" <> inputForm (Call (Symbol "FormBox") [makeBoxes TraditionalForm expression, Symbol "TraditionalForm"]) <> "\\)"
       TeXForm -> texText expression
-      MathMLForm -> "<math>\n " <> mathMlText expression <> "\n</math>"
+      MathMLForm -> mathMlFormText False expression
 
 displayWrapper :: Expr -> Maybe (Text, Expr)
 displayWrapper = \case
@@ -463,11 +463,15 @@ renderDisplayWrapper wrapperName payload = case wrapperName of
   "StandardForm" -> textualInputForm payload
   "TraditionalForm" -> renderTextualForm TraditionalForm payload
   "TeXForm" -> texText payload
-  "MathMLForm" -> renderTextualForm MathMLForm payload
+  "MathMLForm" -> mathMlFormText True payload
   "CForm" -> cLikeText False payload
   "FortranForm" -> cLikeText True payload
   "TextForm" -> outputFormText payload
   _ -> inputForm payload
+
+mathMlFormText :: Bool -> Expr -> Text
+mathMlFormText includeFinalNewline expression =
+  "<math>\n " <> mathMlText expression <> "\n</math>" <> if includeFinalNewline then "\n" else ""
 
 textualInputForm :: Expr -> Text
 textualInputForm expression = case expression of
@@ -488,6 +492,7 @@ cLikeText fortran = go
     Rational numerator denominator ->
       "(" <> T.pack (show numerator) <> (if fortran then ".0/" else "/") <> T.pack (show denominator) <> ")"
     Real source -> source
+    SpecialReal kind -> specialRealName kind
     String source -> wlString source
     Call (Symbol name) values -> case (shortSystemName name, values) of
       ("Plus", operands) -> T.intercalate "+" (map go operands)
@@ -504,6 +509,7 @@ texText = \case
   Integer value -> T.pack (show value)
   Rational numerator denominator -> "\\frac{" <> T.pack (show numerator) <> "}{" <> T.pack (show denominator) <> "}"
   Real source -> source
+  SpecialReal kind -> specialRealName kind
   String source -> "\\text{" <> source <> "}"
   Call (Symbol name) values -> case (shortSystemName name, values) of
     (headName, operands)
@@ -533,6 +539,7 @@ mathMlText = \case
   Rational numerator denominator ->
     "<mfrac><mn>" <> T.pack (show numerator) <> "</mn><mn>" <> T.pack (show denominator) <> "</mn></mfrac>"
   Real source -> "<mn>" <> xmlEscape source <> "</mn>"
+  SpecialReal kind -> "<mi>" <> specialRealName kind <> "</mi>"
   String source -> "<mtext>" <> xmlEscape source <> "</mtext>"
   Call (Symbol name) values -> case (shortSystemName name, values) of
     (headName, operands)
@@ -566,6 +573,7 @@ traditionalPlusArguments values =
   isNumericAtom Integer {} = True
   isNumericAtom Rational {} = True
   isNumericAtom Real {} = True
+  isNumericAtom SpecialReal {} = True
   isNumericAtom _ = False
 
 namedInfixOperator :: Text -> Maybe (Text, Text, Text)
@@ -609,6 +617,7 @@ makeStandardBoxes expression = case displayWrapper expression of
     Rational numerator denominator ->
       Call (Symbol "FractionBox") [String (T.pack (show numerator)), String (T.pack (show denominator))]
     Real source -> String source
+    SpecialReal kind -> makeStandardBoxes (Call (Symbol (specialRealName kind)) [])
     Complex realPart imaginaryPart -> makeStandardBoxes (Call (Symbol "Complex") [realPart, imaginaryPart])
     String source -> String (wlString source)
     ByteArray bytes -> makeStandardBoxes (Call (Symbol "ByteArray") [Call (Symbol "List") (map (Integer . fromIntegral) (BS.unpack bytes))])
@@ -626,6 +635,7 @@ makeTraditionalBoxes expression = case expression of
   Rational numerator denominator ->
     Call (Symbol "FractionBox") [makeTraditionalBoxes (Integer numerator), makeTraditionalBoxes (Integer denominator)]
   Real {} -> makeStandardBoxes expression
+  SpecialReal {} -> makeStandardBoxes expression
   String {} -> makeStandardBoxes expression
   ByteArray {} -> makeStandardBoxes expression
   Complex realPart imaginaryPart -> makeTraditionalBoxes (Call (Symbol "Complex") [realPart, imaginaryPart])
@@ -754,6 +764,7 @@ textualInterpretationBox source semantic =
 makeFullFormBoxes :: Expr -> Expr
 makeFullFormBoxes = \case
   Rational numerator denominator -> makeFullFormBoxes (Call (Symbol "Rational") [Integer numerator, Integer denominator])
+  SpecialReal kind -> makeFullFormBoxes (Call (Symbol (specialRealName kind)) [])
   Complex realPart imaginaryPart -> makeFullFormBoxes (Call (Symbol "Complex") [realPart, imaginaryPart])
   ByteArray values -> makeFullFormBoxes (Call (Symbol "ByteArray") [String (base64Encode values)])
   Call expressionHead values -> genericCallBoxes makeFullFormBoxes expressionHead values

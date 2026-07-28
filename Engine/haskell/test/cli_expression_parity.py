@@ -75,6 +75,26 @@ CASES = (
         0,
     ),
     (
+        "special real atoms, contexts, projections, and textual forms",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Head[Overflow[]],AtomQ[Overflow[]],NumberQ[Overflow[]],"
+            "System`Overflow[],Global`Overflow[],Overflow[1],"
+            "Head[Underflow[]],AtomQ[Underflow[]],NumberQ[Underflow[]],"
+            "System`Underflow[],Global`Underflow[],Underflow[1],"
+            "Complex[Overflow[],Underflow[]],"
+            "Arg[Complex[Overflow[],1]],"
+            "ToString[CForm[Overflow[]]],"
+            "ToString[MathMLForm[Underflow[]]],ToBoxes[Overflow[]],"
+            "$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "complex projections and listable threading",
         (
             "expr",

@@ -3,8 +3,10 @@
 -- | Immutable Wolfram expression values and their canonical structural view.
 module Tungsten.Expression
   ( Expr (..)
+  , SpecialRealKind (..)
   , SparseEntry (..)
   , ExpressionError (..)
+  , specialRealName
   , rational
   , root
   , sparseArray
@@ -26,11 +28,21 @@ import Tungsten.WolframString (wlString)
 -- | The kernel-free expression model.  Every constructor is immutable, and
 -- arbitrary-sized 'Integer' values are retained without conversion through a
 -- machine numeric type.
+data SpecialRealKind
+  = OverflowReal
+  | UnderflowReal
+  deriving (Eq, Show)
+
+specialRealName :: SpecialRealKind -> Text
+specialRealName OverflowReal = "Overflow"
+specialRealName UnderflowReal = "Underflow"
+
 data Expr
   = Symbol !Text
   | Integer !Integer
   | Rational !Integer !Integer
   | Real !Text
+  | SpecialReal !SpecialRealKind
   | Complex !Expr !Expr
   | String !Text
   | ByteArray !BS.ByteString
@@ -97,6 +109,7 @@ headExpr expression = case expression of
   Integer _ -> Symbol "Integer"
   Rational _ _ -> Symbol "Rational"
   Real _ -> Symbol "Real"
+  SpecialReal _ -> Symbol "Real"
   Complex _ _ -> Symbol "Complex"
   String _ -> Symbol "String"
   ByteArray _ -> Symbol "ByteArray"
@@ -127,6 +140,7 @@ fullForm expression = case expression of
   Rational numerator denominator ->
     apply "Rational" [T.pack (show numerator), T.pack (show denominator)]
   Real source -> source
+  SpecialReal kind -> apply (specialRealName kind) []
   Complex realPart imaginaryPart ->
     apply "Complex" [fullForm realPart, fullForm imaginaryPart]
   String value -> wlString value
@@ -202,6 +216,7 @@ formatInputExpression expression = case expression of
   Rational numerator denominator ->
     (T.pack (show numerator) <> "/" <> T.pack (show denominator), precedenceTimes)
   Real source -> (source, precedenceAtom)
+  SpecialReal kind -> (apply (specialRealName kind) [], precedenceAtom)
   Complex realPart imaginaryPart -> (formatComplex realPart imaginaryPart, precedencePlus)
   String value -> (wlString value, precedenceAtom)
   ByteArray values ->

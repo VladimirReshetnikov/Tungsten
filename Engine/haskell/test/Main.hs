@@ -699,6 +699,8 @@ checkEvaluator = do
         , ("qualified numeric constructors and structural atoms", "{System`Rational[2,4],Global`Rational[2+2,4],System`Complex[1,2.],Global`Complex[1+1,0],Head[Rational[1,2]],AtomQ[Rational[1,2]],Length[Rational[1,2]]}", "List[Rational[1, 2], Global`Rational[4, 4], Complex[1., 2.], Global`Complex[2, 0], Rational, True, 0]")
         , ("numeric constructor structural outcomes", "{Head[Complex[1,2]],AtomQ[Complex[1,2]],Length[Complex[1,2]],Head[Rational[x,2]],AtomQ[Rational[x,2]],Length[Rational[x,2]],Head[Complex[x,2]],AtomQ[Complex[x,2]],Length[Complex[x,2]],Head[Global`Rational[1,2]],AtomQ[Global`Rational[1,2]],Length[Global`Rational[1,2]]}", "List[Complex, True, 0, Rational, False, 2, Complex, False, 2, Global`Rational, False, 2]")
         , ("held explicit numeric constructor syntax", "{HoldComplete[Rational[2,4],Complex[1,0]],Hold[Rational[2,4],Complex[1,0]]}", "List[HoldComplete[Rational[2, 4], Complex[1, 0]], Hold[Rational[2, 4], Complex[1, 0]]]")
+        , ("special real constructor isolation and evaluation control", "{Overflow[],System`Overflow[],Global`Overflow[],Overflow[1],Underflow[],System`Underflow[],Global`Underflow[],Underflow[1],Overflow[Sequence[]],Overflow[Sequence[1]],HoldComplete[Overflow[],Underflow[]],NumericQ[Unevaluated[Overflow[]]]}", "List[Overflow[], Overflow[], Global`Overflow[], Overflow[1], Underflow[], Underflow[], Global`Underflow[], Underflow[1], Overflow[], Overflow[1], HoldComplete[Overflow[], Underflow[]], False]")
+        , ("special real structural atoms", "{Head[Overflow[]],AtomQ[Overflow[]],NumberQ[Overflow[]],Head[Underflow[]],AtomQ[Underflow[]],NumberQ[Underflow[]],Length[Overflow[]],Length[Underflow[]]}", "List[Real, True, True, Real, True, True, 0, 0]")
         , ("numeric predicate real tower", "{{NumericQ[0],ExactNumberQ[0],InexactNumberQ[0],MachineIntegerQ[0],MachineNumberQ[0],RealValuedNumberQ[0]},{NumericQ[1/2],ExactNumberQ[1/2],InexactNumberQ[1/2],MachineIntegerQ[1/2],MachineNumberQ[1/2],RealValuedNumberQ[1/2]},{NumericQ[1.],ExactNumberQ[1.],InexactNumberQ[1.],MachineIntegerQ[1.],MachineNumberQ[1.],RealValuedNumberQ[1.]},{NumericQ[1`20],ExactNumberQ[1`20],InexactNumberQ[1`20],MachineIntegerQ[1`20],MachineNumberQ[1`20],RealValuedNumberQ[1`20]}}", "List[List[True, True, False, True, False, True], List[True, True, False, False, False, True], List[True, False, True, False, True, True], List[True, False, True, False, False, True]]")
         , ("numeric predicate complex tower", "{{NumericQ[1+2I],ExactNumberQ[1+2I],InexactNumberQ[1+2I],MachineIntegerQ[1+2I],MachineNumberQ[1+2I],RealValuedNumberQ[1+2I]},{NumericQ[1.+2.I],ExactNumberQ[1.+2.I],InexactNumberQ[1.+2.I],MachineIntegerQ[1.+2.I],MachineNumberQ[1.+2.I],RealValuedNumberQ[1.+2.I]}}", "List[List[True, True, False, False, False, False], List[True, False, True, False, True, False]]")
         , ("numeric predicate symbolic bridge", "{{NumericQ[Pi],ExactNumberQ[Pi],InexactNumberQ[Pi],RealValuedNumberQ[Pi]},{NumericQ[Sin[1]],ExactNumberQ[Sin[1]],InexactNumberQ[Sin[1]],RealValuedNumberQ[Sin[1]]},{NumericQ[Sqrt[2]],ExactNumberQ[Sqrt[2]],InexactNumberQ[Sqrt[2]],RealValuedNumberQ[Sqrt[2]]},{NumericQ[I Pi],ExactNumberQ[I Pi],InexactNumberQ[I Pi],RealValuedNumberQ[I Pi]},{NumericQ[Exp[I]],ExactNumberQ[Exp[I]],InexactNumberQ[Exp[I]],RealValuedNumberQ[Exp[I]]},NumericQ[Sin[x]],{NumericQ[Root[#^2-2&,1]],ExactNumberQ[Root[#^2-2&,1]],InexactNumberQ[Root[#^2-2&,1]],RealValuedNumberQ[Root[#^2-2&,1]]},{NumericQ[Root[#^2+1&,1]],ExactNumberQ[Root[#^2+1&,1]],RealValuedNumberQ[Root[#^2+1&,1]]}}", "List[List[True, True, False, True], List[True, True, False, True], List[True, True, False, True], List[True, True, False, False], List[True, True, False, False], False, List[True, True, False, True], List[True, True, False]]")
@@ -712,6 +714,7 @@ checkEvaluator = do
         , ("complex projections thread over nested lists", "{Re[{1,I,1+I}],Im[{{I},2}],ReIm[{1,I}],Arg[{1,-1,I}],Conjugate[{1,I,1+I}],Re[{1,2},{3,4}]}", "List[List[1, 0, 1], List[List[1], 0], List[List[1, 0], List[0, 1]], List[0, Pi, Times[Rational[1, 2], Pi]], List[1, Complex[0, -1], Complex[1, -1]], List[Re[1, 3], Re[2, 4]]]")
         , ("complex projection arity sequence and qualification", "{Re[],Re[1,2],Re[Sequence[1]],Re[Sequence[]],System`Re[1+2I],Global`Re[1+2I],System`Arg[-I],Global`Arg[-I]}", "List[Re[], Re[1, 2], 1, Re[], 1, Global`Re[Complex[1, 2]], Times[Rational[-1, 2], Pi], Global`Arg[Complex[0, -1]]]")
         , ("explicit complex arithmetic normalizes before projection", "{Re[(1+I)+(2+3I)],Im[(1+I)(2+3I)],Conjugate[(1+I)^3],ReIm[(1-I)^4],Arg[(1+I)^2]}", "List[3, 5, Complex[-2, -2], List[-4, 0], Times[Rational[1, 2], Pi]]")
+        , ("complex projections preserve special real atoms", "{Complex[Overflow[],1],Complex[1,Underflow[]],Re[Complex[Overflow[],1]],Im[Complex[1,Underflow[]]],ReIm[Complex[Overflow[],Underflow[]]],Arg[Complex[Overflow[],1]],Conjugate[Complex[1,Underflow[]]]}", "List[Complex[Overflow[], 1], Complex[1, Underflow[]], Overflow[], Underflow[], List[Overflow[], Underflow[]], ArcTan[Overflow[], 1], Complex[1, Times[-1, Underflow[]]]]")
         , ("exact rational sum", "1/2 + 1/3", "Rational[5, 6]")
         , ("exact rational product", "(2/3)(9/4)", "Rational[3, 2]")
         , ("exact rational reciprocal power", "(1/2)^-2", "4")
@@ -4094,6 +4097,8 @@ checkExpressionJsonRoundTrips = do
         , Integer 999999999999999999999999999999999999999999
         , Rational (-7) 13
         , Real "6.02214076*^23`8"
+        , SpecialReal OverflowReal
+        , SpecialReal UnderflowReal
         , Complex (Integer 2) (Real "-0.0")
         , String "snowman ☃\n"
         , ByteArray (BS.pack [0 .. 255])
@@ -4101,10 +4106,27 @@ checkExpressionJsonRoundTrips = do
         , expectRight (root [1, 0, 1] 1 2)
         , expectRight (sparseArray [2] [SparseEntry [2] (Rational 1 3)] (Integer 0))
         ]
-  and
-    <$> traverse
+      expectedOverflowJson =
+        JsonObject
+          ( Map.fromList
+              [ ("special", JsonString "Overflow")
+              , ("type", JsonString "real")
+              ]
+          )
+      unknownSpecialJson =
+        JsonObject
+          ( Map.fromList
+              [ ("special", JsonString "Unknown")
+              , ("type", JsonString "real")
+              ]
+          )
+  roundTrips <-
+    traverse
       (\expression -> assertEqual ("expression JSON round trip: " <> fullForm expression) (Right expression) (exprFromJson (exprToJson expression)))
       expressions
+  overflowShape <- assertEqual "special real JSON shape" expectedOverflowJson (exprToJson (SpecialReal OverflowReal))
+  unknownSpecial <- assertLeft "reject unknown special real JSON" (exprFromJson unknownSpecialJson)
+  pure (and (roundTrips <> [overflowShape, unknownSpecial]))
 
 checkJsonCodec :: IO Bool
 checkJsonCodec = do

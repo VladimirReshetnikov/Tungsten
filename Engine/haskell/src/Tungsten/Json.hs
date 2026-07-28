@@ -219,6 +219,8 @@ exprToJson expression = JsonObject $ case expression of
       , number "denominator" denominator
       ]
   Real source -> object [text "type" "real", text "text" source]
+  SpecialReal kind ->
+    object [text "type" "real", text "special" (specialRealName kind)]
   Complex realPart imaginaryPart ->
     object
       [ text "type" "complex"
@@ -292,7 +294,14 @@ exprFromJson payload = do
       numerator <- requireInteger "numerator" values
       denominator <- requireInteger "denominator" values
       first expressionError (rational numerator denominator)
-    "real" -> Real <$> requireString "text" values
+    "real" -> case Map.lookup "special" values of
+      Nothing -> Real <$> requireString "text" values
+      Just _ -> do
+        special <- requireString "special" values
+        case special of
+          "Overflow" -> Right (SpecialReal OverflowReal)
+          "Underflow" -> Right (SpecialReal UnderflowReal)
+          _ -> Left (JsonError ("unsupported special real: " <> special))
     "complex" ->
       Complex
         <$> (requireValue "real" values >>= exprFromJson)
