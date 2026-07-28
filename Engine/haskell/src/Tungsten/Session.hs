@@ -2979,6 +2979,13 @@ reduceSessionEvaluatedCall depth session = \case
         sessionFailure
           session
           "MapApply[f] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "MapIndexed") [function]) values ->
+    Just $ case values of
+      [subject] -> evaluateSessionMapIndexed depth session [function, subject]
+      _ ->
+        sessionFailure
+          session
+          "MapIndexed[f] expects exactly one argument when used as an operator."
   Call (Symbol "AssociationMap") values ->
     Just (evaluateSessionAssociationMap depth session values)
   Call (Symbol "Apply") values ->
@@ -3003,6 +3010,8 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionMapAll depth session values)
   Call (Symbol "MapApply") values ->
     Just (evaluateSessionMapApply depth session values)
+  Call (Symbol "MapIndexed") values ->
+    Just (evaluateSessionMapIndexed depth session values)
   Call (Symbol "MapAt") values ->
     Just (evaluateSessionMapAt depth session values)
   Call (Symbol "Construct") values ->
@@ -3727,6 +3736,107 @@ evaluateSessionMap depth session = \case
     mapItems
       function
       (retained <> [replaceSessionItemValue item value])
+      updated
+      rest
+
+evaluateSessionMapIndexed
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionMapIndexed depth session = \case
+  [function] ->
+    Right (Call (Symbol "MapIndexed") [function], session)
+  [function, subject] ->
+    mapTree function (SessionLevelBounds 1 1) 0 [] session subject
+  [function, subject, levelSpecification] -> do
+    (bounds, boundsSession) <-
+      liftSessionLevelBounds session levelSpecification
+    mapTree function bounds 0 [] boundsSession subject
+  _ ->
+    sessionFailure
+      session
+      "MapIndexed expects a function, an expression, and an optional level specification."
+ where
+  mapTree function bounds positive path currentSession expression = do
+    (rebuilt, rebuiltSession) <-
+      case sessionOrderedCollection expression of
+        Just collection
+          | sessionCollectionAssociation collection -> do
+              (mappedItems, updated) <-
+                walkItems
+                  function
+                  bounds
+                  positive
+                  path
+                  []
+                  currentSession
+                  (sessionCollectionItems collection)
+              Right (rebuildSessionCollection collection mappedItems, updated)
+        _ -> case expression of
+          Call expressionHead values -> do
+            (mappedValues, updated) <-
+              walkValues
+                function
+                bounds
+                positive
+                path
+                1
+                []
+                currentSession
+                values
+            Right (normalizeEvaluatedCall expressionHead mappedValues, updated)
+          _ -> Right (expression, currentSession)
+    if positive >= 1 && sessionLevelMatches bounds positive rebuilt
+      then
+        evaluateSessionCallable
+          depth
+          rebuiltSession
+          function
+          [rebuilt, Call (Symbol "List") path]
+      else Right (rebuilt, rebuiltSession)
+
+  walkItems _ _ _ _ retained currentSession [] =
+    Right (retained, currentSession)
+  walkItems function bounds positive path retained currentSession (item : rest) = do
+    let component = case sessionItemKey item of
+          Just key -> Call (Symbol "Key") [key]
+          Nothing -> Integer (sessionItemIndex item)
+    (mapped, updated) <-
+      mapTree
+        function
+        bounds
+        (positive + 1)
+        (path <> [component])
+        currentSession
+        (sessionItemValue item)
+    walkItems
+      function
+      bounds
+      positive
+      path
+      (retained <> [replaceSessionItemValue item mapped])
+      updated
+      rest
+
+  walkValues _ _ _ _ _ retained currentSession [] =
+    Right (retained, currentSession)
+  walkValues function bounds positive path index retained currentSession (value : rest) = do
+    (mapped, updated) <-
+      mapTree
+        function
+        bounds
+        (positive + 1)
+        (path <> [Integer index])
+        currentSession
+        value
+    walkValues
+      function
+      bounds
+      positive
+      path
+      (index + 1)
+      (retained <> [mapped])
       updated
       rest
 
@@ -9863,6 +9973,7 @@ stripSessionTransparentUnevaluatedArguments expressionHead
       , "InexactNumberQ"
       , "MachineIntegerQ"
       , "MachineNumberQ"
+      , "MapIndexed"
       , "NumberQ"
       , "Outer"
       , "Plus"

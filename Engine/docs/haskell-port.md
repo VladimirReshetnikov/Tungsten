@@ -4,8 +4,8 @@
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-28T13:13:55Z
-- Repository HEAD: 0a6548d4151926fd9ad05bf3cdb4e4d680b4088c
+- Updated (UTC): 2026-07-28T13:38:17Z
+- Repository HEAD: d6f93568d24d62c7db75072e35c2a6530c1e0415
 
 ## Purpose
 
@@ -120,6 +120,11 @@ restored across normal completion, diagnostics, throws, confirmations, aborts, l
 returns, gotos, and cleanup. `Pause` sleeps cooperatively in bounded increments, and
 `WithCleanup` suppresses expired deadlines while its abort-protected initializer and cleanup run,
 matching the Python reference's cleanup guarantee.
+
+Session mapping includes bottom-up `MapIndexed` traversal with positive and negative level
+specifications, integer and association `Key[...]` paths, callback-created child rebuilding,
+state and control propagation, generated-list normalization, and the Python-compatible distinction
+between direct and operator forms of explicit `System`` and `Global`` spellings.
 
 Failure control now includes `FailureQ`, `MissingQ`, callable `Failure[...]` property projection,
 and the one-, two-, and three-argument `Failsafe` operator forms. Session evaluation also provides

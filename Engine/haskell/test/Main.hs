@@ -1572,6 +1572,9 @@ checkEvaluationSession = do
         , ("downvalue pattern callbacks share one effectful match", "c = 0; q[x_] := (c = c + 1; x > 1); f[x_ /; q[x]] := x; {f[1], f[2], c}", "List[f[1], 2, 2]")
         , ("downvalue PatternTest and Condition callbacks run once", "c = 0; f[(x_?(c = c + 1; IntegerQ)) /; (c = c + 10; True)] := x; {f[1], c}", "List[1, 11]")
         , ("map callbacks thread session state", "y = 0; {Map[Function[x, y = y + 1; x], {a, b}], y}", "List[List[a, b], 2]")
+        , ("MapIndexed walks bottom up with paths and callback state", "ClearAll[i,mi];i=0;mi[x_,p_]:=(i++;q[i,x,p]);{MapIndexed[mi,h[a,g[b,c]],Infinity],i}", "List[h[q[1, a, List[1]], q[4, g[q[2, b, List[2, 1]], q[3, c, List[2, 2]]], List[2]]], 4]")
+        , ("MapIndexed preserves association keys rules and operator boundaries", "{MapIndexed[Function[{value,path},path],<|a->x,b:>g[y]|>,Infinity],MapIndexed[q][f[a,g[b]]],System`MapIndexed[q][f[a]],Global`MapIndexed[q][f[a]],System`MapIndexed[q,f[a]],MapIndexed[q,a,Infinity],MapIndexed[q,f[a],{0}]}", "List[Association[Rule[a, List[Key[a]]], RuleDelayed[b, List[Key[b]]]], f[q[a, List[1]], q[g[b], List[2]]], f[q[a, List[1]]], Global`MapIndexed[q][f[a]], System`MapIndexed[q, f[a]], a, f[a]]")
+        , ("MapIndexed normalizes callback results and direct Unevaluated arguments", "{MapIndexed[Function[{x,p},Nothing],{a,b}],MapIndexed[Function[{x,p},Sequence[x,p]],{a,b}],MapIndexed[q,Unevaluated[f[1+1]],Unevaluated[Infinity]],System`MapIndexed[q,Unevaluated[f[1+1]]],Global`MapIndexed[q,Unevaluated[f[1+1]]],MapIndexed[q,f[],{-2}]}", "List[List[], List[a, b], f[q[Plus[q[1, List[1, 1]], q[1, List[1, 2]]], List[1]]], System`MapIndexed[q, f[Plus[1, 1]]], Global`MapIndexed[q, Unevaluated[f[Plus[1, 1]]]], f[]]")
         , ("thread distributes matching immediate heads", "{Thread[f[{a,b},{c,d}]],Thread[f[h[a,b],c],h],Thread[f[{},c]],Thread[f[a,b]],Thread[a],Thread[Unevaluated[f[{a,b}]]]}", "List[List[f[a, c], f[b, d]], h[f[a, c], f[b, c]], List[], f[a, b], a, List[f[a], f[b]]]")
         , ("thread preserves exact target heads and qualification boundaries", "{Thread[f[System`List[a,b],c]],Thread[f[{a,b},c],System`List],System`Thread[Unevaluated[f[{a,b}]]],Global`Thread[Unevaluated[f[{a,b}]]]}", "List[f[System`List[a, b], c], f[List[a, b], c], System`Thread[f[List[a, b]]], Global`Thread[Unevaluated[f[List[a, b]]]]]")
         , ("operate transforms nested heads at exact levels", "{Operate[p,f[g][h][x],0],Operate[p,f[g][h][x]],Operate[p,f[g][h][x],2],Operate[p,f[g][h][x],3],Operate[p,f[g][h][x],4],Operate[p,a,0],Operate[p,a],Operate[p,<|a->1|>,1]}", "List[p[f[g][h][x]], p[f[g][h]][x], p[f[g]][h][x], p[f][g][h][x], f[g][h][x], p[a], a, p[Association][Rule[a, 1]]]")
@@ -3156,6 +3159,31 @@ checkEvaluationSession = do
             , ( "Part::error"
               , "MessageName[Part, \"error\"]"
               , "Part::error: Part specifications are invalid for f[a]."
+              )
+            ]
+          )
+        , ( "MapIndexed reports direct operator and level errors exactly"
+          , "{MapIndexed[],MapIndexed[q,x,1,z],MapIndexed[q,x,z],MapIndexed[q][],MapIndexed[q][a,b]}"
+          , "List[MapIndexed[], MapIndexed[q, x, 1, z], MapIndexed[q, x, z], MapIndexed[q][], MapIndexed[q][a, b]]"
+          , [ ( "MapIndexed::error"
+              , "MessageName[MapIndexed, \"error\"]"
+              , "MapIndexed::error: MapIndexed expects a function, an expression, and an optional level specification."
+              )
+            , ( "MapIndexed::error"
+              , "MessageName[MapIndexed, \"error\"]"
+              , "MapIndexed::error: MapIndexed expects a function, an expression, and an optional level specification."
+              )
+            , ( "MapIndexed::error"
+              , "MessageName[MapIndexed, \"error\"]"
+              , "MapIndexed::error: Unsupported Level specification: 'z'."
+              )
+            , ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: MapIndexed[f] expects exactly one argument when used as an operator."
+              )
+            , ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: MapIndexed[f] expects exactly one argument when used as an operator."
               )
             ]
           )

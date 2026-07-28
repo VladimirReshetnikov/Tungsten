@@ -2437,6 +2437,31 @@ CASES = (
         ),
         0,
     ),
+    (
+        "map indexed paths levels operators and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenMapIndexedI,tungstenMapIndexedF];"
+            "tungstenMapIndexedI=0;"
+            "tungstenMapIndexedF[x_,p_]:=(tungstenMapIndexedI++;"
+            "q[tungstenMapIndexedI,x,p]);"
+            "{MapIndexed[tungstenMapIndexedF,h[a,g[b,c]],Infinity],"
+            "tungstenMapIndexedI,"
+            "MapIndexed[Function[{value,path},path],"
+            "<|a->x,b:>g[y]|>,Infinity],"
+            "MapIndexed[q][f[a,g[b]]],System`MapIndexed[q][f[a]],"
+            "Global`MapIndexed[q][f[a]],System`MapIndexed[q,f[a]],"
+            "MapIndexed[q,a,Infinity],MapIndexed[q,f[a],{0}],"
+            "MapIndexed[Nothing&,{a,b}],MapIndexed[q][],"
+            "MapIndexed[q][a,b],MapIndexed[],MapIndexed[q,x,z],"
+            "$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
     ("syntax error", ("expr", "parse", "--code", ")", "--form", "input"), 1),
     ("unfinished call", ("expr", "parse", "--code", "f[1", "--form", "input"), 1),
     ("unfinished operand", ("expr", "parse", "--code", "1 +", "--form", "input"), 1),
