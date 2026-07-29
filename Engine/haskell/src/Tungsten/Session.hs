@@ -3149,6 +3149,10 @@ reduceSessionEvaluatedCall depth session = \case
           "MapIndexed[f] expects exactly one argument when used as an operator."
   Call (Symbol "AssociationMap") values ->
     Just (evaluateSessionAssociationMap depth session values)
+  Call (Symbol arrayHead) values
+    | any (`isSessionSystemHead` arrayHead) ["ArrayQ", "VectorQ", "MatrixQ"]
+    , arrayPredicateHasTest arrayHead values ->
+        Just (evaluateSessionArrayPredicate depth session arrayHead values)
   Call (Symbol truthHead) values
     | any (`isSessionSystemHead` truthHead) ["AllTrue", "AnyTrue", "NoneTrue"] ->
         Just (evaluateSessionTruthCollection depth session truthHead values)
@@ -4150,6 +4154,50 @@ sessionListOrAssociationCollection expression@(Call (Symbol expressionHead) _)
       collection <- sessionOrderedCollection expression
       if sessionCollectionAssociation collection then Just collection else Nothing
 sessionListOrAssociationCollection _ = Nothing
+
+arrayPredicateHasTest :: Text -> [Expr] -> Bool
+arrayPredicateHasTest operation values
+  | isSessionSystemHead "ArrayQ" operation = length values == 3
+  | otherwise = length values == 2
+
+evaluateSessionArrayPredicate
+  :: Int
+  -> EvaluationSession
+  -> Text
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionArrayPredicate depth session operation values = do
+  let (subject, test, shapeArguments) = case values of
+        [expression, depthExpression, predicate] ->
+          (expression, predicate, [expression, depthExpression])
+        [expression, predicate] -> (expression, predicate, [expression])
+        _ -> (Symbol "Null", Symbol "False", [])
+  shapeResult <-
+    liftPureEvaluation
+      session
+      (reduceEvaluatedCall (Call (Symbol operation) shapeArguments))
+  if shapeResult /= Symbol "True"
+    then Right (shapeResult, session)
+    else testElements test session (arrayPredicateValues subject)
+ where
+  testElements _ current [] = Right (Symbol "True", current)
+  testElements predicate current (value : remaining) = do
+    (outcome, updated) <-
+      evaluateSessionCallable depth current predicate [value]
+    if outcome == Symbol "True"
+      then testElements predicate updated remaining
+      else Right (Symbol "False", updated)
+
+arrayPredicateValues :: Expr -> [Expr]
+arrayPredicateValues (SparseArray dimensions entries fill) =
+  ( if product dimensions > fromIntegral (length entries)
+      then [fill]
+      else []
+  )
+    <> [value | SparseEntry _ value <- entries]
+arrayPredicateValues (Call (Symbol listHead) values)
+  | isSessionSystemHead "List" listHead = concatMap arrayPredicateValues values
+arrayPredicateValues expression = [expression]
 
 evaluateSessionTruthCollection
   :: Int
