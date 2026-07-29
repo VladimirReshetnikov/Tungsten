@@ -9,6 +9,7 @@
 -- expression model.
 module Tungsten.NumericPrecision
   ( approximateInexactNumericCall
+  , compareNumericRealExpressions
   , exactNumericCallReduction
   , numericizeExpression
   , reduceNumericPrecisionBuiltin
@@ -289,11 +290,31 @@ approximateInexactNumericCall headName values = do
 
 inexactCallTarget :: Expr -> Maybe NumericTarget
 inexactCallTarget (Call (Symbol headName) values)
-  | maybe False (`elem` transcendentalHeadNames) (numericCallHeadName headName)
+  | maybe False (`elem` inexactNumericHeadNames) (numericCallHeadName headName)
   , any containsInexactReal values =
       Just (combinedInexactTarget values)
   | otherwise = Nothing
 inexactCallTarget _ = Nothing
+
+inexactNumericHeadNames :: [Text]
+inexactNumericHeadNames = ["Plus", "Times", "Power"] <> transcendentalHeadNames
+
+-- | Compare real numeric expressions through the same approximation machinery
+-- used by N and the transcendental reducers.  This lets ordering consumers
+-- recognize exact constants, algebraic roots, and numeric expression trees
+-- without exposing the private constructive-real representation.
+compareNumericRealExpressions :: Expr -> Expr -> Maybe Ordering
+compareNumericRealExpressions left right = do
+  leftApproximation <- expressionApproximation 30 left
+  rightApproximation <- expressionApproximation 30 right
+  if approximationIsReal leftApproximation && approximationIsReal rightApproximation
+    then
+      let leftValue = Complex.realPart (machineValue leftApproximation)
+          rightValue = Complex.realPart (machineValue rightApproximation)
+       in if isNaN leftValue || isNaN rightValue
+            then Nothing
+            else Just (compare leftValue rightValue)
+    else Nothing
 
 containsInexactReal :: Expr -> Bool
 containsInexactReal = \case
@@ -1011,6 +1032,8 @@ exactNumericReduction (Call (Symbol headName) values) = do
       | not (containsInexactReal realPart || containsInexactReal imaginaryPart) ->
           Just (exactComplexExponential realPart imaginaryPart)
     ("Exp", [value])
+      | exactImaginaryPiMultiple value == Just 1 -> Just (Integer (-1))
+    ("Exp", [value])
       | not (containsInexactReal value) ->
           Just (Call (Symbol "Power") [Symbol "E", value])
     ("Log", [Integer 1]) -> Just (Integer 0)
@@ -1035,9 +1058,23 @@ exactNumericReduction (Call (Symbol headName) values) = do
           Just (Symbol "Indeterminate")
       | numericComponentIsOne base -> Just (Symbol "ComplexInfinity")
       | exactOne value -> Just (Integer 0)
+      | Just result <- exactIntegerLog base value -> Just (Integer result)
     ("ArcTan", [x, y])
       | numericComponentIsZero x && numericComponentIsZero y ->
           Just (Symbol "Indeterminate")
+      | Just xValue <- asExactRational x
+      , Just yValue <- asExactRational y
+      , abs xValue == 1
+      , abs yValue == 1 ->
+          Just
+            ( piExpression
+                ( case (compare xValue 0, compare yValue 0) of
+                    (GT, GT) -> 1 % 4
+                    (LT, GT) -> 3 % 4
+                    (GT, LT) -> (-1) % 4
+                    _ -> (-3) % 4
+                )
+            )
     (name, [value])
       | name `elem` ["ArcTanh", "ArcCoth"]
       , exactOne value -> Just (Symbol "Infinity")
@@ -1085,6 +1122,13 @@ exactNumericReduction (Call (Symbol headName) values) = do
     ("Csc", [value]) -> exactReciprocalTrig exactSin value
     (name, [value])
       | name `elem` inverseCircularHeadNames -> exactInverseCircular name value
+    ("ArcSech", [value])
+      | asExactRational value == Just 2 ->
+          Just
+            ( Call
+                (Symbol "Times")
+                [Complex (Integer 0) (Rational 1 3), Symbol "Pi"]
+            )
     (name, [value])
       | Just base <- degreeBaseName name -> exactDegreeFunction base value
     (name, [value])
@@ -1096,8 +1140,82 @@ exactNumericReduction (Call (Symbol headName) values) = do
     (name, [value])
       | name `elem` ["ArcCosh", "ArcSech"]
       , exactOne value -> Just (Integer 0)
+    ("Haversine", [value])
+      | piMultiple value == Just (1 % 5) ->
+          Just
+            ( Call
+                (Symbol "Plus")
+                [ Rational 3 8
+                , Call
+                    (Symbol "Times")
+                    [ Rational (-1) 8
+                    , Call (Symbol "Power") [Integer 5, Rational 1 2]
+                    ]
+                ]
+            )
+    ("Haversine", [value])
+      | Just cosine <- exactCos value ->
+          Just
+            ( Call
+                (Symbol "Times")
+                [ Rational 1 2
+                , Call
+                    (Symbol "Plus")
+                    [Integer 1, Call (Symbol "Times") [Integer (-1), cosine]]
+                ]
+            )
+    ("InverseHaversine", [value])
+      | exactOne value -> Just (Symbol "Pi")
     _ -> Nothing
 exactNumericReduction _ = Nothing
+
+exactIntegerLog :: Expr -> Expr -> Maybe Integer
+exactIntegerLog base value = do
+  baseValue <- exactPositiveInteger base
+  valueInteger <- exactPositiveInteger value
+  if baseValue <= 1
+    then Nothing
+    else
+      let go exponentCount current
+            | current == 1 = Just exponentCount
+            | current > 1 && current `mod` baseValue == 0 =
+                go (exponentCount + 1) (current `div` baseValue)
+            | otherwise = Nothing
+       in go 0 valueInteger
+ where
+  exactPositiveInteger (Integer integerValue)
+    | integerValue > 0 = Just integerValue
+  exactPositiveInteger _ = Nothing
+
+exactImaginaryPiMultiple :: Expr -> Maybe Rational
+exactImaginaryPiMultiple (Call (Symbol timesHead) values)
+  | systemSymbolIs "Times" timesHead = do
+      let piCount = length [() | Symbol name <- values, systemSymbolIs "Pi" name]
+          imaginaryCoefficients =
+            [ coefficient
+            | Complex realPart imaginaryPart <- values
+            , exactZero realPart
+            , Just coefficient <- [asExactRational imaginaryPart]
+            ]
+          supported value = case value of
+            Symbol name -> systemSymbolIs "Pi" name
+            Complex realPart imaginaryPart ->
+              exactZero realPart && asExactRational imaginaryPart /= Nothing
+            Integer {} -> True
+            Rational {} -> True
+            _ -> False
+          realCoefficients =
+            [ coefficient
+            | value <- values
+            , Just coefficient <- [asExactRational value]
+            ]
+      case imaginaryCoefficients of
+        [imaginaryCoefficient]
+          | piCount == 1
+          , all supported values ->
+              Just (imaginaryCoefficient * product realCoefficients)
+        _ -> Nothing
+exactImaginaryPiMultiple _ = Nothing
 
 exactOddFunctionNames :: [Text]
 exactOddFunctionNames =
@@ -1319,6 +1437,8 @@ exactInverseCircular headName value
   | exactNegativeOne value = lookup headName negativeOneValues
   | exactZero value = lookup headName zeroValues
   | exactOne value = lookup headName oneValues
+  | asExactRational value == Just (1 % 2) = lookup headName halfValues
+  | asExactRational value == Just 2 = lookup headName twoValues
   | otherwise = Nothing
  where
   negativeOneValues =
@@ -1342,6 +1462,14 @@ exactInverseCircular headName value
     , ("ArcCot", piExpression (1 % 4))
     , ("ArcSec", Integer 0)
     , ("ArcCsc", piExpression (1 % 2))
+    ]
+  halfValues =
+    [ ("ArcSin", piExpression (1 % 6))
+    , ("ArcCos", piExpression (1 % 3))
+    ]
+  twoValues =
+    [ ("ArcSec", piExpression (1 % 3))
+    , ("ArcCsc", piExpression (1 % 6))
     ]
 
 exactDegreeFunction :: Text -> Expr -> Maybe Expr
@@ -1376,7 +1504,15 @@ sinExactTable =
   , (3 % 2, Integer (-1)), (11 % 6, Rational (-1) 2)
   ]
 cosExactTable =
-  [ (0, Integer 1), (1 % 3, Rational 1 2), (1 % 2, Integer 0)
+  [ (0, Integer 1)
+  , ( 1 % 5
+    , Call
+        (Symbol "Times")
+        [ Rational 1 4
+        , Call (Symbol "Plus") [Integer 1, Call (Symbol "Power") [Integer 5, Rational 1 2]]
+        ]
+    )
+  , (1 % 3, Rational 1 2), (1 % 2, Integer 0)
   , (2 % 3, Rational (-1) 2), (1, Integer (-1)), (4 % 3, Rational (-1) 2)
   , (3 % 2, Integer 0), (5 % 3, Rational 1 2)
   ]
@@ -1391,6 +1527,7 @@ piMultiple (Symbol name)
 piMultiple (Call (Symbol timesHead) values)
   | systemSymbolIs "Times" timesHead = do
       let piFactors = [() | Symbol name <- values, systemSymbolIs "Pi" name]
+          degreeFactors = [() | Symbol name <- values, systemSymbolIs "Degree" name]
           rationalFactors =
             [ factor
             | value <- values
@@ -1400,14 +1537,18 @@ piMultiple (Call (Symbol timesHead) values)
             [ value
             | value <- values
             , case value of
-                Symbol name -> not (systemSymbolIs "Pi" name)
+                Symbol name ->
+                  not (systemSymbolIs "Pi" name || systemSymbolIs "Degree" name)
                 Integer {} -> False
                 Rational {} -> False
                 _ -> True
             ]
-      if length piFactors == 1 && null unsupported
+      if length piFactors == 1 && null degreeFactors && null unsupported
         then Just (product rationalFactors)
-        else Nothing
+        else
+          if null piFactors && length degreeFactors == 1 && null unsupported
+            then Just (product rationalFactors / 180)
+            else Nothing
 piMultiple _ = Nothing
 
 asExactRational :: Expr -> Maybe Rational

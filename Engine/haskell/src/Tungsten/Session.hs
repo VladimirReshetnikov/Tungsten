@@ -711,6 +711,15 @@ evaluateSessionAtRaw depth session expression = case expression of
         | isSystemSymbol name
         , displaySessionSymbolName name == "$MachinePrecision" ->
             Right (Real "15.954589770191003", session)
+        | isSystemSymbol name
+        , displaySessionSymbolName name == "$MaxMachineNumber" ->
+            Right (Real "1.7976931348623157*^+308", session)
+        | isSystemSymbol name
+        , displaySessionSymbolName name == "$MinMachineNumber" ->
+            Right (Real "2.2250738585072014*^-308", session)
+        | isSystemSymbol name
+        , displaySessionSymbolName name == "$MachineEpsilon" ->
+            Right (Real "2.220446049250313*^-16", session)
         | otherwise -> case symbolOwnValueFor name session of
             Nothing ->
               Right

@@ -120,6 +120,12 @@ evaluateAt depth expression
       Symbol name
         | systemHeadIn ["I"] name ->
             Right (Complex (Integer 0) (Integer 1))
+        | systemHeadIn ["$MaxMachineNumber"] name ->
+            Right (Real "1.7976931348623157*^+308")
+        | systemHeadIn ["$MinMachineNumber"] name ->
+            Right (Real "2.2250738585072014*^-308")
+        | systemHeadIn ["$MachineEpsilon"] name ->
+            Right (Real "2.220446049250313*^-16")
       Call (Symbol headName) _
         | systemHeadIn ["HoldComplete", "Unevaluated"] headName ->
             Right expression
@@ -2939,8 +2945,11 @@ formatFixedExact (Exact numerator denominator) scale negativeZero =
 
 reducePlus :: [Expr] -> Expr
 reducePlus originalValues =
-  let values = concatMap (flattenHead "Plus") originalValues
-   in case reduceExplicitComplexValues addComplexComponents (Integer 0, Integer 0) values of
+  case NumericPrecision.approximateInexactNumericCall "Plus" originalValues of
+    Just approximated -> approximated
+    Nothing ->
+      let values = concatMap (flattenHead "Plus") originalValues
+       in case reduceExplicitComplexValues addComplexComponents (Integer 0, Integer 0) values of
         Just complexResult -> complexResult
         Nothing ->
           let exactSum = foldl' addExact (Exact 0 1) (mapMaybe toExact values)
@@ -3086,8 +3095,11 @@ rebuildFactored selected replacement index inserted (value : rest)
 
 reduceTimes :: [Expr] -> Expr
 reduceTimes originalValues =
-  let values = concatMap (flattenHead "Times") originalValues
-   in if any isExplicitZero values && any isComplexInfinity values
+  case NumericPrecision.approximateInexactNumericCall "Times" originalValues of
+    Just approximated -> approximated
+    Nothing ->
+      let values = concatMap (flattenHead "Times") originalValues
+       in if any isExplicitZero values && any isComplexInfinity values
         then Symbol "Indeterminate"
         else
           case reduceExplicitComplexValues multiplyComplexComponents (Integer 1, Integer 0) values of
@@ -3229,6 +3241,12 @@ evaluateSparseScalar functionName left right =
 reducePower :: [Expr] -> Expr
 reducePower [] = Integer 1
 reducePower [base] = base
+reducePower [SpecialReal OverflowReal, Integer exponentValue]
+  | exponentValue < 0 = SpecialReal UnderflowReal
+  | exponentValue > 0 = SpecialReal OverflowReal
+reducePower [SpecialReal UnderflowReal, Integer exponentValue]
+  | exponentValue < 0 = SpecialReal OverflowReal
+  | exponentValue > 0 = SpecialReal UnderflowReal
 reducePower [base, Integer exponentValue]
   | exponentValue == 0
   , isExplicitZero base = Symbol "Indeterminate"
@@ -3246,6 +3264,10 @@ reducePower [base, Integer exponentValue]
                     (denominator ^ abs exponentValue)
                     (numerator ^ abs exponentValue)
                 )
+  | Just approximated <-
+      NumericPrecision.approximateInexactNumericCall
+        "Power"
+        [base, Integer exponentValue] = approximated
   | Call (Symbol powerHead) [nestedBase, Integer nestedExponent] <- base
   , systemHeadIn ["Power"] powerHead =
       reducePower [nestedBase, Integer (nestedExponent * exponentValue)]
@@ -3259,6 +3281,8 @@ reducePower [base, Integer exponentValue]
       reduceTimes [reducePower [factor, Integer exponentValue] | factor <- factors]
 reducePower [base, exponentValue]
   | Just result <- reduceExactFractionalPower base exponentValue = result
+  | Just result <-
+      NumericPrecision.approximateInexactNumericCall "Power" [base, exponentValue] = result
   | Just (Exact 1 1) <- toExact base = Integer 1
 reducePower values = Call (Symbol "Power") values
 
@@ -4720,12 +4744,16 @@ reduceEquality True values
   | allEqual values = Symbol "True"
   | Just numericValues <- traverse explicitRealExact values =
       boolean (allEqual numericValues)
+  | Just orderings <- numericAdjacentOrderings values =
+      boolean (all (== EQ) orderings)
   | otherwise = Call (Symbol "Equal") values
 reduceEquality False values
   | length values < 2 = Symbol "True"
   | not (allDistinct values) = Symbol "False"
   | Just numericValues <- traverse explicitRealExact values =
       boolean (allDistinct numericValues)
+  | Just orderings <- numericPairwiseOrderings values =
+      boolean (all (/= EQ) orderings)
   | otherwise = Call (Symbol "Unequal") values
 
 reduceOrdering :: (Ordering -> Bool) -> Text -> [Expr] -> Expr
@@ -4740,7 +4768,24 @@ reduceOrdering relation headName values
                 (drop 1 exactValues)
             )
         )
+  | Just orderings <- numericAdjacentOrderings values =
+      boolean (all relation orderings)
   | otherwise = Call (Symbol headName) values
+
+numericAdjacentOrderings :: [Expr] -> Maybe [Ordering]
+numericAdjacentOrderings values =
+  traverse
+    (uncurry compareOrderableReal)
+    (zip values (drop 1 values))
+
+numericPairwiseOrderings :: [Expr] -> Maybe [Ordering]
+numericPairwiseOrderings values =
+  traverse
+    (uncurry compareOrderableReal)
+    [ (left, right)
+    | (index, left) <- zip [0 :: Int ..] values
+    , right <- drop (index + 1) values
+    ]
 
 reduceInequality :: [Expr] -> Expr
 reduceInequality values
@@ -6573,20 +6618,25 @@ reduceMinMax minimumMode headName originalValues =
         then absorbing
         else
           let candidates = filter (/= identity) values
-              numeric = [(value, exactValue) | value <- candidates, Just exactValue <- [explicitRealExact value]]
-              symbolic = [value | value <- candidates, explicitRealExact value == Nothing]
+              numeric = [value | value <- candidates, isNumericMinMaxCandidate value]
+              symbolic = [value | value <- candidates, not (isNumericMinMaxCandidate value)]
               best = foldl' chooseBetter Nothing numeric
-              resultValues = uniqueSortedCanonical (maybe symbolic ((: symbolic) . fst) best)
+              resultValues = uniqueSortedCanonical (maybe symbolic (: symbolic) best)
            in case resultValues of
                 [] -> identity
                 [single] -> single
                 _ -> Call (Symbol headName) resultValues
  where
   chooseBetter Nothing candidate = Just candidate
-  chooseBetter current@(Just (_, bestValue)) candidate@(_, candidateValue)
-    | (minimumMode && compareExact candidateValue bestValue == LT)
-        || (not minimumMode && compareExact candidateValue bestValue == GT) = Just candidate
+  chooseBetter current@(Just bestValue) candidateValue
+    | Just ordering <- compareOrderableReal candidateValue bestValue
+    , (minimumMode && ordering == LT)
+        || (not minimumMode && ordering == GT) = Just candidateValue
     | otherwise = current
+
+  isNumericMinMaxCandidate value =
+    isOrderableReal value
+      || NumericPrecision.compareNumericRealExpressions value value == Just EQ
 
 flattenMinMaxArgument :: Text -> Expr -> [Expr]
 flattenMinMaxArgument headName (Call (Symbol nestedHead) values)
@@ -7224,7 +7274,8 @@ compareOrderableReal left right
   | Real {} <- right = compare <$> explicitRealDouble left <*> explicitRealDouble right
   | Just leftExact <- explicitRealExact left
   , Just rightExact <- explicitRealExact right = Just (compareExact leftExact rightExact)
-compareOrderableReal _ _ = Nothing
+compareOrderableReal left right =
+  NumericPrecision.compareNumericRealExpressions left right
 
 compareUnderflowRight :: Expr -> Maybe Ordering
 compareUnderflowRight expression
