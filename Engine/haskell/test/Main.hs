@@ -4806,6 +4806,7 @@ checkParserCorpus = withTemporaryDirectory "tungsten-parser-corpus" $ \corpusRoo
   TextIO.writeFile (notebookRoot </> "sample.nb") "Notebook[{Cell[\"Hello\", \"Text\"]}]"
   discovery <- discoverCorpusFiles corpusRoot [] [] ["**/bad.wl"] Nothing False 0
   filtered <- discoverCorpusFiles corpusRoot ["wl"] ["github/*"] [] (Just 1) False 0
+  shuffled <- discoverCorpusFiles corpusRoot [] [] [] Nothing True 7
   attempts <- case discovery of
     Left _ -> pure []
     Right files -> traverse (\file -> (corpusFileRelativePath file,) <$> parseCorpusFile file "input" (Just 2097152) 2000) files
@@ -4859,6 +4860,7 @@ checkParserCorpus = withTemporaryDirectory "tungsten-parser-corpus" $ \corpusRoo
   let relativePaths = map corpusFileRelativePath (either (const []) id discovery)
       attemptStatuses = [(path, parserAttemptStatus attempt) | (path, attempt) <- attempts]
       filteredPaths = map corpusFileRelativePath (either (const []) id filtered)
+      shuffledPaths = map corpusFileRelativePath (either (const []) id shuffled)
       success = ParserAttempt "tungsten" "success" Nothing Nothing Nothing Map.empty
       failure = ParserAttempt "wolfram" "failure" Nothing (Just "ParseFailure") Nothing Map.empty
   checks <- sequence
@@ -4870,6 +4872,10 @@ checkParserCorpus = withTemporaryDirectory "tungsten-parser-corpus" $ \corpusRoo
         "parser corpus include/extension/max filters"
         ["github/sample/bad.wl"]
         filteredPaths
+    , assertEqual
+        "parser corpus matches CPython seeded shuffle"
+        ["notebookarchive/sample.nb", "github/sample/bad.wl", "github/sample/expr.wl"]
+        shuffledPaths
     , assertEqual
         "parser corpus local parse attempts"
         [("github/sample/expr.wl", "success"), ("notebookarchive/sample.nb", "success")]
