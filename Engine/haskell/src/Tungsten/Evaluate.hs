@@ -12455,6 +12455,11 @@ reduceDelete [subject, positions] = do
 reduceDelete values = Right (Call (Symbol "Delete") values)
 
 reduceInsert :: [Expr] -> Either EvaluationError Expr
+reduceInsert [sparse@(SparseArray [dimension] _ _), item, Integer position] =
+  sparseVectorInsert sparse item dimension position
+reduceInsert [sparse@SparseArray {}, item, positions] = do
+  dense <- sparseArrayNormal sparse
+  reduceInsert [dense, item, positions]
 reduceInsert [subject, item, positions] = do
   paths <- insertPositionPaths positions
   foldM insertOne subject (sortOperationPaths paths)
@@ -12467,6 +12472,45 @@ reduceInsert [subject, item, positions] = do
             ("Insert positions are invalid for " <> inputForm subject <> ".")
         )
 reduceInsert values = Right (Call (Symbol "Insert") values)
+
+sparseVectorInsert
+  :: Expr
+  -> Expr
+  -> Integer
+  -> Integer
+  -> Either EvaluationError Expr
+sparseVectorInsert sparse@(SparseArray _ entries fill) item dimension position = do
+  offset <-
+    maybe
+      ( Left
+          ( EvaluationError
+              ("Insert positions are invalid for " <> inputForm sparse <> ".")
+          )
+      )
+      Right
+      (sparseInsertOffset dimension position)
+  let insertionIndex = offset + 1
+      shifted =
+        [ ( [if index >= insertionIndex then index + 1 else index]
+          , value
+          )
+        | SparseEntry [index] value <- entries
+        ]
+      inserted = if item == fill then [] else [([insertionIndex], item)]
+  canonicalSparseArray [dimension + 1] (inserted <> shifted) fill
+sparseVectorInsert _ _ _ _ =
+  Left (EvaluationError "Insert expects a rank-one SparseArray value.")
+
+sparseInsertOffset :: Integer -> Integer -> Maybe Integer
+sparseInsertOffset dimension position
+  | position == 0 = Just 0
+  | position > 0 = valid (position - 1)
+  | otherwise = valid (dimension + position + 1)
+ where
+  valid offset
+    | offset >= 0
+    , offset <= dimension = Just offset
+    | otherwise = Nothing
 
 reduceReplacePart :: [Expr] -> Either EvaluationError Expr
 reduceReplacePart [subject, replacements] = do
