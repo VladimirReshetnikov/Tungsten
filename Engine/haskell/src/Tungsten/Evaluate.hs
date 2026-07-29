@@ -11790,72 +11790,79 @@ reduceTakeDrop takeMode (subject : specifications@(_ : _)) =
           Call expressionHead <$> traverse (`applySpecifications` remaining) values
         _ -> Left (EvaluationError (operationName <> " encountered an atom before consuming every specification"))
   applySpecification (Call expressionHead values) specification = do
-    selected <- specificationIndices takeMode (length values) specification
-    pure (Call expressionHead [value | (index, value) <- zip [0 ..] values, index `elem` selected])
+    selected <- specificationIndices operationName (length values) specification
+    pure
+      ( Call expressionHead
+          ( if takeMode
+              then [values !! index | index <- selected]
+              else [value | (index, value) <- zip [0 ..] values, index `notElem` selected]
+          )
+      )
   applySpecification _ _ = Left (EvaluationError (operationName <> " expects an expression with arguments"))
 reduceTakeDrop takeMode values =
   Right (Call (Symbol (if takeMode then "Take" else "Drop")) values)
 
-specificationIndices :: Bool -> Int -> Expr -> Either EvaluationError [Int]
-specificationIndices takeMode count specification = do
-  selected <- case specification of
+specificationIndices :: Text -> Int -> Expr -> Either EvaluationError [Int]
+specificationIndices operationName count specification =
+  case specification of
     Symbol "All" -> Right [0 .. count - 1]
     Symbol "None" -> Right []
-    Integer amount
-      | amount >= 0
-      , amount <= toInteger count -> Right [0 .. fromInteger amount - 1]
-      | amount < 0
-      , abs amount <= toInteger count ->
-          Right [count - fromInteger (abs amount) .. count - 1]
-      | otherwise -> Left (oversizedIntegerError amount)
-    Call (Symbol "List") [Integer position] ->
-      maybe (Left invalid) (Right . pure) (resolvePosition count position)
-    Call (Symbol "List") [Integer first, Integer last'] ->
-      rangePositions first last' 1
-    Call (Symbol "List") [Integer first, Integer last', Integer step]
-      | step /= 0 -> rangePositions first last' step
-    _ -> Left invalid
-  pure
-    ( if takeMode
-        then selected
-        else [index | index <- [0 .. count - 1], index `notElem` selected]
-    )
+    Integer amount -> validateSelectors (amountSelectors amount)
+    Call (Symbol "Span") spanArguments -> spanIndices spanArguments
+    Call (Symbol "List") [Integer position] -> validateSelectors [position]
+    Call (Symbol "List") [Symbol "All"] -> Right [0 .. count - 1]
+    Call (Symbol "List") [first, last'] -> spanIndices [first, last']
+    Call (Symbol "List") [first, last', step] -> spanIndices [first, last', step]
+    Call (Symbol "List") _ ->
+      Left
+        ( EvaluationError
+            (operationName <> " list specifications must contain one, two, or three items.")
+        )
+    _ ->
+      Left
+        ( EvaluationError
+            ("Unsupported " <> operationName <> " specification: '" <> inputForm specification <> "'.")
+        )
  where
-  invalid = EvaluationError "Take/Drop received an unsupported or out-of-range specification"
-  oversizedIntegerError amount
-    | amount > toInteger count =
-        EvaluationError
-          ( "Part index "
-              <> T.pack (show (toInteger count + 1))
-              <> " is out of range for length "
-              <> T.pack (show count)
-              <> "."
-          )
-    | firstSelector < negate (toInteger count) =
-        EvaluationError
-          ( "Part index "
-              <> T.pack (show firstSelector)
-              <> " is out of range for length "
-              <> T.pack (show count)
-              <> "."
-          )
+  amountSelectors amount
+    | amount >= 0 = [1 .. amount]
+    | otherwise = [toInteger count + amount + 1 .. toInteger count]
+  validateSelectors = traverse resolveSelector
+  resolveSelector selector
+    | selector == 0 =
+        Left (EvaluationError "Only top-level Part specifications may use index 0.")
+    | Just index <- resolvePosition count selector = Right index
     | otherwise =
-        EvaluationError "Only top-level Part specifications may use index 0."
-   where
-    firstSelector = toInteger count + amount + 1
-  rangePositions :: Integer -> Integer -> Integer -> Either EvaluationError [Int]
-  rangePositions first last' step = do
-    start <- maybe (Left invalid) Right (resolvePosition count first)
-    finish <- maybe (Left invalid) Right (resolvePosition count last')
-    let startValue = toInteger start
-        finishValue = toInteger finish
-        indices
-          | step > 0 && startValue <= finishValue =
-              map fromInteger [startValue, startValue + step .. finishValue]
-          | step < 0 && startValue >= finishValue =
-              map fromInteger [startValue, startValue + step .. finishValue]
-          | otherwise = []
-    pure indices
+        Left
+          ( EvaluationError
+              ( "Part index "
+                  <> T.pack (show selector)
+                  <> " is out of range for length "
+                  <> T.pack (show count)
+                  <> "."
+              )
+          )
+  spanIndices spanArguments = case spanArguments of
+    [first, last'] -> expandSpan first last' (Integer 1)
+    [first, last', step] -> expandSpan first last' step
+    _ -> Left (EvaluationError "Span must contain two or three arguments.")
+  expandSpan first last' stepExpression = do
+    step <- case stepExpression of
+      Integer value -> Right value
+      _ -> Left (EvaluationError "Span steps must be integers.")
+    if step == 0
+      then Left (EvaluationError "Span step cannot be zero.")
+      else do
+        let start = spanEndpoint first 1
+            finish = spanEndpoint last' (toInteger count)
+            selectors = [start, start + step .. finish]
+        validateSelectors selectors
+  spanEndpoint endpoint defaultValue = case endpoint of
+    Symbol "All" -> toInteger count
+    Integer value
+      | value < 0 -> toInteger count + value + 1
+      | otherwise -> value
+    _ -> defaultValue
 
 resolvePosition :: Int -> Integer -> Maybe Int
 resolvePosition count position
