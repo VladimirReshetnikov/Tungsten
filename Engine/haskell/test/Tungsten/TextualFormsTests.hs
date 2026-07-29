@@ -101,6 +101,15 @@ valueCases =
   , ("byte array export", "Normal[ExportByteArray[{97,98,99},\"Byte\"]]", "List[97, 98, 99]")
   , ("RawJSON byte-array round trip", "ImportByteArray[ExportByteArray[<|\"a\"->1|>,\"RawJSON\"],\"RawJSON\"]", "Association[Rule[\"a\", 1]]")
   , ("GZIP string round trip", "ImportString[ExportString[\"hello\",{\"GZIP\",\"String\"}],{\"GZIP\",\"String\"}]", "\"hello\"")
+  , ("BZIP2 string round trip", "ImportString[ExportString[\"hello\",{\"BZIP2\",\"String\"}],{\"BZIP2\",\"String\"}]", "\"hello\"")
+  , ( "BZIP2 export matches independent vector"
+    , "Normal[ExportByteArray[\"hello\",{\"BZIP2\",\"String\"}]]"
+    , "List[66, 90, 104, 57, 49, 65, 89, 38, 83, 89, 25, 49, 101, 61, 0, 0, 0, 129, 0, 2, 68, 160, 0, 33, 154, 104, 51, 77, 7, 51, 139, 185, 34, 156, 40, 72, 12, 152, 178, 158, 128]"
+    )
+  , ( "BZIP2 import accepts independent vector"
+    , "ImportByteArray[ByteArray[{66,90,104,57,49,65,89,38,83,89,25,49,101,61,0,0,0,129,0,2,68,160,0,33,154,104,51,77,7,51,139,185,34,156,40,72,12,152,178,158,128}],{\"BZIP2\",\"String\"}]"
+    , "\"hello\""
+    )
   ]
 
 errorCases :: [(Text, Text, Text)]

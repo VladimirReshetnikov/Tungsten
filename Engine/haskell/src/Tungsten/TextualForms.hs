@@ -64,6 +64,7 @@ import Tungsten.NamedCharacters (encodePrintableAscii)
 import Tungsten.Parser (parseErrorMessage, parseInputForm)
 import Tungsten.SystemSymbols (normalizeSystemSymbolName)
 import Tungsten.WolframString (wlString)
+import qualified Tungsten.BZip2 as BZip2
 
 type Conversion = Either Text Expr
 
@@ -1412,7 +1413,7 @@ compressBytes wrapper bytes =
   LBS.toStrict
     ( case wrapper of
         "GZIP" -> GZip.compress (LBS.fromStrict bytes)
-        "BZIP2" -> LBS.fromStrict bytes
+        "BZIP2" -> LBS.fromStrict (BZip2.compress bytes)
         _ -> LBS.fromStrict bytes
     )
 
@@ -1421,7 +1422,7 @@ decompressBytes wrapper bytes =
   LBS.toStrict
     ( case wrapper of
         "GZIP" -> GZip.decompress (LBS.fromStrict bytes)
-        "BZIP2" -> LBS.fromStrict bytes
+        "BZIP2" -> LBS.fromStrict (BZip2.decompress bytes)
         _ -> LBS.fromStrict bytes
     )
 

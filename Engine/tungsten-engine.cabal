@@ -15,6 +15,10 @@ build-type:         Simple
 extra-source-files:
   README.md
   docs/haskell-port.md
+  haskell/cbits/bzip2-1.0.8/LICENSE
+  haskell/cbits/bzip2-1.0.8/README.tungsten.md
+  haskell/cbits/bzip2-1.0.8/bzlib.h
+  haskell/cbits/bzip2-1.0.8/bzlib_private.h
   src/tungsten/data/system_symbols_wolfram_15_0.json
   src/tungsten/data/wolfram_named_characters_15_0.json
 tested-with:        GHC == 9.12.4
@@ -77,9 +81,20 @@ library
     transformers >= 0.6 && < 0.7,
     zlib       >= 0.7  && < 0.8
   other-modules:
+    Tungsten.BZip2
     Tungsten.NamedCharacterTH
     Tungsten.NumericPrecision
     Tungsten.SystemSymbolTH
+  include-dirs:
+    haskell/cbits/bzip2-1.0.8
+  c-sources:
+    haskell/cbits/bzip2-1.0.8/blocksort.c
+    haskell/cbits/bzip2-1.0.8/huffman.c
+    haskell/cbits/bzip2-1.0.8/crctable.c
+    haskell/cbits/bzip2-1.0.8/randtable.c
+    haskell/cbits/bzip2-1.0.8/compress.c
+    haskell/cbits/bzip2-1.0.8/decompress.c
+    haskell/cbits/bzip2-1.0.8/bzlib.c
 
 executable tungsten-hs
   import:          common-settings
