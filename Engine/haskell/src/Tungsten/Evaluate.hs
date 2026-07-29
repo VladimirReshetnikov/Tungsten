@@ -842,6 +842,7 @@ reduceBuiltin headName values = case headName of
   "Round" -> Right (reduceRounding RoundNearest headName values)
   "IntegerPart" -> Right (reduceRounding RoundIntegerPart headName values)
   "FractionalPart" -> Right (reduceRounding RoundFractionalPart headName values)
+  "Mod" -> Right (reduceNumericMod values)
   "Clip" -> reduceClip values
   "Sqrt" -> Right (reduceSqrt values)
   "Not" -> Right (reduceNot values)
@@ -1240,16 +1241,34 @@ reduceRounding operation headName values =
       | Just result <- roundScalar operation value -> result
     [value, multiple]
       | operation `elem` [RoundFloor, RoundCeiling, RoundNearest]
-      , Just exactValue <- toExact value
-      , Just exactMultiple@(Exact multipleNumerator _) <- toExact multiple ->
-          if multipleNumerator == 0
+      , Just multipleValue <- explicitRealExact multiple ->
+          if multipleValue == Exact 0 1
             then Symbol "Indeterminate"
-            else case divideExact exactValue exactMultiple of
-              Just quotient ->
-                fromExact
-                  (multiplyExact exactMultiple (Exact (roundExact operation quotient) 1))
+            else case roundingQuotient operation value multiple of
+              Just rounded -> reduceExplicitRealTimes [multiple, Integer rounded]
               Nothing -> Call (Symbol headName) values
     _ -> Call (Symbol headName) values
+
+roundingQuotient :: RoundingOperation -> Expr -> Expr -> Maybe Integer
+roundingQuotient operation value multiple
+  | Just exactValue <- toExact value
+  , Just exactMultiple <- toExact multiple =
+      roundExact operation <$> divideExact exactValue exactMultiple
+  | otherwise = do
+      valueDouble <- explicitRealDouble value
+      multipleDouble <- explicitRealDouble multiple
+      let quotient = valueDouble / multipleDouble
+      if isNaN quotient || isInfinite quotient
+        then Nothing
+        else
+          Just
+            ( case operation of
+                RoundFloor -> floor quotient
+                RoundCeiling -> ceiling quotient
+                RoundNearest -> round quotient
+                RoundIntegerPart -> truncate quotient
+                RoundFractionalPart -> truncate quotient
+            )
 
 reduceClip :: [Expr] -> Either EvaluationError Expr
 reduceClip arguments' = case arguments' of
@@ -3371,12 +3390,137 @@ reduceAbs :: [Expr] -> Expr
 reduceAbs [value]
   | Just (Exact numerator denominator) <- toExact value =
       fromExact (Exact (abs numerator) denominator)
+reduceAbs [Real source]
+  | Just (RealInfo (Exact numerator _) kind _ negativeZero machineSource) <- parseRealInfo source =
+      case kind of
+        MachineReal ->
+          maybe
+            (Real source)
+            (machineRealExpr . abs)
+            (readMaybe (T.unpack machineSource))
+        _ ->
+          Real
+            ( if numerator < 0
+                then negateRealSource source
+                else if negativeZero then positiveRealZeroSource source else source
+            )
+reduceAbs [value@(SpecialReal _)] = value
+reduceAbs [value]
+  | Just (realPart, imaginaryPart) <- explicitComplexParts value
+  , not (isExplicitReal value)
+  , Just realSquare <- multiplyExplicitReals realPart realPart
+  , Just imaginarySquare <- multiplyExplicitReals imaginaryPart imaginaryPart
+  , Just squareSum <- addExplicitReals realSquare imaginarySquare =
+      reduceSqrt [squareSum]
+reduceAbs [Call (Symbol "Times") factors]
+  | (numericFactors, symbolicFactors) <- List.partition isExplicitNumericFactor factors
+  , not (null numericFactors)
+  , not (null symbolicFactors) =
+      let numericMagnitude = reduceAbs [foldl' multiplyNumericFactor (Integer 1) numericFactors]
+          symbolicValue = case symbolicFactors of
+            [single] -> single
+            _ -> Call (Symbol "Times") symbolicFactors
+          symbolicMagnitude = Call (Symbol "Abs") [symbolicValue]
+       in if numericMagnitude == Integer 1
+            then symbolicMagnitude
+            else reduceTimes [numericMagnitude, symbolicMagnitude]
+reduceAbs [Call (Symbol "Power") [base, exponentValue]]
+  | Just (Exact numerator 1) <- toExact exponentValue
+  , numerator >= 0 =
+      reducePower [Call (Symbol "Abs") [base], exponentValue]
 reduceAbs values = Call (Symbol "Abs") values
 
 reduceSign :: [Expr] -> Expr
 reduceSign [value]
   | Just (Exact numerator _) <- toExact value = Integer (signum numerator)
+reduceSign [Real source]
+  | Just (RealInfo (Exact numerator _) _ _ _ _) <- parseRealInfo source =
+      Integer (signum numerator)
+reduceSign [SpecialReal _] = Integer 1
+reduceSign [value]
+  | Just (realPart, imaginaryPart) <- explicitComplexParts value
+  , not (isExplicitReal value) =
+      let magnitude = reduceAbs [value]
+       in if magnitude == Integer 0
+            then Integer 0
+            else case explicitRealExact magnitude of
+              Just magnitudeExact ->
+                makeComplex
+                  (divideRealPart realPart magnitudeExact)
+                  (divideRealPart imaginaryPart magnitudeExact)
+              Nothing -> reduceTimes [value, reciprocalExpression magnitude]
 reduceSign values = Call (Symbol "Sign") values
+
+reciprocalExpression :: Expr -> Expr
+reciprocalExpression (Call (Symbol "Power") [base, exponentValue])
+  | Just exponentExact <- toExact exponentValue =
+      reducePower [base, fromExact (negateExact exponentExact)]
+reciprocalExpression value = reducePower [value, Integer (-1)]
+
+isExplicitNumericFactor :: Expr -> Bool
+isExplicitNumericFactor value =
+  isExplicitReal value
+    || case explicitComplexParts value of
+      Just _ -> True
+      Nothing -> False
+
+multiplyNumericFactor :: Expr -> Expr -> Expr
+multiplyNumericFactor left right =
+  case (explicitComplexParts left, explicitComplexParts right) of
+    (Just leftParts, Just rightParts) ->
+      let (realPart, imaginaryPart) = multiplyComplexComponents leftParts rightParts
+       in makeComplex realPart imaginaryPart
+    _ -> reduceTimes [left, right]
+
+multiplyExplicitReals :: Expr -> Expr -> Maybe Expr
+multiplyExplicitReals left right
+  | isExplicitReal left
+  , isExplicitReal right = Just (reduceExplicitRealTimes [left, right])
+  | otherwise = Nothing
+
+addExplicitReals :: Expr -> Expr -> Maybe Expr
+addExplicitReals left right
+  | isExplicitReal left
+  , isExplicitReal right = Just (reduceExplicitRealPlus [left, right])
+  | otherwise = Nothing
+
+divideRealPart :: Expr -> Exact -> Expr
+divideRealPart value divisor
+  | Just exactValue <- toExact value
+  , Just quotient <- divideExact exactValue divisor = fromExact quotient
+divideRealPart value divisor =
+  reduceExplicitRealTimes [value, fromExact (reciprocalExact divisor)]
+
+reduceNumericMod :: [Expr] -> Expr
+reduceNumericMod [_dividend, divisor]
+  | explicitRealExact divisor == Just (Exact 0 1) = Symbol "Indeterminate"
+reduceNumericMod [_dividend, divisor, _offset]
+  | explicitRealExact divisor == Just (Exact 0 1) = Symbol "Indeterminate"
+reduceNumericMod values
+  | [dividend, divisor] <- values = numericMod dividend divisor (Integer 0)
+  | [dividend, divisor, offset] <- values = numericMod dividend divisor offset
+  | otherwise = Call (Symbol "Mod") values
+ where
+  numericMod dividend divisor offset
+    | Just exactDividend <- toExact dividend
+    , Just exactDivisor <- toExact divisor
+    , Just exactOffset <- toExact offset
+    , Just quotient <- divideExact (addExact exactDividend (negateExact exactOffset)) exactDivisor =
+        fromExact
+          ( addExact
+              exactOffset
+              ( addExact
+                  (addExact exactDividend (negateExact exactOffset))
+                  (negateExact (multiplyExact exactDivisor (Exact (roundExact RoundFloor quotient) 1)))
+              )
+          )
+    | Just dividendDouble <- explicitRealDouble dividend
+    , Just divisorDouble <- explicitRealDouble divisor
+    , Just offsetDouble <- explicitRealDouble offset =
+        let shifted = dividendDouble - offsetDouble
+            result = offsetDouble + shifted - divisorDouble * fromInteger (floor (shifted / divisorDouble))
+         in machineRealExpr result
+    | otherwise = Call (Symbol "Mod") values
 
 reduceNot :: [Expr] -> Expr
 reduceNot [Symbol "True"] = Symbol "False"
