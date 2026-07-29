@@ -627,6 +627,7 @@ parseCellPath source
   parseComponent value =
     maybe (Left ("invalid cell path component: " <> value)) Right (readMaybe (T.unpack value))
   pathComponent (JsonNumber value) = parseComponent value
+  pathComponent (JsonBool value) = Right (if value then 1 else 0)
   pathComponent _ = Left "JSON cell paths must be arrays of integers"
   requireNonempty [] = Left "cell paths must contain at least one integer"
   requireNonempty values = Right values
@@ -1289,7 +1290,7 @@ documentationRecordPayload :: DocumentationRecord -> JsonValue
 documentationRecordPayload record =
   JsonObject
     ( Map.fromList
-        [ ("category", JsonString (documentationCategory record))
+        ( [ ("category", JsonString (documentationCategory record))
         , ("kind", JsonString (documentationKind record))
         , ("paclet", JsonString (documentationPaclet record))
         , ("path", JsonString (T.pack (documentationPath record)))
@@ -1297,6 +1298,8 @@ documentationRecordPayload record =
         , ("text", JsonString (documentationText record))
         , ("title", JsonString (documentationTitle record))
         ]
+            <> maybe [] (pure . ("id",) . jsonInteger) (documentationId record)
+        )
     )
 
 documentationHitPayload :: DocumentationHit -> JsonValue
@@ -1537,13 +1540,12 @@ runFrontEndCommand command = do
     Left documentationError -> emitDocumentationError "frontend open-doc" documentationError
     Right (result, requireSuccess) -> do
       emitJson (kernelPayload result)
-      pure (kernelCommandExit requireSuccess result)
+      pure (frontEndCommandExit requireSuccess result)
 
-kernelCommandExit :: Bool -> KernelEvaluationResult -> Int
-kernelCommandExit requireSuccess result
-  | requireSuccess && kernelSuccess result == Just False = 1
-  | kernelEvaluationAvailable result = 0
-  | otherwise = 2
+frontEndCommandExit :: Bool -> KernelEvaluationResult -> Int
+frontEndCommandExit requireSuccess result
+  | requireSuccess && kernelSuccess result /= Just True = 1
+  | otherwise = 0
 
 parseSource :: Text -> Text -> Either Text (Text, Expr)
 parseSource requestedForm source = case T.toLower (T.strip requestedForm) of

@@ -27,10 +27,12 @@ module Tungsten.Notebook
 import Control.Applicative ((<|>))
 import Data.Bifunctor (first)
 import Data.Char (isSpace)
+import Data.List (findIndex)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Tungsten.Expression
 import Tungsten.Parser (parseErrorMessage, parseInputForm)
+import Tungsten.WolframString (skipWolframComment, skipWolframString)
 
 newtype NotebookError = NotebookError {notebookErrorMessage :: Text}
   deriving (Eq, Show)
@@ -38,6 +40,9 @@ newtype NotebookError = NotebookError {notebookErrorMessage :: Text}
 data NotebookDocument = NotebookDocument
   { notebookItems :: ![NotebookItem]
   , notebookOptions :: ![Expr]
+  , notebookPreamble :: !Text
+  , notebookRawItems :: ![Maybe Text]
+  , notebookRawOptions :: ![Maybe Text]
   }
   deriving (Eq, Show)
 
@@ -73,13 +78,98 @@ data NotebookPatch
 
 parseNotebook :: Text -> Either NotebookError NotebookDocument
 parseNotebook source = do
-  expression <- first (NotebookError . parseErrorMessage) (parseInputForm source)
-  notebookFromExpr expression
+  let sourceParts = notebookSourceParts source
+      expressionSource = case sourceParts of
+        Just (preamble, _, _) -> T.drop (T.length preamble) source
+        Nothing -> source
+  expression <- first (NotebookError . parseErrorMessage) (parseInputForm expressionSource)
+  document <- notebookFromExpr expression
+  pure $ case sourceParts of
+    Just (preamble, rawItems, rawOptions)
+      | length rawItems == length (notebookItems document)
+          && length rawOptions == length (notebookOptions document) ->
+          document
+            { notebookPreamble = preamble
+            , notebookRawItems = map Just rawItems
+            , notebookRawOptions = map Just rawOptions
+            }
+    _ -> document
+
+notebookSourceParts :: Text -> Maybe (Text, [Text], [Text])
+notebookSourceParts source = do
+  let (preamble, notebookSuffix) = T.breakOn "Notebook[" source
+  if T.null notebookSuffix then Nothing else pure ()
+  let openIndex = T.length preamble + T.length ("Notebook" :: Text)
+  closeIndex <- matchingSquareBracket source openIndex
+  rawArguments <- pure (splitTopLevelText (T.take (closeIndex - openIndex - 1) (T.drop (openIndex + 1) source)))
+  firstArgument <- case rawArguments of
+    value : _ -> Just (T.strip value)
+    [] -> Nothing
+  if T.length firstArgument < 2 || T.head firstArgument /= '{' || T.last firstArgument /= '}'
+    then Nothing
+    else
+      let itemSource = T.init (T.tail firstArgument)
+          items = splitTopLevelText itemSource
+       in Just (preamble, items, drop 1 rawArguments)
+
+matchingSquareBracket :: Text -> Int -> Maybe Int
+matchingSquareBracket source openIndex
+  | openIndex < 0 || openIndex >= T.length source || T.index source openIndex /= '[' = Nothing
+  | otherwise = go (openIndex + 1) 1
+ where
+  sourceLength = T.length source
+  go :: Int -> Int -> Maybe Int
+  go index depth
+    | index >= sourceLength = Nothing
+    | "(*" `T.isPrefixOf` T.drop index source = go (skipWolframComment source index) depth
+    | T.index source index == '"' = go (skipWolframString source index) depth
+    | T.index source index == '[' = go (index + 1) (depth + 1)
+    | T.index source index == ']' =
+        if depth == 1 then Just index else go (index + 1) (depth - 1)
+    | otherwise = go (index + 1) depth
+
+splitTopLevelText :: Text -> [Text]
+splitTopLevelText source = reverse (finish (go 0 0 0 0 0 []))
+ where
+  sourceLength = T.length source
+  go :: Int -> Int -> Int -> Int -> Int -> [Text] -> (Int, [Text])
+  go index start squareDepth braceDepth parenthesisDepth parts
+    | index >= sourceLength = (start, parts)
+    | "(*" `T.isPrefixOf` T.drop index source =
+        go (skipWolframComment source index) start squareDepth braceDepth parenthesisDepth parts
+    | T.index source index == '"' =
+        go (skipWolframString source index) start squareDepth braceDepth parenthesisDepth parts
+    | otherwise = case T.index source index of
+        '[' -> advance (squareDepth + 1) braceDepth parenthesisDepth
+        ']' -> advance (max 0 (squareDepth - 1)) braceDepth parenthesisDepth
+        '{' -> advance squareDepth (braceDepth + 1) parenthesisDepth
+        '}' -> advance squareDepth (max 0 (braceDepth - 1)) parenthesisDepth
+        '(' -> advance squareDepth braceDepth (parenthesisDepth + 1)
+        ')' -> advance squareDepth braceDepth (max 0 (parenthesisDepth - 1))
+        ','
+          | squareDepth == 0 && braceDepth == 0 && parenthesisDepth == 0 ->
+              let part = T.strip (T.take (index - start) (T.drop start source))
+                  updatedParts = if T.null part then parts else part : parts
+               in go (index + 1) (index + 1) squareDepth braceDepth parenthesisDepth updatedParts
+        _ -> advance squareDepth braceDepth parenthesisDepth
+     where
+      advance nextSquare nextBrace nextParenthesis =
+        go (index + 1) start nextSquare nextBrace nextParenthesis parts
+  finish (start, parts) =
+    let part = T.strip (T.drop start source)
+     in if T.null part then parts else part : parts
 
 notebookFromExpr :: Expr -> Either NotebookError NotebookDocument
 notebookFromExpr (Call (Symbol "Notebook") (itemsExpression : options)) = do
   items <- expectList "Notebook's first argument" itemsExpression
-  pure (NotebookDocument (map notebookItemFromExpr items) options)
+  pure
+    NotebookDocument
+      { notebookItems = map notebookItemFromExpr items
+      , notebookOptions = options
+      , notebookPreamble = ""
+      , notebookRawItems = replicate (length items) Nothing
+      , notebookRawOptions = replicate (length options) Nothing
+      }
 notebookFromExpr expression =
   Left
     ( NotebookError
@@ -139,7 +229,48 @@ notebookItemToExpr = \case
   RawItem expression -> expression
 
 renderNotebook :: NotebookDocument -> Text
-renderNotebook document = fullForm (notebookToExpr document) <> "\n"
+renderNotebook document =
+  notebookPreamble document
+    <> "Notebook[{\n"
+    <> T.intercalate ",\n" renderedItems
+    <> "\n}"
+    <> (if null renderedOptions then "" else ", " <> T.intercalate ", " renderedOptions)
+    <> "]\n"
+ where
+  renderedItems = zipWith renderPreserved (notebookItems document) (padRaw (notebookRawItems document))
+  renderedOptions = zipWith renderOption (notebookOptions document) (padRaw (notebookRawOptions document))
+  renderPreserved item = maybe (renderNotebookItem item) id
+  renderOption option = maybe (notebookSourceExpression option) id
+  padRaw values = values <> repeat Nothing
+
+renderNotebookItem :: NotebookItem -> Text
+renderNotebookItem = \case
+  CellItem cell ->
+    "Cell["
+      <> T.intercalate ", "
+        ( cellExpressionText (cellContent cell)
+            : maybe [] (pure . cellExpressionText . String) (cellStyle cell)
+            <> map cellExpressionText (cellOptions cell)
+        )
+      <> "]"
+  CellGroup items state outerOptions ->
+    "Cell[CellGroupData[{\n"
+      <> T.intercalate ",\n" (map renderNotebookItem items)
+      <> "\n}"
+      <> maybe "" ((", " <>) . cellExpressionText) state
+      <> "]"
+      <> (if null outerOptions then "" else ", " <> T.intercalate ", " (map cellExpressionText outerOptions))
+      <> "]"
+  RawItem expression -> cellExpressionText expression
+
+cellExpressionText :: Expr -> Text
+cellExpressionText = notebookSourceExpression
+
+notebookSourceExpression :: Expr -> Text
+notebookSourceExpression (Call (Symbol ruleHead) [left, right])
+  | ruleHead == "Rule" || ruleHead == "System`Rule" =
+      inputForm left <> "->" <> inputForm right
+notebookSourceExpression expression = inputForm expression
 
 createNotebook :: Maybe Text -> [(Text, Text)] -> NotebookDocument
 createNotebook title cells =
@@ -156,6 +287,11 @@ createNotebook title cells =
     , notebookOptions = case title of
         Just value | not (T.null value) ->
           [Call (Symbol "Rule") [Symbol "WindowTitle", String value]]
+        _ -> []
+    , notebookPreamble = ""
+    , notebookRawItems = replicate (length cells) Nothing
+    , notebookRawOptions = case title of
+        Just value | not (T.null value) -> [Nothing]
         _ -> []
     }
 
@@ -226,13 +362,19 @@ applyNotebookPatch :: NotebookPatch -> NotebookDocument -> Either NotebookError 
 applyNotebookPatch patch document = case patch of
   AppendCell containerPath cell -> do
     items <- modifyContainer (maybe [] id containerPath) (Right . (<> [CellItem cell])) (notebookItems document)
-    pure document {notebookItems = items}
+    let rawItems = case maybe [] id containerPath of
+          [] -> notebookRawItems document <> [Nothing]
+          path -> invalidateTopLevel path (notebookRawItems document)
+    pure document {notebookItems = items, notebookRawItems = rawItems}
   InsertCell containerPath index cell -> do
     items <- modifyContainer (maybe [] id containerPath) (insertAt index (CellItem cell)) (notebookItems document)
-    pure document {notebookItems = items}
+    let rawItems = case maybe [] id containerPath of
+          [] -> insertRawAt index (notebookRawItems document)
+          path -> invalidateTopLevel path (notebookRawItems document)
+    pure document {notebookItems = items, notebookRawItems = rawItems}
   ReplaceCell path requestedStyle content -> do
     items <- modifyTarget path replaceTarget (notebookItems document)
-    pure document {notebookItems = items}
+    pure document {notebookItems = items, notebookRawItems = invalidateTopLevel path (notebookRawItems document)}
    where
     replaceTarget (CellItem existing) =
       Right
@@ -249,9 +391,40 @@ applyNotebookPatch patch document = case patch of
       Left (NotebookError "replace_cell expects a cell or raw item target")
   DeleteItem path -> do
     items <- deleteAtPath path (notebookItems document)
-    pure document {notebookItems = items}
+    let rawItems = case path of
+          [index] -> deleteRawAt index (notebookRawItems document)
+          _ -> invalidateTopLevel path (notebookRawItems document)
+    pure document {notebookItems = items, notebookRawItems = rawItems}
   SetNotebookOption name value ->
-    Right document {notebookOptions = setRule name value (notebookOptions document)}
+    let options = notebookOptions document
+        existingIndex = findIndex (isRuleNamed name) options
+        rawOptions = case existingIndex of
+          Just index -> replaceRawAt index Nothing (notebookRawOptions document)
+          Nothing -> notebookRawOptions document <> [Nothing]
+     in Right
+          document
+            { notebookOptions = setRule name value options
+            , notebookRawOptions = rawOptions
+            }
+
+isRuleNamed :: Text -> Expr -> Bool
+isRuleNamed name (Call (Symbol "Rule") [Symbol actualName, _]) = actualName == name
+isRuleNamed _ _ = False
+
+invalidateTopLevel :: [Int] -> [Maybe Text] -> [Maybe Text]
+invalidateTopLevel (index : _) = replaceRawAt index Nothing
+invalidateTopLevel [] = id
+
+replaceRawAt :: Int -> Maybe Text -> [Maybe Text] -> [Maybe Text]
+replaceRawAt index value values
+  | index < 0 || index >= length values = values
+  | otherwise = take index values <> [value] <> drop (index + 1) values
+
+insertRawAt :: Int -> [Maybe Text] -> [Maybe Text]
+insertRawAt index values = take index values <> [Nothing] <> drop index values
+
+deleteRawAt :: Int -> [Maybe Text] -> [Maybe Text]
+deleteRawAt index values = take index values <> drop (index + 1) values
 
 modifyContainer
   :: [Int]
