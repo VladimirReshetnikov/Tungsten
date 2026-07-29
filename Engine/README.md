@@ -4,8 +4,8 @@
 - Audience: Tungsten users, script authors, maintainers, reviewers, and contributors onboarding into `Engine`
 - Scope: `Engine`
 - Created (UTC): 2026-04-23T02:16:55Z
-- Updated (UTC): 2026-07-22T19:25:35Z
-- Repository HEAD: b6e36d4fcd683cb312b5bf4000be5da0205356cf
+- Updated (UTC): 2026-07-29T08:50:31Z
+- Repository HEAD: 089793793a3a87e2fc14e8feebdf2b8257ad43c9
 - Related code:
   - `Engine/cpp/`
   - `Engine/src/tungsten/`
@@ -35,9 +35,9 @@
 Tungsten is a multi-runtime automation and symbolic-computation workspace for a local Wolfram
 installation. The Python implementation remains the executable compatibility reference. The C++17
 runtime owns that reference's complete dispatch surface, provides an installable native library and
-CLI, and is the target of the PowerShell and .NET projections, while the active Haskell port
-provides an independent typed expression, parser, evaluator, structural-notebook, CLI, and
-JSON-protocol foundation. Tungsten exists for the
+CLI, and is the target of the PowerShell and .NET projections. The independently buildable Haskell
+port has measured parity with the Python reference across the maintained evaluator, parser,
+stateful-session, dispatch, and CLI gates. Tungsten exists for the
 workflows that are awkward in the traditional Mathematica GUI but natural for agents, scripts, and
 typed host applications:
 
@@ -537,6 +537,11 @@ cabal build all
 cabal test all --ghc-options=-Werror
 cabal check
 ```
+
+The Haskell parity record is 2,499/2,499 recorded evaluator calls, 8,375/8,375 generated edge
+cases, 94/94 stateful steps, 1,414/1,414 parser cases, 537/537 dispatch owners, and 126/126 broad
+CLI cases. Its BZIP2 import/export path uses the vendored upstream 1.0.8 codec and independent
+interoperability vectors. See [Haskell Port](./docs/haskell-port.md) for commands and provenance.
 
 Install the native C++ library, headers, CMake package, and CLI under a staging prefix when needed:
 

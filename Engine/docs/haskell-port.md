@@ -1,25 +1,25 @@
 # Tungsten Engine Haskell port
 
-- Status: Complete measured dispatch ownership with active behavioral compatibility gaps
+- Status: Complete measured parity with the Python compatibility reference
 - Audience: Tungsten users, maintainers, integration authors, and contributors
 - Scope: `Engine/haskell`, `Engine/tungsten-engine.cabal`, and `Engine/cabal.project`
 - Created (UTC): 2026-07-18T14:01:03Z
-- Updated (UTC): 2026-07-28T18:53:25Z
-- Repository HEAD: 287961861337179c83ae1af94e2d1174dcae0a4d
+- Updated (UTC): 2026-07-29T08:50:31Z
+- Repository HEAD: 089793793a3a87e2fc14e8feebdf2b8257ad43c9
 
 ## Purpose
 
-The Haskell implementation is an active typed port of Tungsten Engine. It is being introduced in
-coherent, independently testable slices while the Python implementation remains the compatibility
-reference for the wider automation surface. The independently buildable C++17 port and all three
-runtime trees currently coexist under the same `Engine` ownership boundary.
+The Haskell implementation is an independently buildable typed port of Tungsten Engine. The Python
+implementation remains the executable compatibility reference, while the C++17 and Haskell ports
+provide separate native runtimes under the same `Engine` ownership boundary.
 
 The port favors immutable values, exact arithmetic, explicit errors, and JSON process boundaries.
 Unknown evaluator forms remain symbolic instead of silently receiving guessed semantics.
 
-All 537 evaluator heads in the maintained Python dispatch inventory now have an explicit Haskell
-owner. That is a dispatch-completeness measurement, not a claim of unrestricted semantic parity:
-the bounded numeric and algebraic domains listed below still contain known behavioral gaps.
+All 537 evaluator heads in the maintained Python dispatch inventory have an explicit Haskell owner.
+The recorded, generated-edge, stateful, parser, and command-line differential gates all report exact
+parity over their maintained corpora. This is parity with Tungsten's bounded Python compatibility
+reference, not a claim that either implementation is a complete Wolfram kernel.
 
 ## Build and run
 
@@ -57,11 +57,14 @@ cabal run tungsten-hs -- expr evaluate --code 'Plus[1, Times[2, 3]]' --form full
 
 The verification checkpoint recorded at the provenance commit passed:
 
-- `cabal test all -j1 --ghc-options=-Werror`;
-- a warnings-as-errors build of `tungsten-hs`;
-- 171/171 exact Python/Haskell expression CLI comparisons;
-- 1,414/1,414 parser-corpus comparisons; and
-- 537/537 static Python dispatch owners.
+- `cabal test all --ghc-options=-Werror` and `cabal sdist all`;
+- 2,499/2,499 recorded evaluator calls across 585 Python tests;
+- 8,375/8,375 generated evaluator edge cases;
+- 94/94 stateful evaluator steps across 11 scenarios;
+- 1,414/1,414 parser comparisons;
+- 537/537 static Python dispatch owners;
+- 126/126 broad CLI/process comparisons; and
+- independent BZIP2 encode/decode interoperability vectors plus round-trip coverage.
 
 The static inventory is always paired with behavioral differentials because recognizing a head is
 not evidence that every input shape or numerical boundary has the same result.
@@ -75,8 +78,8 @@ printf '%s\n' \
   | cabal run tungsten-hs -- protocol
 ```
 
-The no-argument executable mode also starts the protocol server for compatibility with the first
-Haskell process clients.
+The no-argument executable mode starts the Python-compatible REPL. Existing process clients use the
+explicit `protocol` command for newline-delimited JSON or `eval-batch` for evaluator differentials.
 
 ## Evaluation runtime boundary
 
@@ -227,9 +230,10 @@ The algebraic reducer now owns `Root`, `RootReduce`, `MinimalPolynomial`, `ToRad
 rational-polynomial arithmetic, square-free normalization, algebraic resultants, rational-angle
 trigonometry, Sturm counting on real intervals, supported radical conversion, root sums, and
 bounded univariate or square-linear solving. Sessions supply their live `$MaxRootDegree` value.
-This family is not yet full parity: factor selection for reducible candidates, certified isolation,
-nested algebraic coefficients, general cubic/quartic radicals, and some floating or symbolic-linear
-canonical forms remain open.
+The Python reference intentionally leaves factor selection for reducible candidates, certified
+isolation, nested algebraic coefficients, general cubic/quartic radicals, and some floating or
+symbolic-linear canonical forms outside this bounded family; Haskell preserves the same symbolic
+boundary.
 
 `RandomSample` and `RandomPermutation` are session-runtime operations. Their pure plans reproduce
 CPython's pool-versus-rejection sampling schedule and descending Fisher-Yates draws, preserve raw
@@ -239,52 +243,15 @@ session API.
 
 ## Compatibility boundary
 
-The following Engine areas still use the Python implementation and are not represented as Haskell
-features yet:
+Measured parity is defined against the maintained Python reference and its executable specifications.
+Unsupported Wolfram Language shapes therefore remain symbolic or diagnostic in both implementations;
+full Wolfram semantics continue to require the real kernel-backed command path.
 
-- the complete Wolfram tokenizer, box-language and StandardForm parser, including the broad named infix-operator precedence table;
-- operational enforcement
-  of the mutable iteration, precision, and output-size settings, plus main-loop
-  `$PreRead`/`$Pre`/`$Post`/`$PrePrint` hook application; `$MessagePrePrint` is implemented for
-  explicit `Message` insertions and assertion diagnostics, while `$MaxRootDegree` is enforced by
-  the session algebraic reducer;
-- nested positional-slot scope diagnostics, session-aware callback evaluation for aggregation and array reducers
-  beyond the selection, map, sort, string-pattern, and pattern/rewrite families, the base
-  encoding, import/export, and textual-form character-encoding surface, broader loop control, real-valued iteration,
-  certified algebraic factor selection and root isolation, nested algebraic-coefficient reduction,
-  general cubic/quartic radical conversion, broader floating and symbolic `Solve` canonicalization,
-  certified arbitrary-precision domain classification, very-large-exponent handling,
-  stored-real quantization, and complete numeric identity coverage;
-- global message-stream recovery in the exported pure `Tungsten.Evaluate.evaluate` API, which
-  remains fatal while session, CLI, protocol, and REPL evaluation recover nonfatal diagnostics;
-- Python-specific `RegularExpression` constructs outside the POSIX TDFA intersection, including
-  look-around, named groups, and inline flags other than a leading `(?i)`; ordinary expressions and
-  the compatibility suite's case-insensitive prefix are supported;
-- `OutputForm`, `TraditionalForm`, `TeXForm`, and the remaining display-form renderers at session
-  output boundaries;
-- tolerant parsing of representative saved notebooks, source-span-preserving edits, and byte-for-byte
-  preservation of untouched notebook and box-expression formatting;
-- the PowerShell and .NET projections, which currently target `tungsten-cpp` and do not yet call
-  the Haskell executable.
+The PowerShell and .NET projections still select `tungsten-cpp` by default. That product choice is
+separate from Haskell CLI parity; callers may select `tungsten-hs` explicitly after their own host
+contract tests pass. Documentation index builds and full-text queries invoke the local `sqlite3`
+executable, while filename-fast-path search and record extraction remain available without it.
 
-Do not redirect an existing Python, PowerShell, or .NET production caller to `tungsten-hs` unless
-its required commands and payload fields appear in the implemented table above and its own
-compatibility tests pass.
-
-## Migration order
-
-The next useful port slices are:
-
-1. grow parser and evaluator parity from the Python corpus and the local Wolfram held-parser oracle;
-2. port source-preserving notebook spans and broader box-language interpretation;
-3. finish context APIs, operational settings,
-   remaining scoping/control flow, and real iteration on the immutable session;
-4. complete broad Python CLI payload parity;
-5. move the PowerShell and .NET projections only after their JSON contract tests pass against the
-   Haskell executable.
-
-Each slice should keep the Python behavior as an oracle where possible and should be committed only
-with focused Haskell tests plus an end-to-end JSON smoke check.
-
-Documentation index builds and full-text queries currently invoke the local `sqlite3` executable;
-filename-fast-path search and record extraction remain available through the library without it.
+Future work should add new behavior to the Python reference and both native ports together, extending
+the recorded and generated differential corpora in the same change. A regression is any nonzero
+mismatch in the proof gates listed above.
