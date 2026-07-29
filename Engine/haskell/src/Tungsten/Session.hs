@@ -22,7 +22,7 @@ import Control.Concurrent (threadDelay)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Char (isAlpha, isAlphaNum, isPrint, ord)
-import Data.List (sortBy, transpose)
+import Data.List (findIndex, sortBy, transpose)
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Clock (getMonotonicTimeNSec)
@@ -3146,6 +3146,24 @@ reduceSessionEvaluatedCall depth session = \case
           "MapIndexed[f] expects exactly one argument when used as an operator."
   Call (Symbol "AssociationMap") values ->
     Just (evaluateSessionAssociationMap depth session values)
+  Call (Symbol truthHead) values
+    | any (`isSessionSystemHead` truthHead) ["AllTrue", "AnyTrue", "NoneTrue"] ->
+        Just (evaluateSessionTruthCollection depth session truthHead values)
+  Call (Symbol tallyHead) values
+    | any (`isSessionSystemHead` tallyHead) ["Tally", "Counts"]
+    , length values == 2 ->
+        Just (evaluateSessionTallyCounts depth session tallyHead values)
+  Call (Symbol countsByHead) values
+    | isSessionSystemHead "CountsBy" countsByHead ->
+        Just (evaluateSessionCountsBy depth session values)
+  Call (Symbol accumulateHead) values
+    | isSessionSystemHead "Accumulate" accumulateHead
+    , length values == 2 ->
+        Just (evaluateSessionAccumulate depth session values)
+  Call (Symbol containsOnlyHead) values
+    | isSessionSystemHead "ContainsOnly" containsOnlyHead
+    , Just test <- sessionContainsOnlyCallback values ->
+        Just (evaluateSessionContainsOnly depth session test values)
   Call (Symbol "Apply") values ->
     Just (evaluateSessionApply depth session values)
   Call (Symbol "KeyMap") values ->
@@ -4121,6 +4139,205 @@ evaluateSessionAssociationMap depth session = \case
       (retained <> [Call (Symbol "Rule") [key, value]])
       updated
       rest
+
+sessionListOrAssociationCollection :: Expr -> Maybe SessionOrderedCollection
+sessionListOrAssociationCollection expression@(Call (Symbol expressionHead) _)
+  | isSessionSystemHead "List" expressionHead = sessionOrderedCollection expression
+  | isSessionSystemHead "Association" expressionHead = do
+      collection <- sessionOrderedCollection expression
+      if sessionCollectionAssociation collection then Just collection else Nothing
+sessionListOrAssociationCollection _ = Nothing
+
+evaluateSessionTruthCollection
+  :: Int
+  -> EvaluationSession
+  -> Text
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionTruthCollection depth session operation = \case
+  [subject, test] -> case sessionListOrAssociationCollection subject of
+    Nothing ->
+      sessionFailure session (operation <> " expects a list or association.")
+    Just collection ->
+      testValues session (map sessionItemValue (sessionCollectionItems collection))
+   where
+    testValues current [] =
+      Right (Symbol (if isAny then "False" else "True"), current)
+    testValues current (value : remaining) = do
+      (outcome, updated) <-
+        evaluateSessionCallable depth current test [value]
+      let succeeded = outcome == Symbol "True"
+      if isAny
+        then
+          if succeeded
+            then Right (Symbol "True", updated)
+            else testValues updated remaining
+        else
+          if isNone
+            then
+              if succeeded
+                then Right (Symbol "False", updated)
+                else testValues updated remaining
+            else
+              if succeeded
+                then testValues updated remaining
+                else Right (Symbol "False", updated)
+    isAny = isSessionSystemHead "AnyTrue" operation
+    isNone = isSessionSystemHead "NoneTrue" operation
+  _ ->
+    sessionFailure
+      session
+      (operation <> " expects a list and a test function.")
+
+evaluateSessionTallyCounts
+  :: Int
+  -> EvaluationSession
+  -> Text
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionTallyCounts depth session operation = \case
+  [subject, test] -> case sessionListOrAssociationCollection subject of
+    Nothing ->
+      sessionFailure session (operation <> " expects a list or association.")
+    Just collection -> do
+      (groups, updated) <-
+        groupValues [] session (map sessionItemValue (sessionCollectionItems collection))
+      let row (key, count) = evaluatedList [key, Integer count]
+          rule (key, count) = Call (Symbol "Rule") [key, Integer count]
+      Right
+        ( if isSessionSystemHead "Tally" operation
+            then evaluatedList (map row groups)
+            else normalizedSessionAssociation (map rule groups)
+        , updated
+        )
+   where
+    groupValues retained current [] = Right (retained, current)
+    groupValues retained current (value : remaining) = do
+      (matching, updated) <- findGroup 0 current value retained
+      let next = case matching of
+            Nothing -> retained <> [(value, 1)]
+            Just index ->
+              let (key, count) = retained !! index
+               in replaceSessionListIndex index (key, count + 1) retained
+      groupValues next updated remaining
+    findGroup _ current _ [] = Right (Nothing, current)
+    findGroup index current value ((key, _) : remaining) = do
+      (outcome, updated) <-
+        evaluateSessionCallable depth current test [key, value]
+      if outcome == Symbol "True"
+        then Right (Just index, updated)
+        else findGroup (index + 1) updated value remaining
+  _ ->
+    sessionFailure
+      session
+      ( operation
+          <> if isSessionSystemHead "Tally" operation
+            then " expects a list and an optional binary test."
+            else " expects a list or association and an optional binary test."
+      )
+
+evaluateSessionCountsBy
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionCountsBy depth session = \case
+  [subject, function] -> case sessionListOrAssociationCollection subject of
+    Nothing -> sessionFailure session "CountsBy expects a list or association."
+    Just collection -> do
+      (groups, updated) <-
+        countKeys [] session (map sessionItemValue (sessionCollectionItems collection))
+      Right
+        ( normalizedSessionAssociation
+            [Call (Symbol "Rule") [key, Integer count] | (key, count) <- groups]
+        , updated
+        )
+   where
+    countKeys retained current [] = Right (retained, current)
+    countKeys retained current (value : remaining) = do
+      (key, updated) <- evaluateSessionCallable depth current function [value]
+      let next = case findIndex ((== key) . fst) retained of
+            Nothing -> retained <> [(key, 1)]
+            Just index ->
+              let (firstKey, count) = retained !! index
+               in replaceSessionListIndex index (firstKey, count + 1) retained
+      countKeys next updated remaining
+  _ -> sessionFailure session "CountsBy expects a list and a key function."
+
+evaluateSessionAccumulate
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionAccumulate depth session = \case
+  [subject, combiner] -> case sessionListOrAssociationCollection subject of
+    Nothing -> sessionFailure session "Accumulate expects a list or association."
+    Just collection -> do
+      (accumulated, updated) <-
+        accumulate session (map sessionItemValue (sessionCollectionItems collection))
+      let items = zipWith replaceSessionItemValue (sessionCollectionItems collection) accumulated
+      Right (rebuildSessionCollection collection items, updated)
+   where
+    accumulate current [] = Right ([], current)
+    accumulate current (firstValue : remaining) =
+      go firstValue [firstValue] current remaining
+    go _ retained current [] = Right (retained, current)
+    go accumulator retained current (value : remaining) = do
+      (next, updated) <-
+        evaluateSessionCallable depth current combiner [accumulator, value]
+      go next (retained <> [next]) updated remaining
+  _ ->
+    sessionFailure
+      session
+      "Accumulate expects a list and an optional binary combiner."
+
+sessionContainsOnlyCallback :: [Expr] -> Maybe Expr
+sessionContainsOnlyCallback values = case drop 2 values of
+  [] -> Nothing
+  options -> foldl retain Nothing options
+ where
+  retain _current (Call (Symbol ruleHead) [Symbol optionName, function])
+    | isSessionSystemHead "Rule" ruleHead
+        || isSessionSystemHead "RuleDelayed" ruleHead
+    , isSessionSystemHead "SameTest" optionName =
+        if isAutomatic function then Nothing else Just function
+  retain current _ = current
+  isAutomatic (Symbol name) = isSessionSystemHead "Automatic" name
+  isAutomatic _ = False
+
+evaluateSessionContainsOnly
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionContainsOnly depth session test values = case take 2 values of
+  [left, right] ->
+    case (sessionListOrAssociationCollection left, sessionListOrAssociationCollection right) of
+      (Just leftCollection, Just rightCollection) ->
+        checkLeft
+          session
+          (map sessionItemValue (sessionCollectionItems leftCollection))
+          (map sessionItemValue (sessionCollectionItems rightCollection))
+      _ -> sessionFailure session "ContainsOnly expects a list or association."
+  _ ->
+    sessionFailure
+      session
+      "ContainsOnly expects two arguments and an optional SameTest rule."
+ where
+  checkLeft current [] _ = Right (Symbol "True", current)
+  checkLeft current (value : remaining) candidates = do
+    (found, updated) <- anyMatch current value candidates
+    if found
+      then checkLeft updated remaining candidates
+      else Right (Symbol "False", updated)
+  anyMatch current _ [] = Right (False, current)
+  anyMatch current value (candidate : remaining) = do
+    (outcome, updated) <-
+      evaluateSessionCallable depth current test [value, candidate]
+    if outcome == Symbol "True"
+      then Right (True, updated)
+      else anyMatch updated value remaining
 
 evaluateSessionMap
   :: Int

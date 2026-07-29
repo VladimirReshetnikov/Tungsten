@@ -1044,7 +1044,7 @@ reduceBuiltin headName values = case headName of
   "PositionIndex" -> reducePositionIndex values
   "Range" -> Right (reduceRange values)
   "Total" -> Right (reduceTotal values)
-  "Accumulate" -> Right (reduceAccumulate values)
+  "Accumulate" -> reduceAccumulate values
   "Reverse" -> reduceReverse values
   "RotateLeft" -> Right (reduceRotate True headName values)
   "RotateRight" -> Right (reduceRotate False headName values)
@@ -5628,10 +5628,14 @@ valueGroupIndex key = go 0
     | otherwise = go (index + 1) rest
 
 listOrAssociationValues :: Text -> Expr -> Either EvaluationError [Expr]
-listOrAssociationValues _ (Call (Symbol "List") values) = Right values
-listOrAssociationValues operation association = do
-  entries <- requireAssociation operation association
-  pure [value | AssociationEntry _ _ value <- entries]
+listOrAssociationValues _ (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead = Right values
+listOrAssociationValues operation association =
+  case associationEntries association of
+    Just entries -> Right [value | AssociationEntry _ _ value <- entries]
+    Nothing ->
+      Left
+        (EvaluationError (operation <> " expects a list or association."))
 
 groupValuesBy :: Expr -> [Expr] -> Either EvaluationError [ValueGroup]
 groupValuesBy keyFunction = foldM add []
@@ -5734,28 +5738,64 @@ reduceKeyIntersection [associations] = do
 reduceKeyIntersection values = Right (Call (Symbol "KeyIntersection") values)
 
 reduceTally :: [Expr] -> Either EvaluationError Expr
-reduceTally [dataExpression] = do
+reduceTally [dataExpression] = tallyValues dataExpression Nothing
+reduceTally [dataExpression, test] = tallyValues dataExpression (Just test)
+reduceTally _ =
+  Left
+    ( EvaluationError
+        "Tally expects a list and an optional binary test."
+    )
+
+tallyValues :: Expr -> Maybe Expr -> Either EvaluationError Expr
+tallyValues dataExpression test = do
   values <- listOrAssociationValues "Tally" dataExpression
-  let groups = foldl' (\retained value -> addValueGroup value value retained) [] values
+  groups <- foldM (addValueGroupBy test) [] values
   pure
     ( list
         [ list [key, Integer (fromIntegral (length groupedValues))]
         | ValueGroup key groupedValues <- groups
         ]
     )
-reduceTally values = Right (Call (Symbol "Tally") values)
+
+addValueGroupBy
+  :: Maybe Expr
+  -> [ValueGroup]
+  -> Expr
+  -> Either EvaluationError [ValueGroup]
+addValueGroupBy test groups value = do
+  matching <- matchingGroup 0 groups
+  pure $ case matching of
+    Nothing -> groups <> [ValueGroup value [value]]
+    Just index -> case groups !! index of
+      ValueGroup key groupedValues ->
+        replaceListIndex index (ValueGroup key (groupedValues <> [value])) groups
+ where
+  matchingGroup _ [] = Right Nothing
+  matchingGroup index (ValueGroup key _ : remaining) = do
+    matches <- equivalentBy test key value
+    if matches
+      then Right (Just index)
+      else matchingGroup (index + 1) remaining
 
 reduceCounts :: [Expr] -> Either EvaluationError Expr
-reduceCounts [dataExpression] = do
+reduceCounts [dataExpression] = countValues dataExpression Nothing
+reduceCounts [dataExpression, test] = countValues dataExpression (Just test)
+reduceCounts _ =
+  Left
+    ( EvaluationError
+        "Counts expects a list or association and an optional binary test."
+    )
+
+countValues :: Expr -> Maybe Expr -> Either EvaluationError Expr
+countValues dataExpression test = do
   values <- listOrAssociationValues "Counts" dataExpression
-  let groups = foldl' (\retained value -> addValueGroup value value retained) [] values
+  groups <- foldM (addValueGroupBy test) [] values
   pure
     ( associationExpr
         [ AssociationEntry "Rule" key (Integer (fromIntegral (length groupedValues)))
         | ValueGroup key groupedValues <- groups
         ]
     )
-reduceCounts values = Right (Call (Symbol "Counts") values)
 
 reduceCatenate :: [Expr] -> Either EvaluationError Expr
 reduceCatenate [dataExpression] = do
@@ -5841,14 +5881,19 @@ reduceTruthCollection operation combine [dataExpression, test] = do
   values <- listOrAssociationValues operation dataExpression
   outcomes <- traverse (evaluate . Call test . pure) values
   pure (boolean (combine (map (== Symbol "True") outcomes)))
-reduceTruthCollection operation _ values = Right (Call (Symbol operation) values)
+reduceTruthCollection operation _ _ =
+  Left
+    ( EvaluationError
+        (operation <> " expects a list and a test function.")
+    )
 
 reduceContains :: Text -> ([Expr] -> [Expr] -> Bool) -> [Expr] -> Either EvaluationError Expr
 reduceContains operation relation [left, right] = do
   leftValues <- listOrAssociationValues operation left
   rightValues <- listOrAssociationValues operation right
   pure (boolean (relation leftValues rightValues))
-reduceContains operation _ values = Right (Call (Symbol operation) values)
+reduceContains operation _ _ =
+  Left (EvaluationError (operation <> " expects exactly two arguments."))
 
 containsAll :: [Expr] -> [Expr] -> Bool
 containsAll left right = all (`elem` left) right
@@ -5861,7 +5906,7 @@ containsExactly left right = containsAll left right && containsAll right left
 
 reduceContainsOnly :: [Expr] -> Either EvaluationError Expr
 reduceContainsOnly arguments' = do
-  (dataArguments, sameTest) <- splitSameTestOption "ContainsOnly" arguments'
+  (dataArguments, sameTest) <- splitContainsOnlyOptions arguments'
   case dataArguments of
     [left, right] -> do
       leftValues <- listOrAssociationValues "ContainsOnly" left
@@ -5877,17 +5922,30 @@ reduceContainsOnly arguments' = do
             "ContainsOnly expects two arguments and an optional SameTest rule."
         )
 
-splitSameTestOption
-  :: Text
-  -> [Expr]
+splitContainsOnlyOptions
+  :: [Expr]
   -> Either EvaluationError ([Expr], Maybe Expr)
-splitSameTestOption _operation arguments' = case reverse arguments' of
-  Call (Symbol ruleHead) [Symbol optionName, function] : remaining
-    | systemHeadIn ["Rule", "RuleDelayed"] ruleHead
-    , systemHeadIn ["SameTest"] optionName ->
-        Right (reverse remaining, normalizeAutomatic function)
-  _ -> Right (arguments', Nothing)
+splitContainsOnlyOptions arguments'
+  | length arguments' < 2 = Right (arguments', Nothing)
+  | otherwise = do
+      sameTest <- foldM option Nothing (drop 2 arguments')
+      Right (take 2 arguments', sameTest)
  where
+  option _ (Call (Symbol ruleHead) [Symbol optionName, function])
+    | systemHeadIn ["Rule", "RuleDelayed"] ruleHead
+    , systemHeadIn ["SameTest"] optionName =
+        Right (normalizeAutomatic function)
+  option _ (Call (Symbol ruleHead) [Symbol _, _])
+    | systemHeadIn ["Rule", "RuleDelayed"] ruleHead =
+    Left
+      ( EvaluationError
+          "ContainsOnly currently supports only the SameTest option."
+      )
+  option _ _ =
+    Left
+      ( EvaluationError
+          "ContainsOnly expects two arguments and an optional SameTest rule."
+      )
   normalizeAutomatic (Symbol name)
     | systemHeadIn ["Automatic"] name = Nothing
   normalizeAutomatic value = Just value
@@ -6058,7 +6116,8 @@ reduceCountsBy [subject, function] = do
         | ValueGroup key groupedValues <- groups
         ]
     )
-reduceCountsBy _ = Left (EvaluationError "CountsBy expects a collection and a function.")
+reduceCountsBy _ =
+  Left (EvaluationError "CountsBy expects a list and a key function.")
 
 reduceSubsequences :: [Expr] -> Either EvaluationError Expr
 reduceSubsequences arguments' = case arguments' of
@@ -9090,23 +9149,41 @@ reduceTotal [association]
       reducePlus [value | AssociationEntry _ _ value <- entries]
 reduceTotal values = Call (Symbol "Total") values
 
-reduceAccumulate :: [Expr] -> Expr
-reduceAccumulate [association]
-  | Just entries@(AssociationEntry _ _ firstValue : remaining) <- associationEntries association =
-      let accumulatedValues =
-            scanl
-              (\accumulator (AssociationEntry _ _ value) -> reducePlus [accumulator, value])
-              firstValue
-              remaining
-       in associationExpr
+reduceAccumulate :: [Expr] -> Either EvaluationError Expr
+reduceAccumulate [subject] = accumulateExpression subject (Symbol "Plus")
+reduceAccumulate [subject, combiner] = accumulateExpression subject combiner
+reduceAccumulate _ =
+  Left
+    ( EvaluationError
+        "Accumulate expects a list and an optional binary combiner."
+    )
+
+accumulateExpression :: Expr -> Expr -> Either EvaluationError Expr
+accumulateExpression association combiner
+  | Just entries <- associationEntries association = do
+      accumulated <- accumulateValues combiner (map associationEntryValue entries)
+      pure
+        ( associationExpr
             ( zipWith
                 (\(AssociationEntry ruleHead key _) value -> AssociationEntry ruleHead key value)
                 entries
-                accumulatedValues
+                accumulated
             )
-reduceAccumulate [Call (Symbol "List") values] =
-  list (drop 1 (scanl (\acc value -> reducePlus [acc, value]) (Integer 0) values))
-reduceAccumulate values = Call (Symbol "Accumulate") values
+        )
+accumulateExpression (Call (Symbol listHead) values) combiner
+  | systemHeadIn ["List"] listHead = list <$> accumulateValues combiner values
+accumulateExpression _ _ =
+  Left (EvaluationError "Accumulate expects a list or association.")
+
+accumulateValues :: Expr -> [Expr] -> Either EvaluationError [Expr]
+accumulateValues _ [] = Right []
+accumulateValues combiner (firstValue : remaining) =
+  scan firstValue [firstValue] remaining
+ where
+  scan _ retained [] = Right retained
+  scan accumulator retained (value : rest) = do
+    next <- evaluate (Call combiner [accumulator, value])
+    scan next (retained <> [next]) rest
 
 reduceAppendPrepend :: Bool -> Text -> [Expr] -> Either EvaluationError Expr
 reduceAppendPrepend prepend _ [association, item]
