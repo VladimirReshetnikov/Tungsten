@@ -47,9 +47,10 @@ checkArrayEvaluator = do
         "MatrixQ accepts compact rank-two sparse arrays"
         (Call (Symbol "MatrixQ") [SparseArray [0, 4] [] (Integer 0)])
         "True"
-    , checkDirectError
-        "dense matrix reducers reject SparseArray inputs explicitly"
+    , checkDirect
+        "Det evaluates compact SparseArray inputs"
         (Call (Symbol "Det") [SparseArray [2, 2] [] (Integer 0)])
+        "0"
     ]
   pure (and (valueResults <> errorResults <> exactErrorResults <> sparseResults))
 
@@ -276,11 +277,6 @@ checkDirect label expression expected = case evaluate expression of
     | fullForm result == expected -> pure True
     | otherwise ->
         failCheck label ("expected " <> expected <> ", got " <> fullForm result)
-
-checkDirectError :: Text -> Expr -> IO Bool
-checkDirectError label expression = case evaluate expression of
-  Left _ -> pure True
-  Right result -> failCheck label ("expected an evaluation error, got " <> fullForm result)
 
 failCheck :: Text -> Text -> IO Bool
 failCheck label detail = do

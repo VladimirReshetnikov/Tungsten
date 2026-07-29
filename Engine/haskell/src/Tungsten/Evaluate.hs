@@ -3086,8 +3086,8 @@ reduceTimes originalValues =
         Just complexResult -> complexResult
         Nothing ->
           let exactProduct = foldl' multiplyExact (Exact 1 1) (mapMaybe toExact values)
-              symbolic = sortBy canonicalCompare (filter (not . isExact) values)
-              collected = collectRepeated collectFactor symbolic
+              symbolic = filter (not . isExact) values
+              collected = sortBy canonicalCompare (collectPowerFactors symbolic)
               combined
                 | exactProduct == Exact 0 1 = [Integer 0]
                 | exactProduct == Exact 1 1 && not (null collected) = collected
@@ -3097,7 +3097,26 @@ reduceTimes originalValues =
                 [single] -> single
                 _ -> Call (Symbol "Times") combined
  where
- collectFactor factor count = reducePower [factor, Integer count]
+  collectPowerFactors factors =
+    [ reducePower [base, Integer exponentValue]
+    | (_key, (base, exponentValue)) <- Map.toAscList accumulated
+    , exponentValue /= 0
+    ]
+   where
+    accumulated = foldl' insertFactor Map.empty factors
+    insertFactor retained factor =
+      let (base, exponentValue) = integerPowerFactor factor
+          key = fullForm base
+       in Map.insertWith
+            (\(_newBase, newExponent) (oldBase, oldExponent) ->
+                (oldBase, oldExponent + newExponent)
+            )
+            key
+            (base, exponentValue)
+            retained
+    integerPowerFactor (Call (Symbol powerHead) [base, Integer exponentValue])
+      | systemHeadIn ["Power"] powerHead = (base, exponentValue)
+    integerPowerFactor factor = (factor, 1)
 
 reduceExplicitComplexValues
   :: ((Expr, Expr) -> (Expr, Expr) -> (Expr, Expr))
@@ -3196,24 +3215,6 @@ evaluateSparseScalar "Plus" left right =
 evaluateSparseScalar functionName left right =
   evaluate (Call (Symbol functionName) [left, right])
 
-collectRepeated :: (Expr -> Integer -> Expr) -> [Expr] -> [Expr]
-collectRepeated combine values = retainFirst Set.empty values
- where
-  counts =
-    foldl'
-      (\retained value -> Map.insertWith (+) (fullForm value) (1 :: Integer) retained)
-      Map.empty
-      values
-  retainFirst _ [] = []
-  retainFirst seen (value : rest)
-    | Set.member key seen = retainFirst seen rest
-    | otherwise =
-        let count = Map.findWithDefault 1 key counts
-            collected = if count == 1 then value else combine value count
-         in collected : retainFirst (Set.insert key seen) rest
-   where
-    key = fullForm value
-
 reducePower :: [Expr] -> Expr
 reducePower [] = Integer 1
 reducePower [base] = base
@@ -3234,6 +3235,9 @@ reducePower [base, Integer exponentValue]
                     (denominator ^ abs exponentValue)
                     (numerator ^ abs exponentValue)
                 )
+  | Call (Symbol powerHead) [nestedBase, Integer nestedExponent] <- base
+  , systemHeadIn ["Power"] powerHead =
+      reducePower [nestedBase, Integer (nestedExponent * exponentValue)]
 reducePower [base, exponentValue]
   | Just result <- reduceExactFractionalPower base exponentValue = result
   | Just (Exact 1 1) <- toExact base = Integer 1
@@ -11794,8 +11798,8 @@ expressionDivide numerator denominator
 
 reduceCross :: [Expr] -> Either EvaluationError Expr
 reduceCross [left, right] = do
-  leftValues <- requireDenseVector "Cross" left
-  rightValues <- requireDenseVector "Cross" right
+  leftValues <- requireVectorValues "Cross" left
+  rightValues <- requireVectorValues "Cross" right
   if length leftValues /= length rightValues || length leftValues `notElem` [2, 3]
     then
       Left
@@ -11810,8 +11814,7 @@ reduceCross [left, right] = do
               (expressionProduct [left2, right1])
           )
       ([left1, left2, left3], [right1, right2, right3]) ->
-        Right
-          ( evaluatedList
+        let resultValues =
               [ expressionSubtract
                   (expressionProduct [left2, right3])
                   (expressionProduct [left3, right2])
@@ -11822,7 +11825,13 @@ reduceCross [left, right] = do
                   (expressionProduct [left1, right2])
                   (expressionProduct [left2, right1])
               ]
-          )
+         in if isSparseArray left || isSparseArray right
+              then
+                canonicalSparseArray
+                  [3]
+                  [([index], value) | (index, value) <- zip [1 ..] resultValues]
+                  (Integer 0)
+              else Right (evaluatedList resultValues)
       _ ->
         Left
           ( EvaluationError
@@ -12000,16 +12009,27 @@ equalWidthTrRows values = do
       | all ((== length firstRow) . length) remaining -> Just rows
       | otherwise -> Nothing
 
-requireDenseVector :: Text -> Expr -> Either EvaluationError [Expr]
-requireDenseVector _operation (Call (Symbol "List") values) = Right values
-requireDenseVector operation SparseArray {} =
-  Left (EvaluationError (operation <> " currently supports dense vectors only."))
-requireDenseVector operation _ =
+requireVectorValues :: Text -> Expr -> Either EvaluationError [Expr]
+requireVectorValues _operation (Call (Symbol "List") values) = Right values
+requireVectorValues operation (SparseArray [size] entries fill)
+  | size > maximumDenseArrayMaterializedNodes =
+      Left (EvaluationError (operation <> " vector exceeds the native materialization limit."))
+  | otherwise =
+      Right [sparseValueAt entries fill [index] | index <- [1 .. size]]
+requireVectorValues operation _ =
   Left (EvaluationError (operation <> " expects vectors."))
 
 requireDenseMatrixRows :: Text -> Expr -> Either EvaluationError [[Expr]]
+requireDenseMatrixRows operation (SparseArray [rowCount, columnCount] entries fill)
+  | rowCount * columnCount > maximumDenseArrayMaterializedNodes =
+      Left (EvaluationError (operation <> " matrix exceeds the native materialization limit."))
+  | otherwise =
+      Right
+        [ [sparseValueAt entries fill [row, column] | column <- [1 .. columnCount]]
+        | row <- [1 .. rowCount]
+        ]
 requireDenseMatrixRows operation SparseArray {} =
-  Left (EvaluationError (operation <> " currently supports dense matrices only."))
+  Left (EvaluationError (operation <> " expects a matrix."))
 requireDenseMatrixRows operation expression = case denseListRows expression of
   Nothing -> Left (EvaluationError (operation <> " expects a matrix."))
   Just rows
@@ -12025,6 +12045,17 @@ requireSquareMatrixRows operation expression = do
     else Left (EvaluationError (operation <> " expects a square matrix."))
 
 reduceDet :: [Expr] -> Either EvaluationError Expr
+reduceDet [SparseArray [rowCount, columnCount] entries fill]
+  | rowCount /= columnCount = Left (EvaluationError "Det expects a square matrix.")
+  | exactZero fill =
+      Right
+        ( determinantFromSparseCandidates
+            rowCount
+            [ (row, column, value)
+            | SparseEntry [row, column] value <- entries
+            , not (exactZero value)
+            ]
+        )
 reduceDet [expression] = determinantFromRows <$> requireSquareMatrixRows "Det" expression
 reduceDet _ = Left (EvaluationError "Det expects exactly one matrix argument.")
 
@@ -12111,6 +12142,31 @@ determinantSymbolic rows =
         ]
     )
 
+determinantFromSparseCandidates :: Integer -> [(Integer, Integer, Expr)] -> Expr
+determinantFromSparseCandidates size entries
+  | size == 0 = Integer 1
+  | size > fromIntegral (maxBound :: Int) = Integer 0
+  | otherwise = determinantCandidates 1 Set.empty [] []
+ where
+  candidates row =
+    [(column, value) | (entryRow, column, value) <- entries, entryRow == row]
+  determinantCandidates row used columns factors
+    | row > size =
+        let zeroBasedColumns = map (subtract 1 . fromIntegral) columns
+            signedFactors =
+              (if permutationSign zeroBasedColumns < 0 then [Integer (-1)] else []) <> factors
+         in expressionProduct signedFactors
+    | otherwise =
+        expressionSum
+          [ determinantCandidates
+              (row + 1)
+              (Set.insert column used)
+              (columns <> [column])
+              (factors <> [value])
+          | (column, value) <- candidates row
+          , not (Set.member column used)
+          ]
+
 permutationSign :: [Int] -> Int
 permutationSign values =
   if even inversionCount then 1 else -1
@@ -12125,12 +12181,43 @@ permutationSign values =
 
 reduceInverse :: [Expr] -> Either EvaluationError Expr
 reduceInverse [expression] = do
-  rows <- requireSquareMatrixRows "Inverse" expression
-  case traverse (traverse toExact) rows of
-    Just exactRows -> inverseExact exactRows
-    Nothing -> inverseSymbolic rows
+  case expression of
+    sparse@SparseArray {} ->
+      case sparseDiagonalInverse sparse of
+        Just result -> result
+        Nothing -> inverseFromRows expression
+    _ -> inverseFromRows expression
+ where
+  inverseFromRows value = do
+    rows <- requireSquareMatrixRows "Inverse" value
+    case traverse (traverse toExact) rows of
+      Just exactRows -> inverseExact exactRows
+      Nothing -> inverseSymbolic rows
 reduceInverse _ =
   Left (EvaluationError "Inverse expects exactly one matrix argument.")
+
+sparseDiagonalInverse :: Expr -> Maybe (Either EvaluationError Expr)
+sparseDiagonalInverse (SparseArray [rowCount, columnCount] entries fill)
+  | rowCount /= columnCount || not (exactZero fill) = Nothing
+  | any offDiagonal entries = Nothing
+  | toInteger (length entries) /= rowCount =
+      Just (Left (EvaluationError "Inverse expects a nonsingular matrix."))
+  | any (exactZero . sparseEntryValue) entries =
+      Just (Left (EvaluationError "Inverse expects a nonsingular matrix."))
+  | otherwise =
+      Just
+        ( canonicalSparseArray
+            [rowCount, columnCount]
+            [ (indices, expressionInverse value)
+            | SparseEntry indices value <- entries
+            ]
+            (Integer 0)
+        )
+ where
+  offDiagonal (SparseEntry [row, column] _) = row /= column
+  offDiagonal _ = True
+  sparseEntryValue (SparseEntry _ value) = value
+sparseDiagonalInverse _ = Nothing
 
 inverseExact :: [[Exact]] -> Either EvaluationError Expr
 inverseExact rows = do
@@ -12210,8 +12297,8 @@ reduceMatrixPower _ =
 
 matrixPower :: Expr -> Integer -> Either EvaluationError Expr
 matrixPower expression power = do
-  rows <- requireSquareMatrixRows "MatrixPower" expression
-  identity <- identityMatrix (toInteger (length rows))
+  size <- requireSquareMatrixSize "MatrixPower" expression
+  identity <- matrixIdentityLike expression size
   base <- if power < 0 then reduceInverse [expression] else Right expression
   powerLoop identity base (abs power)
  where
@@ -12227,6 +12314,27 @@ matrixPower expression power = do
         then dotTwo base base >>= evaluate
         else Right base
     powerLoop nextResult nextBase nextRemaining
+
+requireSquareMatrixSize :: Text -> Expr -> Either EvaluationError Integer
+requireSquareMatrixSize operation (SparseArray [rows, columns] _ _)
+  | rows == columns = Right rows
+  | otherwise = Left (EvaluationError (operation <> " expects a square matrix."))
+requireSquareMatrixSize operation SparseArray {} =
+  Left (EvaluationError (operation <> " expects a square matrix."))
+requireSquareMatrixSize operation expression = do
+  rows <- requireSquareMatrixRows operation expression
+  Right (toInteger (length rows))
+
+matrixIdentityLike :: Expr -> Integer -> Either EvaluationError Expr
+matrixIdentityLike SparseArray {} size
+  | size > maximumDenseArrayMaterializedNodes =
+      Left (EvaluationError "MatrixPower matrix exceeds the native materialization limit.")
+  | otherwise =
+      canonicalSparseArray
+        [size, size]
+        [([index, index], Integer 1) | index <- [1 .. size]]
+        (Integer 0)
+matrixIdentityLike _ size = identityMatrix size
 
 reduceTakeDrop :: Bool -> [Expr] -> Either EvaluationError Expr
 reduceTakeDrop takeMode (subject : specifications@(_ : _)) =
