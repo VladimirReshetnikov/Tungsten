@@ -1550,27 +1550,13 @@ reduceIsolatingInterval _ values = do
                 ]
             )
 
-rootIntervalEntry :: QPoly -> Int -> Complex Double -> (Q, Q, Int)
-rootIntervalEntry factor multiplicity target =
-  case
-      [value | value <- rationalRoots factor, abs (fromRational value - Complex.realPart target) < 1e-8] of
-    value : _ -> (value, value, multiplicity)
-    [] ->
-      let realValue = Complex.realPart target
-          lower = floor realValue
-          upper = ceiling realValue
-       in if lower == upper
-            then
-              let (dyadicLower, dyadicUpper) = dyadicBounds realValue 6
-               in (dyadicLower, dyadicUpper, multiplicity)
-            else (lower % 1, upper % 1, multiplicity)
-
 reduceRootIntervals :: AlgebraicRootContext -> [Expr] -> Maybe Expr
 reduceRootIntervals context [polynomialExpr] = do
   variable <- singlePolynomialVariable polynomialExpr
   polynomial <- rationalPolynomialInVariable context variable polynomialExpr
   entriesByFactor <- traverse factorEntries (squareFreeFactors polynomial)
-  let entries = sortBy (comparing (\(lower, _, _) -> lower)) (concat entriesByFactor)
+  let candidates = sortBy (comparing (\(value, _, _) -> value)) (concat entriesByFactor)
+      entries = isolateRootCandidates candidates
       intervalExpressions = [listExpr [qExpr lower, qExpr upper] | (lower, upper, _) <- entries]
       multiplicityExpressions = [listExpr [Integer (toInteger multiplicity)] | (_, _, multiplicity) <- entries]
   pure (listExpr [listExpr intervalExpressions, listExpr multiplicityExpressions])
@@ -1578,11 +1564,85 @@ reduceRootIntervals context [polynomialExpr] = do
   factorEntries (factor, multiplicity) = do
     roots <- approximatePolynomialRoots factor
     pure
-      [ rootIntervalEntry factor multiplicity rootValue
+      [ ( Complex.realPart rootValue
+        , firstMatchingRationalRoot factor rootValue
+        , multiplicity
+        )
       | rootValue <- roots
       , rootIsNumericallyReal rootValue
       ]
 reduceRootIntervals _ _ = Nothing
+
+firstMatchingRationalRoot :: QPoly -> Complex Double -> Maybe Q
+firstMatchingRationalRoot factor target =
+  case
+      [value | value <- rationalRoots factor, abs (fromRational value - Complex.realPart target) < 1e-8] of
+    value : _ -> Just value
+    [] -> Nothing
+
+isolateRootCandidates :: [(Double, Maybe Q, Int)] -> [(Q, Q, Int)]
+isolateRootCandidates [] = []
+isolateRootCandidates (candidate : remaining)
+  | Just rationalValue <- candidateRational candidate
+  , denominator rationalValue == 1 =
+      (rationalValue, rationalValue, candidateMultiplicity candidate)
+        : isolateRootCandidates remaining
+  | otherwise =
+      let (sameCell, rest) = span (sameIntegerCell candidate) remaining
+       in isolateCell (candidate : sameCell) <> isolateRootCandidates rest
+ where
+  candidateRational (_, rationalValue, _) = rationalValue
+  candidateMultiplicity (_, _, multiplicity) = multiplicity
+
+sameIntegerCell :: (Double, Maybe Q, Int) -> (Double, Maybe Q, Int) -> Bool
+sameIntegerCell (leftValue, _, _) (rightValue, rightRational, _) =
+  (floor leftValue :: Integer) == floor rightValue
+    && not (maybe False ((== 1) . denominator) rightRational)
+
+isolateCell :: [(Double, Maybe Q, Int)] -> [(Q, Q, Int)]
+isolateCell [] = []
+isolateCell candidates@(firstCandidate : remainingCandidates) =
+  [ intervalAt index candidate
+  | (index, candidate) <- zip [0 :: Int ..] candidates
+  ]
+ where
+  count = length candidates
+  boundaries = zipWith separatingBoundary candidates (drop 1 candidates)
+  lastCandidate = foldl' (\_ candidate -> candidate) firstCandidate remainingCandidates
+  cellLower = floor (candidateValue firstCandidate) % 1
+  cellUpper = ceiling (candidateValue lastCandidate) % 1
+  intervalAt index (_, rationalValue, multiplicity)
+    | Just exactValue <- rationalValue
+    , index > 0
+    , boundaries !! (index - 1) == exactValue =
+        (exactValue, exactValue, multiplicity)
+    | otherwise =
+        ( if index == 0 then cellLower else boundaries !! (index - 1)
+        , if index == count - 1 then cellUpper else boundaries !! index
+        , multiplicity
+        )
+  candidateValue (value, _, _) = value
+
+separatingBoundary :: (Double, Maybe Q, Int) -> (Double, Maybe Q, Int) -> Q
+separatingBoundary (leftValue, _, _) (rightValue, rightRational, _)
+  | Just rationalValue <- rightRational = rationalValue
+  | otherwise = simplestDyadicBetween leftValue rightValue
+
+simplestDyadicBetween :: Double -> Double -> Q
+simplestDyadicBetween leftValue rightValue = search 0
+ where
+  search :: Int -> Q
+  search exponentValue
+    | exponentValue > 30 =
+        let (lower, upper) = dyadicBounds ((leftValue + rightValue) / 2) 30
+         in if fromRational lower > leftValue && fromRational lower < rightValue then lower else upper
+    | otherwise =
+        let denominatorValue = 2 ^ exponentValue
+            firstNumerator = floor (leftValue * fromInteger denominatorValue) + 1
+            lastNumerator = ceiling (rightValue * fromInteger denominatorValue) - 1
+         in if firstNumerator <= lastNumerator
+              then firstNumerator % denominatorValue
+              else search (exponentValue + 1)
 
 substituteExpression :: Expr -> Expr -> Expr -> Expr
 substituteExpression target replacement expression

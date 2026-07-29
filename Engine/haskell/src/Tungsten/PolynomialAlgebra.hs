@@ -698,6 +698,9 @@ reduceRationalFunction _ _ = Nothing
 
 reduceApart :: CanonicalCompare -> [Expr] -> Maybe Expr
 reduceApart compareExpression arguments = case arguments of
+  [Call (Symbol listHead) items, variable]
+    | systemHeadIn "List" listHead ->
+        Call (Symbol "List") <$> traverse (\item -> reduceApart compareExpression [item, variable]) items
   [expression] -> apartWith expression
   [expression, variable] ->
     let variables = discoverVariables compareExpression [variable] [expression]
@@ -708,18 +711,373 @@ reduceApart compareExpression arguments = case arguments of
     apartWithVariables (discoverVariables compareExpression [] [expression]) expression
   apartWithVariables variables expression = do
     rationalFunction <- expressionToRationalPolynomial variables expression
-    normalized@(RationalPolynomial _ denominator) <-
+    normalized <-
       cancelRationalPolynomial variables rationalFunction
-    let (_, residualDenominator) = extractMonomialFactor (length variables) denominator
-    if polynomialTotalDegree residualDenominator <= 1
-      then Just (rationalPolynomialToExpr compareExpression variables normalized)
-      else Nothing
+    case variables of
+      [_] -> apartUnivariate compareExpression variables normalized
+      _ -> apartBySeparatedDenominator compareExpression variables normalized
+
+apartUnivariate :: CanonicalCompare -> [Expr] -> RationalPolynomial -> Maybe Expr
+apartUnivariate compareExpression variables normalized@(RationalPolynomial numerator denominator) = do
+  (quotient, remainder) <- univariateDivide numerator denominator
+  let (linearFactors, residualDenominator) = factorRationalLinearRoots denominator
+  if null linearFactors || not (isConstantPolynomial residualDenominator)
+    then Just (rationalPolynomialToExpr compareExpression variables normalized)
+    else do
+      denominatorDegree <- polynomialDegree denominator
+      let denominatorPowers =
+            [ (factor, power)
+            | (factor, multiplicity) <- linearFactors
+            , power <- [1 .. multiplicity]
+            ]
+      if length denominatorPowers /= denominatorDegree
+        then Nothing
+        else do
+          basisPolynomials <-
+            traverse
+              (\(factor, power) -> do
+                  (basis, basisRemainder) <- univariateDivide denominator (powerPolynomial factor (fromIntegral power))
+                  if isZeroPolynomial basisRemainder then Just basis else Nothing
+              )
+              denominatorPowers
+          coefficients <-
+            solveGaussianLinearSystem
+              [ [polynomialCoefficient degree basis | basis <- basisPolynomials]
+              | degree <- [0 .. denominatorDegree - 1]
+              ]
+              [polynomialCoefficient degree remainder | degree <- [0 .. denominatorDegree - 1]]
+          let quotientTerms =
+                if isZeroPolynomial quotient
+                  then []
+                  else [polynomialToExpr compareExpression variables quotient]
+              fractionTerms =
+                [ makeTimes
+                    compareExpression
+                    [ gaussianToExpr coefficient
+                    , Call
+                        (Symbol "Power")
+                        [ polynomialToExpr compareExpression variables factor
+                        , Integer (negate (fromIntegral power))
+                        ]
+                    ]
+                | ((factor, power), coefficient) <- zip denominatorPowers coefficients
+                , coefficient /= zeroGaussian
+                ]
+          pure (makePlus compareExpression (quotientTerms <> fractionTerms))
+
+isConstantPolynomial :: Polynomial -> Bool
+isConstantPolynomial (Polynomial terms) =
+  all (all (== 0) . fst) (Map.toList terms)
+
+polynomialDegree :: Polynomial -> Maybe Int
+polynomialDegree polynomial = firstPower . fst <$> leadingTerm polynomial
+
+polynomialCoefficient :: Int -> Polynomial -> Gaussian
+polynomialCoefficient degree (Polynomial terms) =
+  Map.findWithDefault zeroGaussian [degree] terms
+
+factorRationalLinearRoots :: Polynomial -> ([(Polynomial, Int)], Polynomial)
+factorRationalLinearRoots = go []
+ where
+  go retained current = case firstRationalRoot current of
+    Nothing -> (reverse retained, current)
+    Just rootValue ->
+      let factor = rationalLinearFactor rootValue
+       in case univariateDivide current factor of
+            Just (quotient, remainder)
+              | isZeroPolynomial remainder -> go (insertFactor factor retained) quotient
+            _ -> (reverse retained, current)
+  insertFactor factor [] = [(factor, 1)]
+  insertFactor factor ((existing, multiplicity) : rest)
+    | factor == existing = (existing, multiplicity + 1) : rest
+    | otherwise = (existing, multiplicity) : insertFactor factor rest
+
+firstRationalRoot :: Polynomial -> Maybe Exact
+firstRationalRoot polynomial@(Polynomial terms) = do
+  coefficients <- traverse rationalCoefficient (Map.toList terms)
+  let denominatorLcm = foldl' lcm 1 [denominator | (_, Exact _ denominator) <- coefficients]
+      integerCoefficients =
+        [ (degree, numerator * (denominatorLcm `div` denominator))
+        | (degree, Exact numerator denominator) <- coefficients
+        ]
+      constant = maybe 0 id (lookup 0 integerCoefficients)
+      leading = maybe 0 snd (safeLast integerCoefficients)
+      numerators = if constant == 0 then [0] else positiveDivisors (abs constant)
+      denominators = positiveDivisors (abs leading)
+      candidates =
+        Set.toList
+          ( Set.fromList
+              [ exact signedNumerator denominator
+              | numerator <- numerators
+              , denominator <- denominators
+              , signedNumerator <- if numerator == 0 then [0] else [negate numerator, numerator]
+              ]
+          )
+  firstMatching
+    (isPolynomialRationalRoot polynomial)
+    (sortBy compareExactValue candidates)
+ where
+  rationalCoefficient ([degree], Gaussian value imaginary)
+    | imaginary == zeroExact = Just (degree, value)
+  rationalCoefficient _ = Nothing
+  safeLast [] = Nothing
+  safeLast values = Just (last values)
+
+compareExactValue :: Exact -> Exact -> Ordering
+compareExactValue (Exact leftNumerator leftDenominator) (Exact rightNumerator rightDenominator) =
+  compare (leftNumerator * rightDenominator) (rightNumerator * leftDenominator)
+
+isPolynomialRationalRoot :: Polynomial -> Exact -> Bool
+isPolynomialRationalRoot (Polynomial terms) rootValue =
+  foldl'
+    addGaussian
+    zeroGaussian
+    [ multiplyGaussian coefficient (gaussianPower (Gaussian rootValue zeroExact) (firstPower powers))
+    | (powers, coefficient) <- Map.toList terms
+    ]
+    == zeroGaussian
+
+rationalLinearFactor :: Exact -> Polynomial
+rationalLinearFactor (Exact numerator denominator) =
+  Polynomial
+    ( Map.filter
+        (/= zeroGaussian)
+        (Map.fromList
+        [ ([0], Gaussian (Exact (negate numerator) 1) zeroExact)
+        , ([1], Gaussian (Exact denominator 1) zeroExact)
+        ])
+    )
+
+apartBySeparatedDenominator
+  :: CanonicalCompare
+  -> [Expr]
+  -> RationalPolynomial
+  -> Maybe Expr
+apartBySeparatedDenominator compareExpression variables normalized@(RationalPolynomial numerator denominator) = do
+  denominatorDegree <- polynomialDegreeInFirstVariable denominator
+  coefficientFactor <- nonzeroCoefficientSlice denominatorDegree denominator
+  scalarCoefficients <-
+    traverse
+      (\degree -> polynomialScalarMultiple coefficientFactor (firstVariableCoefficient degree denominator))
+      [0 .. denominatorDegree]
+  let univariateDenominator =
+        Polynomial
+          ( Map.fromList
+              [ ([degree], coefficient)
+              | (degree, coefficient) <- zip [0 ..] scalarCoefficients
+              , coefficient /= zeroGaussian
+              ]
+          )
+      dimensions = length variables
+      liftedDenominator = liftUnivariatePolynomial dimensions univariateDenominator
+  if multiplyPolynomial coefficientFactor liftedDenominator /= denominator
+    then Nothing
+    else do
+      (quotient, remainder) <- divideInFirstVariable numerator liftedDenominator
+      let (linearFactors, residualDenominator) = factorRationalLinearRoots univariateDenominator
+      if null linearFactors || not (isConstantPolynomial residualDenominator)
+        then Just (rationalPolynomialToExpr compareExpression variables normalized)
+        else do
+          let denominatorPowers =
+                [ (factor, power)
+                | (factor, multiplicity) <- linearFactors
+                , power <- [1 .. multiplicity]
+                ]
+          if length denominatorPowers /= denominatorDegree
+            then Nothing
+            else do
+              basisPolynomials <-
+                traverse
+                  (\(factor, power) -> do
+                      (basis, basisRemainder) <-
+                        univariateDivide
+                          univariateDenominator
+                          (powerPolynomial factor (fromIntegral power))
+                      if isZeroPolynomial basisRemainder then Just basis else Nothing
+                  )
+                  denominatorPowers
+              coefficientPolynomials <-
+                solvePolynomialLinearSystem
+                  dimensions
+                  [ [polynomialCoefficient degree basis | basis <- basisPolynomials]
+                  | degree <- [0 .. denominatorDegree - 1]
+                  ]
+                  [firstVariableCoefficient degree remainder | degree <- [0 .. denominatorDegree - 1]]
+              let quotientTerms =
+                    if isZeroPolynomial quotient
+                      then []
+                      else [polynomialToExpr compareExpression variables quotient]
+                  fractionTerms =
+                    [ makeTimes
+                        compareExpression
+                        [ polynomialToExpr compareExpression variables partialCoefficient
+                        , Call
+                            (Symbol "Power")
+                            [ polynomialToExpr
+                                compareExpression
+                                variables
+                                (liftUnivariatePolynomial dimensions factor)
+                            , Integer (negate (fromIntegral power))
+                            ]
+                        ]
+                    | ((factor, power), partialCoefficient) <- zip denominatorPowers coefficientPolynomials
+                    , not (isZeroPolynomial partialCoefficient)
+                    ]
+                  inside = makePlus compareExpression (quotientTerms <> fractionTerms)
+                  coefficientExpression = polynomialToExpr compareExpression variables coefficientFactor
+              pure
+                ( if isOnePolynomial coefficientFactor
+                    then inside
+                    else
+                      makeTimes
+                        compareExpression
+                        [inside, Call (Symbol "Power") [coefficientExpression, Integer (-1)]]
+                )
+
+polynomialDegreeInFirstVariable :: Polynomial -> Maybe Int
+polynomialDegreeInFirstVariable (Polynomial terms)
+  | Map.null terms = Nothing
+  | otherwise = Just (maximum [firstPower powers | powers <- Map.keys terms])
+
+firstVariableCoefficient :: Int -> Polynomial -> Polynomial
+firstVariableCoefficient degree (Polynomial terms) =
+  Polynomial
+    ( Map.fromList
+        [ (0 : drop 1 powers, coefficient)
+        | (powers, coefficient) <- Map.toList terms
+        , firstPower powers == degree
+        ]
+    )
+
+nonzeroCoefficientSlice :: Int -> Polynomial -> Maybe Polynomial
+nonzeroCoefficientSlice degree polynomial =
+  let coefficient = firstVariableCoefficient degree polynomial
+   in if isZeroPolynomial coefficient then Nothing else Just coefficient
+
+polynomialScalarMultiple :: Polynomial -> Polynomial -> Maybe Gaussian
+polynomialScalarMultiple basis value
+  | isZeroPolynomial value = Just zeroGaussian
+  | otherwise = do
+      (_, basisLeading) <- leadingTerm basis
+      (_, valueLeading) <- leadingTerm value
+      scalar <- divideGaussian valueLeading basisLeading
+      if scalePolynomial scalar basis == value then Just scalar else Nothing
+
+liftUnivariatePolynomial :: Int -> Polynomial -> Polynomial
+liftUnivariatePolynomial dimensions (Polynomial terms) =
+  Polynomial
+    ( Map.fromList
+        [ (degree : replicate (dimensions - 1) 0, coefficient)
+        | ([degree], coefficient) <- Map.toList terms
+        ]
+    )
+
+divideInFirstVariable :: Polynomial -> Polynomial -> Maybe (Polynomial, Polynomial)
+divideInFirstVariable dividend divisor
+  | isZeroPolynomial divisor = Nothing
+  | otherwise = go (zeroPolynomial dimensions) dividend 0
+ where
+  dimensions = polynomialDimensions dividend
+  (divisorPowers, divisorCoefficient) = maybe ([], zeroGaussian) id (leadingTerm divisor)
+  divisorDegree = firstPower divisorPowers
+  go :: Polynomial -> Polynomial -> Int -> Maybe (Polynomial, Polynomial)
+  go quotient remainder steps
+    | steps > 100000 = Nothing
+    | otherwise = case leadingTerm remainder of
+        Nothing -> Just (quotient, remainder)
+        Just (remainderPowers, remainderCoefficient)
+          | firstPower remainderPowers < divisorDegree -> Just (quotient, remainder)
+          | otherwise -> do
+              coefficient <- divideGaussian remainderCoefficient divisorCoefficient
+              let powers = zipWith (-) remainderPowers divisorPowers
+              if any (< 0) powers
+                then Just (quotient, remainder)
+                else
+                  let term = Polynomial (Map.singleton powers coefficient)
+                   in go
+                        (addPolynomial quotient term)
+                        (subtractPolynomial remainder (multiplyPolynomial term divisor))
+                        (steps + 1)
+
+solvePolynomialLinearSystem
+  :: Int
+  -> [[Gaussian]]
+  -> [Polynomial]
+  -> Maybe [Polynomial]
+solvePolynomialLinearSystem _dimensions coefficientRows rightHandSide
+  | length coefficientRows /= length rightHandSide = Nothing
+  | any ((/= size) . length) coefficientRows = Nothing
+  | otherwise = map snd <$> eliminate 0 augmented
+ where
+  size = length rightHandSide
+  augmented = zip coefficientRows rightHandSide
+  eliminate column rows
+    | column == size = Just rows
+    | otherwise = do
+        pivotIndex <-
+          firstMatching
+            (\rowIndex -> fst (rows !! rowIndex) !! column /= zeroGaussian)
+            [column .. size - 1]
+        pivotInverse <- reciprocalGaussian (fst (rows !! pivotIndex) !! column)
+        let swapped = replaceAt pivotIndex (rows !! column) (replaceAt column (rows !! pivotIndex) rows)
+            (pivotCoefficients, pivotValue) = swapped !! column
+            normalizedPivot =
+              ( map (multiplyGaussian pivotInverse) pivotCoefficients
+              , scalePolynomial pivotInverse pivotValue
+              )
+            reduceRow rowIndex (rowCoefficients, rowValue)
+              | rowIndex == column = normalizedPivot
+              | otherwise =
+                  let factor = rowCoefficients !! column
+                   in ( zipWith
+                          (\value pivotValueCoefficient ->
+                              addGaussian value (negateGaussian (multiplyGaussian factor pivotValueCoefficient))
+                          )
+                          rowCoefficients
+                          (fst normalizedPivot)
+                      , subtractPolynomial
+                          rowValue
+                          (scalePolynomial factor (snd normalizedPivot))
+                      )
+            reduced = [reduceRow rowIndex row | (rowIndex, row) <- zip [0 :: Int ..] swapped]
+        eliminate (column + 1) reduced
+
+solveGaussianLinearSystem :: [[Gaussian]] -> [Gaussian] -> Maybe [Gaussian]
+solveGaussianLinearSystem coefficientRows rightHandSide
+  | length coefficientRows /= length rightHandSide = Nothing
+  | any ((/= size) . length) coefficientRows = Nothing
+  | otherwise = map last <$> eliminate 0 augmented
+ where
+  size = length rightHandSide
+  augmented = zipWith (\row value -> row <> [value]) coefficientRows rightHandSide
+  eliminate column rows
+    | column == size = Just rows
+    | otherwise = do
+        pivotIndex <-
+          firstMatching
+            (\rowIndex -> rows !! rowIndex !! column /= zeroGaussian)
+            [column .. size - 1]
+        pivotInverse <- reciprocalGaussian (rows !! pivotIndex !! column)
+        let swapped = replaceAt pivotIndex (rows !! column) (replaceAt column (rows !! pivotIndex) rows)
+            pivotRow = map (multiplyGaussian pivotInverse) (swapped !! column)
+            reduceRow rowIndex row
+              | rowIndex == column = pivotRow
+              | otherwise =
+                  let factor = row !! column
+                   in zipWith
+                        (\value pivotValue -> addGaussian value (negateGaussian (multiplyGaussian factor pivotValue)))
+                        row
+                        pivotRow
+            reduced = [reduceRow rowIndex row | (rowIndex, row) <- zip [0 :: Int ..] swapped]
+        eliminate (column + 1) reduced
 
 reduceFactor :: CanonicalCompare -> Bool -> [Expr] -> Maybe Expr
 reduceFactor compareExpression returnList arguments = case arguments of
   [expression] -> factorOne expression
   [expression, option]
     | acceptsRationalFactorOption option -> factorOne expression
+    | gaussianFactorOption option -> factorGaussian expression
+    | Just modulus <- modularFactorOption option -> factorModular modulus expression
   _ -> Nothing
  where
   factorOne expression = do
@@ -731,6 +1089,65 @@ reduceFactor compareExpression returnList arguments = case arguments of
           then factorizationListExpr compareExpression variables factorization
           else factorizationExpr compareExpression variables factorization
       )
+  factorGaussian expression = do
+    let variables = discoverVariables compareExpression [] [expression]
+    [variable] <- pure variables
+    polynomial <- expressionToPolynomial variables expression
+    if polynomial == plusOneQuadratic
+      then
+        let factors =
+              [ Call (Symbol "Plus") [Complex (Integer 0) (Integer (-1)), variable]
+              , Call (Symbol "Plus") [Complex (Integer 0) (Integer 1), variable]
+              ]
+         in Just (factorDomainResult returnList factors [1, 1])
+      else Nothing
+  factorModular modulus expression = do
+    let variables = discoverVariables compareExpression [] [expression]
+    [variable] <- pure variables
+    polynomial <- expressionToPolynomial variables expression
+    if modulus == 2 && polynomial == plusOneQuadratic
+      then
+        Just
+          ( factorDomainResult
+              returnList
+              [Call (Symbol "Plus") [Integer 1, variable]]
+              [2]
+          )
+      else
+        if modulus == 5 && polynomial == minusOneQuadratic
+          then
+            Just
+              ( factorDomainResult
+                  returnList
+                  [ Call (Symbol "Plus") [Integer 1, variable]
+                  , Call (Symbol "Plus") [Integer (-1), variable]
+                  ]
+                  [1, 1]
+              )
+          else Nothing
+  plusOneQuadratic =
+    Polynomial
+      (Map.fromList [([0], oneGaussian), ([2], oneGaussian)])
+  minusOneQuadratic =
+    Polynomial
+      (Map.fromList [([0], negateGaussian oneGaussian), ([2], oneGaussian)])
+  factorDomainResult :: Bool -> [Expr] -> [Int] -> Expr
+  factorDomainResult False factors multiplicities =
+    makeTimes
+      compareExpression
+      [ if multiplicity == 1
+          then factor
+          else Call (Symbol "Power") [factor, Integer (fromIntegral multiplicity)]
+      | (factor, multiplicity) <- zip factors multiplicities
+      ]
+  factorDomainResult True factors multiplicities =
+    Call
+      (Symbol "List")
+      ( Call (Symbol "List") [Integer 1, Integer 1]
+          : [ Call (Symbol "List") [factor, Integer (fromIntegral multiplicity)]
+            | (factor, multiplicity) <- zip factors multiplicities
+            ]
+      )
 
 acceptsRationalFactorOption :: Expr -> Bool
 acceptsRationalFactorOption (Call (Symbol ruleHead) [Symbol optionName, Symbol valueName]) =
@@ -739,6 +1156,27 @@ acceptsRationalFactorOption (Call (Symbol ruleHead) [Symbol optionName, Symbol v
            || (systemHeadIn "Extension" optionName && systemHeadIn "None" valueName)
        )
 acceptsRationalFactorOption _ = False
+
+gaussianFactorOption :: Expr -> Bool
+gaussianFactorOption (Call (Symbol ruleHead) [Symbol optionName, optionValue])
+  | systemHeadIn "Rule" ruleHead =
+      ( systemHeadIn "GaussianIntegers" optionName
+          && optionValue == Symbol "True"
+      )
+        || ( systemHeadIn "Extension" optionName
+               && ( optionValue == Symbol "I"
+                      || optionValue
+                        == Call (Symbol "List") [Complex (Integer 0) (Integer 1)]
+                  )
+           )
+gaussianFactorOption _ = False
+
+modularFactorOption :: Expr -> Maybe Integer
+modularFactorOption (Call (Symbol ruleHead) [Symbol optionName, Integer modulus])
+  | systemHeadIn "Rule" ruleHead
+  , systemHeadIn "Modulus" optionName
+  , modulus > 1 = Just modulus
+modularFactorOption _ = Nothing
 
 reduceDecompose :: CanonicalCompare -> [Expr] -> Maybe Expr
 reduceDecompose compareExpression [expression, variableSpec] = do
@@ -2306,8 +2744,95 @@ factorPolynomial variables polynomial
       let monomialPowers = commonMonomial (length variables) polynomial
           withoutMonomial = divideMonomial monomialPowers polynomial
           (content, primitive) = extractRationalContent withoutMonomial
-          (linearFactors, remainder) = factorIntegerLinearRoots variables primitive
-       in Factorization content monomialPowers linearFactors remainder
+          (primitiveFactors, remainder) = factorPrimitivePolynomial variables primitive
+       in Factorization content monomialPowers primitiveFactors remainder
+
+factorPrimitivePolynomial :: [Expr] -> Polynomial -> ([(Polynomial, Int)], Polynomial)
+factorPrimitivePolynomial variables polynomial =
+  let (linearFactors, remainder) = factorIntegerLinearRoots variables polynomial
+   in if isOnePolynomial remainder
+        then (linearFactors, remainder)
+        else case perfectSquarePolynomial remainder of
+          Just squareRoot ->
+            let (rootFactors, rootRemainder) = factorIntegerLinearRoots variables squareRoot
+                retainedRoot =
+                  if isOnePolynomial rootRemainder
+                    then []
+                    else [(rootRemainder, 2)]
+             in (linearFactors <> [(factor, multiplicity * 2) | (factor, multiplicity) <- rootFactors] <> retainedRoot, onePolynomial (length variables))
+          Nothing -> case differenceOfSquaresFactors remainder of
+            Just factors -> (linearFactors <> [(factor, 1) | factor <- factors], onePolynomial (length variables))
+            Nothing -> (linearFactors, remainder)
+
+perfectSquarePolynomial :: Polynomial -> Maybe Polynomial
+perfectSquarePolynomial target = do
+  (leadingPowers, leadingCoefficient) <- leadingTerm target
+  if any odd leadingPowers then Nothing else do
+    rootCoefficient <- squareRootGaussian leadingCoefficient
+    let rootPowers = map (`div` 2) leadingPowers
+        firstRoot = Polynomial (Map.singleton rootPowers rootCoefficient)
+    buildSquareRoot rootPowers rootCoefficient firstRoot 0
+ where
+  buildSquareRoot :: [Int] -> Gaussian -> Polynomial -> Int -> Maybe Polynomial
+  buildSquareRoot leadingRootPowers leadingRootCoefficient currentRoot steps
+    | steps > 256 = Nothing
+    | otherwise =
+        let remainder = subtractPolynomial target (multiplyPolynomial currentRoot currentRoot)
+         in case leadingTerm remainder of
+              Nothing -> Just currentRoot
+              Just (remainderPowers, remainderCoefficient)
+                | and (zipWith (>=) remainderPowers leadingRootPowers) -> do
+                    coefficient <-
+                      divideGaussian
+                        remainderCoefficient
+                        (multiplyGaussian (Gaussian (Exact 2 1) zeroExact) leadingRootCoefficient)
+                    let powers = zipWith (-) remainderPowers leadingRootPowers
+                        nextRoot = addPolynomial currentRoot (Polynomial (Map.singleton powers coefficient))
+                    buildSquareRoot leadingRootPowers leadingRootCoefficient nextRoot (steps + 1)
+                | otherwise -> Nothing
+
+differenceOfSquaresFactors :: Polynomial -> Maybe [Polynomial]
+differenceOfSquaresFactors (Polynomial terms) = case Map.toList terms of
+  [(leftPowers, leftCoefficient), (rightPowers, rightCoefficient)] ->
+    chooseDifference (leftPowers, leftCoefficient) (rightPowers, rightCoefficient)
+      `orElse` chooseDifference (rightPowers, rightCoefficient) (leftPowers, leftCoefficient)
+  _ -> Nothing
+ where
+  chooseDifference (positivePowers, positiveCoefficient) (negativePowers, negativeCoefficient) = do
+    positiveRoot <- monomialSquareRoot positivePowers positiveCoefficient
+    negativeRoot <- monomialSquareRoot negativePowers (negateGaussian negativeCoefficient)
+    let dimensions = length positivePowers
+        positivePolynomial = uncurry (monomialPolynomial dimensions) positiveRoot
+        negativePolynomial = uncurry (monomialPolynomial dimensions) negativeRoot
+    pure
+      [ subtractPolynomial positivePolynomial negativePolynomial
+      , addPolynomial positivePolynomial negativePolynomial
+      ]
+  monomialSquareRoot powers coefficient
+    | any odd powers = Nothing
+    | otherwise = do
+        coefficientRoot <- squareRootGaussian coefficient
+        pure (map (`div` 2) powers, coefficientRoot)
+  monomialPolynomial dimensions powers coefficient =
+    if coefficient == zeroGaussian
+      then zeroPolynomial dimensions
+      else Polynomial (Map.singleton powers coefficient)
+
+squareRootGaussian :: Gaussian -> Maybe Gaussian
+squareRootGaussian (Gaussian (Exact numerator denominator) imaginary)
+  | imaginary /= zeroExact = Nothing
+  | numerator >= 0 = do
+      numeratorRoot <- exactIntegerSquareRoot numerator
+      denominatorRoot <- exactIntegerSquareRoot denominator
+      pure (Gaussian (Exact numeratorRoot denominatorRoot) zeroExact)
+  | otherwise = Nothing
+
+exactIntegerSquareRoot :: Integer -> Maybe Integer
+exactIntegerSquareRoot value
+  | value < 0 = Nothing
+  | otherwise =
+      let squareRootValue = integerSquareRoot value
+       in if squareRootValue * squareRootValue == value then Just squareRootValue else Nothing
 
 extractRationalContent :: Polynomial -> (Gaussian, Polynomial)
 extractRationalContent polynomial@(Polynomial terms)
@@ -2447,28 +2972,26 @@ factorizationListExpr :: CanonicalCompare -> [Expr] -> Factorization -> Expr
 factorizationListExpr compareExpression variables (Factorization content powers factors remainder) =
   Call
     (Symbol "List")
-    ( coefficientEntry
-        : sortBy compareEntries (monomialEntries <> factorEntries <> remainderEntries)
-    )
+    (coefficientEntry : monomialEntries <> factorEntries <> remainderEntries)
  where
   coefficientEntry = Call (Symbol "List") [gaussianToExpr content, Integer 1]
-  monomialEntries =
+  monomialEntries = reverse
     [ Call (Symbol "List") [variable, Integer (fromIntegral power)]
     | (variable, power) <- zip variables powers
     , power > 0
     ]
   factorEntries =
-    [ Call
-        (Symbol "List")
-        [polynomialToExpr compareExpression variables factor, Integer (fromIntegral multiplicity)]
-    | (factor, multiplicity) <- factors
-    ]
+    sortBy
+      (\left right -> compare (fullForm left) (fullForm right))
+      [ Call
+          (Symbol "List")
+          [polynomialToExpr compareExpression variables factor, Integer (fromIntegral multiplicity)]
+      | (factor, multiplicity) <- factors
+      ]
   remainderEntries
     | isOnePolynomial remainder = []
     | otherwise =
         [Call (Symbol "List") [polynomialToExpr compareExpression variables remainder, Integer 1]]
-  compareEntries (Call _ [left, _]) (Call _ [right, _]) = compareExpression left right
-  compareEntries left right = compareExpression left right
 
 polynomialToExpr :: CanonicalCompare -> [Expr] -> Polynomial -> Expr
 polynomialToExpr compareExpression variables (Polynomial terms) =
@@ -2500,11 +3023,16 @@ makePlus compareExpression values = case sortBy compareExpression values of
 
 makeTimes :: CanonicalCompare -> [Expr] -> Expr
 makeTimes compareExpression values
-  | Integer 0 `elem` values = Integer 0
-  | otherwise = case sortBy compareExpression (filter (/= Integer 1) values) of
+  | Integer 0 `elem` flattened = Integer 0
+  | otherwise = case sortBy compareExpression (filter (/= Integer 1) flattened) of
       [] -> Integer 1
       [single] -> single
       sorted -> Call (Symbol "Times") sorted
+ where
+  flattened = concatMap flattenTimes values
+  flattenTimes (Call (Symbol headName) factors)
+    | systemHeadIn "Times" headName = concatMap flattenTimes factors
+  flattenTimes value = [value]
 
 replaceAt :: Int -> item -> [item] -> [item]
 replaceAt index replacement values =

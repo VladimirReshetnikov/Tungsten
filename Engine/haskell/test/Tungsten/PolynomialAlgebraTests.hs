@@ -157,7 +157,7 @@ valueCases =
     )
   , ( "unsupported algebra domains stay symbolic"
     , "{Expand[Sin[x]],Coefficient[Sin[x],x],CoefficientList[x^2,x,-1],Apart[1/(x^2-1)]}"
-    , "List[Expand[Sin[x]], Coefficient[Sin[x], x], CoefficientList[Power[x, 2], x, -1], Apart[Power[Plus[-1, Power[x, 2]], -1]]]"
+    , "List[Expand[Sin[x]], Coefficient[Sin[x], x], CoefficientList[Power[x, 2], x, -1], Plus[Times[Rational[-1, 2], Power[Plus[1, x], -1]], Times[Rational[1, 2], Power[Plus[-1, x], -1]]]]"
     )
   ]
 
