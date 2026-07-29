@@ -930,10 +930,10 @@ reduceBuiltin headName values = case headName of
   "StringReplace" -> reduceStringReplace values
   "EvenQ" -> Right (reduceParity True headName values)
   "OddQ" -> Right (reduceParity False headName values)
-  "First" -> Right (reduceFirstLast True headName values)
-  "Last" -> Right (reduceFirstLast False headName values)
-  "Rest" -> Right (reduceRestMost True headName values)
-  "Most" -> Right (reduceRestMost False headName values)
+  "First" -> reduceFirstLast True headName values
+  "Last" -> reduceFirstLast False headName values
+  "Rest" -> reduceRestMost True headName values
+  "Most" -> reduceRestMost False headName values
   "Part" -> reducePart values
   "Extract" -> reduceExtract values
   "Level" -> reduceLevel values
@@ -1045,7 +1045,7 @@ reduceBuiltin headName values = case headName of
   "Range" -> Right (reduceRange values)
   "Total" -> Right (reduceTotal values)
   "Accumulate" -> Right (reduceAccumulate values)
-  "Reverse" -> Right (unaryCallArguments headName reverse values)
+  "Reverse" -> reduceReverse values
   "RotateLeft" -> Right (reduceRotate True headName values)
   "RotateRight" -> Right (reduceRotate False headName values)
   "Take" -> reduceTakeDrop True values
@@ -1077,9 +1077,9 @@ reduceBuiltin headName values = case headName of
   "Det" -> reduceDet values
   "Inverse" -> reduceInverse values
   "MatrixPower" -> reduceMatrixPower values
-  "Append" -> Right (reduceAppendPrepend False headName values)
-  "Prepend" -> Right (reduceAppendPrepend True headName values)
-  "Join" -> Right (reduceJoin values)
+  "Append" -> reduceAppendPrepend False headName values
+  "Prepend" -> reduceAppendPrepend True headName values
+  "Join" -> reduceJoin values
   "Flatten" -> reduceFlatten values
   "Delete" -> reduceDelete values
   "Insert" -> reduceInsert values
@@ -4722,30 +4722,66 @@ unary :: Text -> (Expr -> Expr) -> [Expr] -> Expr
 unary _ function [value] = function value
 unary headName _ values = Call (Symbol headName) values
 
-unaryCallArguments :: Text -> ([Expr] -> [Expr]) -> [Expr] -> Expr
-unaryCallArguments _ function [Call expressionHead values] = Call expressionHead (function values)
-unaryCallArguments headName _ values = Call (Symbol headName) values
-
 reduceParity :: Bool -> Text -> [Expr] -> Expr
 reduceParity evenMode _ [Integer value] = boolean (even value == evenMode)
 reduceParity _ headName values = Call (Symbol headName) values
 
-reduceFirstLast :: Bool -> Text -> [Expr] -> Expr
-reduceFirstLast first _ [association]
-  | Just entries <- associationEntries association
-  , AssociationEntry _ _ value : remaining <- entries =
-      if first then value else foldl' (\_ (AssociationEntry _ _ next) -> next) value remaining
-reduceFirstLast first _ [Call _ (value : remaining)] =
-  if first then value else foldl' (\_ next -> next) value remaining
-reduceFirstLast _ headName values = Call (Symbol headName) values
+reduceFirstLast :: Bool -> Text -> [Expr] -> Either EvaluationError Expr
+reduceFirstLast first headName values = case values of
+  [expression] -> select expression Nothing
+  [expression, defaultValue] -> select expression (Just defaultValue)
+  _ -> Left (EvaluationError (headName <> " expects one or two arguments."))
+ where
+  select expression defaultValue
+    | Just entries <- associationEntries expression = case entries of
+        [] -> missing expression defaultValue
+        firstEntry : remaining ->
+          let AssociationEntry _ _ value =
+                if first then firstEntry else foldl' (\_ next -> next) firstEntry remaining
+           in Right value
+  select expression@(Call _ arguments') defaultValue = case arguments' of
+    [] -> missing expression defaultValue
+    firstArgument : remaining ->
+      Right (if first then firstArgument else foldl' (\_ next -> next) firstArgument remaining)
+  select expression defaultValue = missing expression defaultValue
+  missing _ (Just defaultValue) = Right defaultValue
+  missing expression Nothing =
+    Left
+      ( EvaluationError
+          ("Cannot take " <> headName <> " of " <> inputForm expression <> ".")
+      )
 
-reduceRestMost :: Bool -> Text -> [Expr] -> Expr
-reduceRestMost rest _ [association]
-  | Just entries@(_ : _) <- associationEntries association =
-      associationExpr (if rest then drop 1 entries else reverse (drop 1 (reverse entries)))
-reduceRestMost rest _ [Call expressionHead values@(_ : _)] =
-  Call expressionHead (if rest then drop 1 values else reverse (drop 1 (reverse values)))
-reduceRestMost _ headName values = Call (Symbol headName) values
+reduceRestMost :: Bool -> Text -> [Expr] -> Either EvaluationError Expr
+reduceRestMost restMode headName = \case
+  [expression]
+    | Just entries <- associationEntries expression -> case entries of
+        [] -> emptyError expression
+        _ ->
+          Right
+            ( associationExpr
+                (if restMode then drop 1 entries else reverse (drop 1 (reverse entries)))
+            )
+  [expression@(Call expressionHead arguments')] -> case arguments' of
+    [] -> emptyError expression
+    _ ->
+      Right
+        ( normalizeEvaluatedCall
+            expressionHead
+            (if restMode then drop 1 arguments' else reverse (drop 1 (reverse arguments')))
+        )
+  [_] -> Left (EvaluationError (headName <> " expects a nonatomic expression."))
+  _ -> Left (EvaluationError (headName <> " expects exactly one argument."))
+ where
+  emptyError expression =
+    Left
+      ( EvaluationError
+          ( "Cannot take "
+              <> headName
+              <> " of "
+              <> inputForm expression
+              <> " with length zero."
+          )
+      )
 
 reducePart :: [Expr] -> Either EvaluationError Expr
 reducePart values@[] = invalidPartArity values
@@ -5616,7 +5652,7 @@ reduceGatherBy [dataExpression, keyFunction] = do
   values <- listOrAssociationValues "GatherBy" dataExpression
   groups <- groupValuesBy keyFunction values
   pure (list [list groupedValues | ValueGroup _ groupedValues <- groups])
-reduceGatherBy values = Right (Call (Symbol "GatherBy") values)
+reduceGatherBy _ = Left (EvaluationError "GatherBy currently expects two arguments.")
 
 reduceGather :: [Expr] -> Either EvaluationError Expr
 reduceGather [dataExpression] = do
@@ -5735,10 +5771,29 @@ reduceDifferences [Call (Symbol "List") values] =
 reduceDifferences values = Right (Call (Symbol "Differences") values)
 
 reduceRiffle :: [Expr] -> Either EvaluationError Expr
-reduceRiffle [Call (Symbol "List") values, separator] = case separator of
-  Call (Symbol "List") [] -> Left (EvaluationError "Riffle expects a non-empty separator list")
-  Call (Symbol "List") separators -> Right (list (interleave separators values))
-  _ -> Right (list (interleave [separator] values))
+reduceRiffle = \case
+  [Call (Symbol "List") [], _separator] -> Right (list [])
+  [Call (Symbol "List") [], _separator, _spanExpression] -> Right (list [])
+  [Call (Symbol "List") values, separator] ->
+    Right (list (ordinaryRiffle values separator))
+  [Call (Symbol "List") values, separator, spanExpression] ->
+    list <$> riffleSpan values separator spanExpression
+  [_, _, _] ->
+    Left (EvaluationError "Riffle currently expects a List as the first argument.")
+  [_, _] ->
+    Left (EvaluationError "Riffle currently expects a List as the first argument.")
+  _ ->
+    Left
+      ( EvaluationError
+          "Riffle expects a list, a separator, and an optional ``{a, b, s}`` span."
+      )
+
+ordinaryRiffle :: [Expr] -> Expr -> [Expr]
+ordinaryRiffle [] _ = []
+ordinaryRiffle values separator = case separator of
+  Call (Symbol "List") [] -> values
+  Call (Symbol "List") separators -> interleave separators values
+  _ -> interleave [separator] values
  where
   interleave separators values' = go 0 values'
    where
@@ -5747,7 +5802,29 @@ reduceRiffle [Call (Symbol "List") values, separator] = case separator of
     go _ [single] = [single]
     go index (value : rest) =
       value : separators !! (index `mod` separatorCount) : go (index + 1) rest
-reduceRiffle values = Right (Call (Symbol "Riffle") values)
+
+riffleSpan :: [Expr] -> Expr -> Expr -> Either EvaluationError [Expr]
+riffleSpan values separator = \case
+  Call (Symbol "List") [Integer start, Integer end, Integer step]
+    | step <= 0 ->
+        Left (EvaluationError "Riffle span step must be a positive integer.")
+    | start < 1 ->
+        Left (EvaluationError "Riffle span start position must be a positive integer.")
+    | otherwise -> Right (place start end step 1 0 [])
+  Call (Symbol "List") [_first, _last, _step] ->
+    Left (EvaluationError "Riffle span spec components must be explicit integers.")
+  _ -> Left (EvaluationError "Riffle span spec must be a ``{a, b, s}`` list.")
+ where
+  count = length values
+  place nextPosition end step outputPosition itemIndex retained
+    | end > 0
+    , nextPosition > end =
+        retained <> drop itemIndex values
+    | outputPosition == nextPosition =
+        place (nextPosition + step) end step (outputPosition + 1) itemIndex (retained <> [separator])
+    | itemIndex < count =
+        place nextPosition end step (outputPosition + 1) (itemIndex + 1) (retained <> [values !! itemIndex])
+    | otherwise = retained
 
 reduceTruthCollection :: Text -> ([Bool] -> Bool) -> [Expr] -> Either EvaluationError Expr
 reduceTruthCollection operation combine [dataExpression, test] = do
@@ -6299,10 +6376,20 @@ reducePad :: Bool -> [Expr] -> Either EvaluationError Expr
 reducePad leftMode = \case
   [Call (Symbol "List") values, Integer target] -> pad values target (Integer 0)
   [Call (Symbol "List") values, Integer target, fill] -> pad values target fill
-  values -> Right (Call (Symbol (if leftMode then "PadLeft" else "PadRight")) values)
+  [Call (Symbol "List") _, _, _] ->
+    Left (EvaluationError (operationName <> " expects an integer target length."))
+  [Call (Symbol "List") _, _] ->
+    Left (EvaluationError (operationName <> " expects an integer target length."))
+  [_expression, _target, _fill] ->
+    Left (EvaluationError (operationName <> " currently expects a List as the first argument."))
+  [_expression, _target] ->
+    Left (EvaluationError (operationName <> " currently expects a List as the first argument."))
+  _ -> Left (EvaluationError (operationName <> " expects two or three arguments."))
  where
+  operationName = if leftMode then "PadLeft" else "PadRight"
   pad values target fill
-    | target < 0 = Left (EvaluationError "PadLeft/PadRight expects a non-negative target length")
+    | target < 0 =
+        Left (EvaluationError (operationName <> " expects a non-negative target length."))
     | targetLength <= length values =
         Right
           ( list
@@ -8999,15 +9086,31 @@ reduceAccumulate [Call (Symbol "List") values] =
   list (drop 1 (scanl (\acc value -> reducePlus [acc, value]) (Integer 0) values))
 reduceAccumulate values = Call (Symbol "Accumulate") values
 
-reduceAppendPrepend :: Bool -> Text -> [Expr] -> Expr
+reduceAppendPrepend :: Bool -> Text -> [Expr] -> Either EvaluationError Expr
 reduceAppendPrepend prepend _ [association, item]
-  | Just entries <- associationEntries association
-  , Just newEntry@(AssociationEntry _ newKey _) <- ruleEntry item =
-      let retained = [entry | entry@(AssociationEntry _ key _) <- entries, key /= newKey]
-       in associationExpr (if prepend then newEntry : retained else retained <> [newEntry])
+  | Just entries <- associationEntries association = case ruleEntry item of
+      Just newEntry@(AssociationEntry _ newKey _) ->
+        let retained = [entry | entry@(AssociationEntry _ key _) <- entries, key /= newKey]
+         in Right (associationExpr (if prepend then newEntry : retained else retained <> [newEntry]))
+      Nothing ->
+        Left
+          ( EvaluationError
+              ( (if prepend then "Prepend" else "Append")
+                  <> " expects a rule when "
+                  <> (if prepend then "prepending to" else "appending to")
+                  <> " an Association."
+              )
+          )
 reduceAppendPrepend prepend _ [Call expressionHead values, item] =
-  Call expressionHead (if prepend then item : values else values <> [item])
-reduceAppendPrepend _ headName values = Call (Symbol headName) values
+  Right
+    ( normalizeEvaluatedCall
+        expressionHead
+        (if prepend then item : values else values <> [item])
+    )
+reduceAppendPrepend _ headName [_, _] =
+  Left (EvaluationError (headName <> " expects a nonatomic expression."))
+reduceAppendPrepend _ headName _ =
+  Left (EvaluationError (headName <> " expects exactly two arguments."))
 
 reduceRotate :: Bool -> Text -> [Expr] -> Expr
 reduceRotate left headName = \case
@@ -10492,7 +10595,7 @@ partitionDense
   -> Maybe Expr
   -> Either EvaluationError Expr
 partitionDense expression sizeExpression offsetExpression alignmentExpression padding = do
-  window <- positivePartitionInteger "block sizes" sizeExpression
+  window <- positivePartitionInteger "block sizes and offsets" sizeExpression
   step <- case offsetExpression of
     Nothing -> Right window
     Just value -> positivePartitionInteger "block sizes and offsets" value
@@ -12046,20 +12149,74 @@ resolvePosition count position
   , position >= negate (fromIntegral count) = Just (count + fromIntegral position)
   | otherwise = Nothing
 
-reduceJoin :: [Expr] -> Expr
+reduceJoin :: [Expr] -> Either EvaluationError Expr
+reduceJoin [] = Left (EvaluationError "Join expects at least one expression.")
 reduceJoin values
   | Just entryLists <- traverse associationEntries values =
-      associationExpr (concat entryLists)
+      Right (associationExpr (concat entryLists))
 reduceJoin values = case values of
   Call expressionHead _ : _ ->
     case traverse (matchingArguments expressionHead) values of
-      Just argumentLists -> Call expressionHead (concat argumentLists)
-      Nothing -> Call (Symbol "Join") values
+      Just argumentLists -> Right (Call expressionHead (concat argumentLists))
+      Nothing
+        | all isCall values ->
+            Left (EvaluationError "Join expects all expressions to have the same head.")
+        | otherwise -> Left (EvaluationError "Join expects a nonatomic expression.")
    where
     matchingArguments expected (Call actual arguments')
       | actual == expected = Just arguments'
     matchingArguments _ _ = Nothing
-  _ -> Call (Symbol "Join") values
+    isCall Call {} = True
+    isCall _ = False
+  _ -> Left (EvaluationError "Join expects a nonatomic expression.")
+
+reduceReverse :: [Expr] -> Either EvaluationError Expr
+reduceReverse = \case
+  [expression] -> Right (reverseAtLevels (Set.singleton 1) 1 expression)
+  [expression, levelSpecification] -> do
+    levels <- reverseLevels levelSpecification
+    Right (reverseAtLevels levels 1 expression)
+  _ -> Left (EvaluationError "Reverse expects one or two arguments.")
+
+reverseLevels :: Expr -> Either EvaluationError (Set.Set Integer)
+reverseLevels = \case
+  Integer level
+    | level >= 1 -> Right (Set.singleton level)
+    | otherwise ->
+        Left (EvaluationError "Reverse expects a positive integer level specification.")
+  Call (Symbol "List") [Integer level]
+    | level >= 1 -> Right (Set.singleton level)
+    | level == 0 -> Right Set.empty
+    | otherwise ->
+        Left (EvaluationError "Reverse expects a non-negative level specification.")
+  Call (Symbol "List") [Integer low, Integer high]
+    | low >= 1
+    , high >= low -> Right (Set.fromList [low .. high])
+    | otherwise ->
+        Left (EvaluationError "Reverse expects a positive {min, max} level range.")
+  _ ->
+    Left
+      ( EvaluationError
+          "Reverse currently supports an integer or {n}/{min, max} level spec."
+      )
+
+reverseAtLevels :: Set.Set Integer -> Integer -> Expr -> Expr
+reverseAtLevels levels currentLevel expression
+  | Just entries <- associationEntries expression =
+      let mapped =
+            [ AssociationEntry
+                ruleHead
+                key
+                (reverseAtLevels levels (currentLevel + 1) value)
+            | AssociationEntry ruleHead key value <- entries
+            ]
+       in associationExpr (if Set.member currentLevel levels then reverse mapped else mapped)
+reverseAtLevels levels currentLevel (Call expressionHead values) =
+  let mapped = map (reverseAtLevels levels (currentLevel + 1)) values
+   in normalizeEvaluatedCall
+        expressionHead
+        (if Set.member currentLevel levels then reverse mapped else mapped)
+reverseAtLevels _ _ expression = expression
 
 reduceFlatten :: [Expr] -> Either EvaluationError Expr
 reduceFlatten = \case

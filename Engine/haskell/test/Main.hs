@@ -782,6 +782,7 @@ checkEvaluator = do
         , ("total", "Total[{1, 2, 3, 4}]", "10")
         , ("accumulate", "Accumulate[{1, 2, 3, 4}]", "List[1, 3, 6, 10]")
         , ("list structure", "{First[{a, b}], Last[{a, b}], Rest[{a, b}], Most[{a, b}]} ", "List[a, b, List[b], List[a]]")
+        , ("list defaults leveled reverse and span riffle", "{First[{},z], Last[a,z], Reverse[{{a,b},{c,d}},{1,2}], Riffle[{a,b,c},x,{1,-1,2}], Append[{a},Nothing]}", "List[z, z, List[List[d, c], List[b, a]], List[x, a, x, b, x, c, x], List[a]]")
         , ("part", "{{a, b}, {c, d}}[[2, 1]]", "c")
         , ("part selector lists preserve heads", "{Part[f[a,b,c],{1,3}], Part[<|a->1,b->2,c->3|>,{2,1}]}", "List[f[a, c], Association[Rule[b, 2], Rule[a, 1]]]")
         , ("part nested all span and recursive selectors", "{Part[f[a,b],{{1},2}], Part[f[a,b,c],All], Part[f[a,b,c,d],2;;4;;2], Part[f[g[a,b],h[c,d]],All,2], Part[<|a->1,b->2,c->3|>,Span[1,2]]}", "List[f[a, b], f[a, b, c], f[b, d], f[b, d], Association[Rule[a, 1], Rule[b, 2]]]")
