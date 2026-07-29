@@ -154,8 +154,9 @@ createNotebook title cells =
         | (style, text) <- cells
         ]
     , notebookOptions = case title of
-        Nothing -> []
-        Just value -> [Call (Symbol "Rule") [Symbol "WindowTitle", String value]]
+        Just value | not (T.null value) ->
+          [Call (Symbol "Rule") [Symbol "WindowTitle", String value]]
+        _ -> []
     }
 
 flattenCells :: NotebookDocument -> [CellRecord]
@@ -328,8 +329,13 @@ preview expression = truncateText 160 (collapseWhitespace source)
  where
   source = case expression of
     String value -> value
-    Call (Symbol "BoxData") [value] -> fullForm value
+    Call (Symbol "BoxData") [value] -> T.unwords (stringLeaves value)
     _ -> fullForm expression
+  stringLeaves = \case
+    String value -> [value]
+    Call expressionHead values -> concatMap stringLeaves (expressionHead : values)
+    Complex realPart imaginaryPart -> stringLeaves realPart <> stringLeaves imaginaryPart
+    _ -> []
 
 collapseWhitespace :: Text -> Text
 collapseWhitespace = T.unwords . T.words . T.map normalize

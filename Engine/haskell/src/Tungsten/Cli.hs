@@ -27,6 +27,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TextIO
 import System.Directory (makeAbsolute)
+import System.FilePath (dropExtension, takeFileName)
 import Text.Read (readMaybe)
 import System.IO
   ( BufferMode (LineBuffering)
@@ -59,6 +60,7 @@ import Tungsten.Session
   , sessionPrints
   , sessionVisibleMessages
   )
+import qualified Tungsten.TextualForms as TextualForms
 import Tungsten.WolframString (WolframStringSegment (..))
 
 data CliCommand
@@ -764,7 +766,9 @@ parseExpressionArguments expressionCommand = go Nothing "input"
     addSource source (InlineSource (T.pack value)) >>= \updated -> go (Just updated) form rest
   go source form ("--file" : value : rest) =
     addSource source (FileSource value) >>= \updated -> go (Just updated) form rest
-  go source _ ("--form" : value : rest) = go source (T.pack value) rest
+  go source _ ("--form" : value : rest)
+    | value `elem` ["input", "fullform", "standard"] = go source (T.pack value) rest
+    | otherwise = Left "--form must be input, fullform, or standard"
   go _ _ [flag]
     | flag `elem` ["--code", "--file", "--form"] = Left (T.pack flag <> " requires a value")
   go _ _ (flag : _) = Left ("unknown expression option: " <> T.pack flag)
@@ -1066,13 +1070,13 @@ runNotebookCommand = \case
       Right source -> case parseNotebook source of
         Left notebookError ->
           emitNotebookError "inspect" "NotebookError" (notebookErrorMessage notebookError)
-        Right document -> emitJson (notebookPayload document) *> pure 0
+        Right document -> emitJson (notebookPayload (Just path) document) *> pure 0
   CreateNotebookCommand path title cells -> do
     let document = createNotebook title cells
     writeResult <- try (TextIO.writeFile path (renderNotebook document))
     case (writeResult :: Either IOException ()) of
       Left exception -> emitNotebookError "create" "OutputError" (T.pack (show exception))
-      Right () -> emitJson (notebookPayload document) *> pure 0
+      Right () -> emitJson (notebookPayload (Just path) document) *> pure 0
   PatchNotebookCommand notebookPath specPath outputPath -> do
     notebookSource <- readSource (FileSource notebookPath)
     specSource <- readSource (FileSource specPath)
@@ -1094,7 +1098,7 @@ runNotebookCommand = \case
                 writeResult <- try (TextIO.writeFile destination (renderNotebook patched))
                 case (writeResult :: Either IOException ()) of
                   Left exception -> emitNotebookError "patch" "OutputError" (T.pack (show exception))
-                  Right () -> emitJson (notebookPayload patched) *> pure 0
+                  Right () -> emitJson (notebookPayload (Just destination) patched) *> pure 0
 
 runInlineBoxCommand :: InlineBoxCommand -> IO Int
 runInlineBoxCommand = \case
@@ -1114,7 +1118,11 @@ runInlineBoxCommand = \case
             document selector prefix suffix objectIndex allObjects of
               Left inlineError -> do
                 emitJson (inlineBoxErrorPayload inlineError)
-                pure (if requireSuccess then 1 else 0)
+                pure
+                  ( if requireSuccess || inlineBoxErrorType inlineError == "CellSelectorNotFound"
+                      then 1
+                      else 0
+                  )
               Right selection -> do
                 emitJson (inlineBoxSelectionPayload absolutePath selection)
                 pure 0
@@ -1391,20 +1399,24 @@ pathValue key (JsonArray values) = traverse component values
  where
   component (JsonNumber source) =
     maybe (Left ("patch path must contain integers: " <> key)) Right (readMaybe (T.unpack source))
+  component (JsonBool value) = Right (if value then 1 else 0)
   component _ = Left ("patch path must contain integers: " <> key)
 pathValue key _ = Left ("patch path must be an integer array: " <> key)
 
-notebookPayload :: NotebookDocument -> JsonValue
-notebookPayload document =
+notebookPayload :: Maybe FilePath -> NotebookDocument -> JsonValue
+notebookPayload path document =
   JsonObject
     ( Map.fromList
         [ ("cell_count", jsonInteger (fromIntegral (cellCount document)))
         , ("cells", JsonArray (map cellRecordPayload (flattenCells document)))
         , ("group_count", jsonInteger (fromIntegral (groupCount document)))
-        , ("options", JsonArray (map (JsonString . fullForm) (notebookOptions document)))
-        , ("title", maybe JsonNull JsonString (notebookTitle document))
+        , ("options", JsonArray (map (JsonString . notebookOptionText) (notebookOptions document)))
+        , ("path", maybe JsonNull (JsonString . T.pack) path)
+        , ("title", maybe JsonNull JsonString resolvedTitle)
         ]
     )
+ where
+  resolvedTitle = notebookTitle document <|> (T.pack . dropExtension . takeFileName <$> path)
 
 cellRecordPayload :: CellRecord -> JsonValue
 cellRecordPayload record =
@@ -1416,7 +1428,7 @@ cellRecordPayload record =
         , ("expression_uuid", maybe JsonNull JsonString (expressionUuid cell))
         , ("index", jsonInteger (fromIntegral (cellRecordIndex record)))
         , ("kind", JsonString "cell")
-        , ("options", JsonArray (map (JsonString . fullForm) (cellOptions cell)))
+        , ("options", JsonArray (map (JsonString . notebookOptionText) (cellOptions cell)))
         , ("path", JsonArray (map (jsonInteger . fromIntegral) (cellRecordPath record)))
         , ("preview", JsonString (cellRecordPreview record))
         , ("style", maybe JsonNull JsonString (cellRecordStyle record))
@@ -1424,6 +1436,12 @@ cellRecordPayload record =
     )
  where
   cell = cellRecordCell record
+
+notebookOptionText :: Expr -> Text
+notebookOptionText (Call (Symbol ruleHead) [left, right])
+  | ruleHead == "Rule" || ruleHead == "System`Rule" =
+      inputForm left <> "->" <> inputForm right
+notebookOptionText expression = inputForm expression
 
 emitNotebookError :: Text -> Text -> Text -> IO Int
 emitNotebookError command errorType message = do
@@ -1531,11 +1549,18 @@ parseSource :: Text -> Text -> Either Text (Text, Expr)
 parseSource requestedForm source = case T.toLower (T.strip requestedForm) of
   "input" -> parseWith "input" parseInputForm
   "inputform" -> parseWith "input" parseInputForm
-  "full" -> parseWith "fullform" parseFullForm
-  "fullform" -> parseWith "fullform" parseFullForm
+  "fullform" ->
+    parseWith
+      "fullform"
+      (\value -> parseFullForm value `orElseParse` parseInputForm value)
+  "standard" ->
+    ("standard",) <$> first ("standard form parse failed: " <>)
+      (TextualForms.parseStandardFormSource source)
   other -> Left ("unsupported expression form: " <> other)
  where
   parseWith normalized parser = (normalized,) <$> first parseErrorMessage (parser source)
+  orElseParse (Right value) _ = Right value
+  orElseParse (Left _) fallback = fallback
 
 parsePayload :: Text -> Text -> Expr -> JsonValue
 parsePayload form source expression =
@@ -1754,8 +1779,8 @@ usage =
     , "  tungsten-hs frontend open-notebook --file PATH [--require-success]"
     , "  tungsten-hs frontend open-doc IDENTIFIER [--index-path PATH] [--require-success]"
     , "  tungsten-hs frontend token TOKEN [--file PATH] [--require-success]"
-    , "  tungsten-hs expr parse (--code TEXT | --file PATH) [--form input|fullform]"
-    , "  tungsten-hs expr evaluate (--code TEXT | --file PATH) [--form input|fullform]"
+    , "  tungsten-hs expr parse (--code TEXT | --file PATH) [--form input|fullform|standard]"
+    , "  tungsten-hs expr evaluate (--code TEXT | --file PATH) [--form input|fullform|standard]"
     , "  tungsten-hs parser-corpus discover [DISCOVERY OPTIONS] [--sample N]"
     , "  tungsten-hs parser-corpus compare [DISCOVERY OPTIONS] [--skip-wolfram] [--no-write] [--include-results]"
     , "    DISCOVERY OPTIONS: --corpus-root PATH [--extension EXT ...] [--include-glob GLOB ...] [--exclude-glob GLOB ...] [--max-files N] [--shuffle] [--seed N]"

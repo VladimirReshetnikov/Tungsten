@@ -514,7 +514,7 @@ checkInlineBoxes = do
       checks =
         [ assertEqual
             "extract BoxData and string inline boxes"
-            [ ["GraphicsBox[List[CircleBox[]]]"]
+            [ ["GraphicsBox[{CircleBox[]}]"]
             , ["StyleBox[\"Hello\", FontWeight->Bold]"]
             ]
             extracted
@@ -529,7 +529,7 @@ checkInlineBoxes = do
             (inlineBoxRecordHead =<< firstBox (inlineBoxCompositionBoxes composition))
         , assertEqual
             "select notebook box by ExpressionUUID"
-            (Right ["GraphicsBox[List[CircleBox[]]]"])
+            (Right ["GraphicsBox[{CircleBox[]}]"])
             (map inlineBoxRecordExpression . inlineBoxSelectionSelectedBoxes <$> byUuid)
         , assertEqual
             "select all notebook boxes by CellID"
@@ -5002,7 +5002,7 @@ checkNotebookModel = do
         , assertEqual "notebook group count" 1 (groupCount document)
         , assertEqual "notebook paths" [[0], [1, 0], [1, 1]] (map cellRecordPath records)
         , assertEqual "notebook styles" [Just "Title", Just "Input", Just "Output"] (map cellRecordStyle records)
-        , assertEqual "notebook previews" ["Demo", "1+2", "RowBox[List[\"1\", \"+\", \"2\"]]"] (map cellRecordPreview records)
+        , assertEqual "notebook previews" ["Demo", "1+2", "1 + 2"] (map cellRecordPreview records)
         , assertEqual "notebook render round trip" (Right document) (parseNotebook (renderNotebook document))
         , assertEqual "created notebook cell count" 2 (cellCount created)
         , assertEqual

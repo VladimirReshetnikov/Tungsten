@@ -339,7 +339,6 @@ kernelEvaluationPayload result =
           , JsonArray (map (jsonInteger . fromIntegral) (kernelCleanedTungstenProcesses result))
           )
         , ("command", JsonArray (map JsonString (kernelCommand result)))
-        , ("elapsed_seconds", jsonDouble (kernelElapsedSeconds result))
         , ("evaluation_available", JsonBool (kernelEvaluationAvailable result))
         , ("exit_code", jsonInteger (fromIntegral (kernelExitCode result)))
         , ("failure_type", maybe JsonNull JsonString (kernelFailureType result))
