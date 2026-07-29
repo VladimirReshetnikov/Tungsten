@@ -2203,7 +2203,7 @@ replaceSessionStringMatches depth = go 0 0 []
         Nothing -> tryMatches appliedSession matches
 
 sessionStringExpressionFromPieces :: [Expr] -> Expr
-sessionStringExpressionFromPieces pieces = case merge pieces of
+sessionStringExpressionFromPieces pieces = case removeNeutralEmpty (merge pieces) of
   [] -> String ""
   [single] -> single
   merged
@@ -2211,6 +2211,9 @@ sessionStringExpressionFromPieces pieces = case merge pieces of
         String (T.concat [value | String value <- merged])
     | otherwise -> Call (Symbol "StringExpression") merged
  where
+  removeNeutralEmpty merged
+    | any (not . isStringValue) merged = filter (/= String "") merged
+    | otherwise = merged
   merge = foldl append [] . concatMap flatten
   flatten (Call (Symbol stringExpressionHead) values)
     | isSessionSystemHead "StringExpression" stringExpressionHead =

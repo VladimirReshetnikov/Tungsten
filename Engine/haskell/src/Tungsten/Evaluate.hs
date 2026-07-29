@@ -46,7 +46,7 @@ module Tungsten.Evaluate
 import Control.Monad ((<=<), foldM)
 import Data.Bits ((.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
-import Data.Char (chr, isDigit, ord, toUpper)
+import Data.Char (chr, isDigit, isLetter, ord, toUpper)
 import Data.Functor.Identity (Identity (..))
 import Data.List (findIndex, permutations, sort, sortBy, transpose)
 import qualified Data.List as List
@@ -881,6 +881,8 @@ reduceBuiltin headName values = case headName of
   "RealValuedNumberQ" -> Right (transparentUnaryPredicate headName isRealValuedNumber values)
   "TrueQ" -> Right (unary headName (boolean . isTrueSymbol) values)
   "StringQ" -> Right (unary headName (boolean . isString) values)
+  "DigitQ" -> Right (unary headName (boolean . textSatisfies isDigit) values)
+  "LetterQ" -> Right (unary headName (boolean . textSatisfies isLetter) values)
   "FailureQ" -> Right (unary headName (boolean . isFailureQValue) values)
   "MissingQ" -> Right (unary headName (boolean . isMissingValue) values)
   "ByteArray" -> reduceByteArray values
@@ -3983,12 +3985,12 @@ reduceStringTakeDrop takeMode = \case
 stringSelectorIndices :: Text -> Int -> Expr -> Either EvaluationError [Int]
 stringSelectorIndices operation count specification = case specification of
   Integer amount
-    | amount >= 0
-    , amount <= fromIntegral count -> Right [0 .. fromIntegral amount - 1]
-    | amount < 0
-    , abs amount <= fromIntegral count ->
-        Right [count - fromIntegral (abs amount) .. count - 1]
-    | otherwise -> invalid
+    | amount >= 0 ->
+        traverse resolveStringPosition [1 .. amount]
+    | otherwise ->
+        traverse
+          resolveStringPosition
+          [fromIntegral count + amount + 1 .. fromIntegral count]
   Symbol "All" -> Right [0 .. count - 1]
   Call (Symbol "UpTo") [Integer amount]
     | amount >= 0 -> Right [0 .. min count (fromIntegral amount) - 1]
@@ -3997,7 +3999,7 @@ stringSelectorIndices operation count specification = case specification of
          in Right [count - retained .. count - 1]
   spanSpecification@(Call (Symbol "Span") _) -> spanIndices spanSpecification
   Call (Symbol "List") [Integer position] ->
-    maybe invalid (Right . pure) (resolvePosition count position)
+    pure <$> resolveStringPosition position
   Call (Symbol "List") [Symbol "All"] -> Right [0 .. count - 1]
   Call (Symbol "List") [upTo@(Call (Symbol "UpTo") _)] ->
     stringSelectorIndices operation count upTo
@@ -4013,7 +4015,27 @@ stringSelectorIndices operation count specification = case specification of
       )
   spanIndices spanSpecification = do
     positions <- expandPartSpan count spanSpecification
-    maybe invalid Right (traverse (resolvePosition count) positions)
+    traverse resolveStringPosition positions
+  resolveStringPosition position
+    | position == 0 =
+        Left
+          ( EvaluationError
+              "Only top-level Part specifications may use index 0."
+          )
+    | otherwise =
+        maybe
+          ( Left
+              ( EvaluationError
+                  ( "Part index "
+                      <> T.pack (show position)
+                      <> " is out of range for length "
+                      <> T.pack (show count)
+                      <> "."
+                  )
+              )
+          )
+          Right
+          (resolvePosition count position)
 
 reduceStringJoin :: [Expr] -> Either EvaluationError Expr
 reduceStringJoin values = String . T.concat <$> (concat <$> traverse flatten values)
@@ -4645,13 +4667,16 @@ replaceStringPatternMatches source specifications limit = go 0 0 []
         Nothing -> tryMatches matches
 
 stringExpressionFromPieces :: [Expr] -> Expr
-stringExpressionFromPieces pieces = case merge pieces of
+stringExpressionFromPieces pieces = case removeNeutralEmpty (merge pieces) of
   [] -> String ""
   [single] -> single
   merged
     | all isString merged -> String (T.concat [value | String value <- merged])
     | otherwise -> Call (Symbol "StringExpression") merged
  where
+  removeNeutralEmpty merged
+    | any (not . isString) merged = filter (/= String "") merged
+    | otherwise = merged
   merge = foldl append [] . concatMap flatten
   flatten (Call (Symbol stringExpressionHead) values)
     | systemHeadIn ["StringExpression"] stringExpressionHead = concatMap flatten values
@@ -4660,6 +4685,11 @@ stringExpressionFromPieces pieces = case merge pieces of
     String previous : rest -> reverse rest <> [String (previous <> value)]
     _ -> retained <> [String value]
   append retained value = retained <> [value]
+
+textSatisfies :: (Char -> Bool) -> Expr -> Bool
+textSatisfies predicate (String value) =
+  not (T.null value) && T.all predicate value
+textSatisfies _ _ = False
 
 reduceEquality :: Bool -> [Expr] -> Expr
 reduceEquality True values
