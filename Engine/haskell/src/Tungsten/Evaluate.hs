@@ -587,6 +587,8 @@ evaluateOr depth = go []
 
 reduceCall :: Expr -> Either EvaluationError Expr
 reduceCall expression = case expression of
+  Call (Symbol "System`Array") values ->
+    Right (Call (Symbol "System`Array") values)
   Call sparse@SparseArray {} values ->
     reduceSparseArrayProperty sparse values
   Call failure@(Call (Symbol failureHead) _) values
@@ -9916,6 +9918,8 @@ normalizeArrayOrigins _ (Just _) =
     )
 
 reduceConstantArray :: [Expr] -> Either EvaluationError Expr
+reduceConstantArray [_value, dimensionsExpression]
+  | hasLeadingZeroDenseDimension dimensionsExpression = Right (evaluatedList [])
 reduceConstantArray [value, dimensionsExpression] = do
   dimensions <- normalizeDenseDimensions "ConstantArray" dimensionsExpression
   buildDenseArrayM "ConstantArray" dimensions (const (Right value))
@@ -9939,11 +9943,15 @@ arrayReshape sparse@SparseArray {} dimensionsExpression padding = do
     normalizeArbitraryDimensions "ArrayReshape" dimensionsExpression
   sparseArrayReshape sparse dimensions dimensionsExpression padding
 arrayReshape expression dimensionsExpression padding = do
-  dimensions <- normalizeDenseDimensions "ArrayReshape" dimensionsExpression
-  guardDenseArrayMaterialization "ArrayReshape" dimensions
-  let (result, _) = buildReshaped dimensions (denseLeafValues expression)
-  Right result
+  if hasLeadingZeroDenseDimension dimensionsExpression
+    then Right (evaluatedList [])
+    else reshapeDense
  where
+  reshapeDense = do
+    dimensions <- normalizeDenseDimensions "ArrayReshape" dimensionsExpression
+    guardDenseArrayMaterialization "ArrayReshape" dimensions
+    let (result, _) = buildReshaped dimensions (denseLeafValues expression)
+    Right result
   buildReshaped [] (value : remaining) = (value, remaining)
   buildReshaped [] [] = (padding, [])
   buildReshaped (dimension : remainingDimensions) available =
@@ -9954,6 +9962,20 @@ arrayReshape expression dimensionsExpression padding = do
     buildChildren count rest built =
       let (child, next) = buildReshaped remainingDimensions rest
        in buildChildren (count - 1) next (child : built)
+
+hasLeadingZeroDenseDimension :: Expr -> Bool
+hasLeadingZeroDenseDimension (Integer dimension) = dimension == 0
+hasLeadingZeroDenseDimension (Call (Symbol listHead) dimensions)
+  | systemHeadIn ["List"] listHead
+  , Just values <- traverse explicitNonnegative dimensions =
+      case values of
+        firstDimension : _ -> firstDimension == 0
+        [] -> False
+ where
+  explicitNonnegative (Integer value)
+    | value >= 0 = Just value
+  explicitNonnegative _ = Nothing
+hasLeadingZeroDenseDimension _ = False
 
 sparseArrayReshape
   :: Expr

@@ -3150,6 +3150,9 @@ reduceSessionEvaluatedCall depth session = \case
   Call (Symbol "AssociationMap") values ->
     Just (evaluateSessionAssociationMap depth session values)
   Call (Symbol arrayHead) values
+    | arrayHead == "Array" ->
+        Just (evaluateSessionArray depth session values)
+  Call (Symbol arrayHead) values
     | any (`isSessionSystemHead` arrayHead) ["ArrayQ", "VectorQ", "MatrixQ"]
     , arrayPredicateHasTest arrayHead values ->
         Just (evaluateSessionArrayPredicate depth session arrayHead values)
@@ -4154,6 +4157,114 @@ sessionListOrAssociationCollection expression@(Call (Symbol expressionHead) _)
       collection <- sessionOrderedCollection expression
       if sessionCollectionAssociation collection then Just collection else Nothing
 sessionListOrAssociationCollection _ = Nothing
+
+evaluateSessionArray
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionArray depth session values = case values of
+  [function, dimensionsExpression] ->
+    build function dimensionsExpression Nothing
+  [function, dimensionsExpression, originsExpression] ->
+    build function dimensionsExpression (Just originsExpression)
+  _ -> sessionFailure session "Array expects two or three arguments."
+ where
+  build function dimensionsExpression originsExpression = do
+    arbitraryDimensions <-
+      liftSessionText session (sessionArrayDimensions dimensionsExpression)
+    origins <-
+      liftSessionText
+        session
+        (sessionArrayOrigins (length arbitraryDimensions) originsExpression)
+    case arbitraryDimensions of
+      0 : _ -> Right (evaluatedList [], session)
+      _ -> do
+        dimensions <-
+          liftSessionText session (traverse boundedDimension arbitraryDimensions)
+        if sessionDenseArrayNodes dimensions > 1000000
+          then sessionFailure session "Array output exceeds the native materialization limit."
+          else buildLevel function dimensions origins [] session
+
+  buildLevel function [] origins reversedIndices current =
+    evaluateSessionCallable
+      depth
+      current
+      function
+      [ Integer (origin + fromIntegral index)
+      | (origin, index) <- zip origins (reverse reversedIndices)
+      ]
+  buildLevel function (dimension : remaining) origins reversedIndices current =
+    buildChildren 0 [] current
+   where
+    buildChildren index retained childSession
+      | index >= dimension = Right (evaluatedList retained, childSession)
+      | otherwise = do
+          (child, updated) <-
+            buildLevel
+              function
+              remaining
+              origins
+              (index : reversedIndices)
+              childSession
+          buildChildren (index + 1) (retained <> [child]) updated
+
+sessionArrayDimensions :: Expr -> Either Text [Integer]
+sessionArrayDimensions (Integer dimension) =
+  pure <$> nonnegative dimension
+sessionArrayDimensions (Call (Symbol listHead) dimensions)
+  | isSessionSystemHead "List" listHead = traverse requireDimension dimensions
+ where
+  requireDimension (Integer dimension) = nonnegative dimension
+  requireDimension _ = P.Left "Array expects an integer argument."
+sessionArrayDimensions _ =
+  P.Left "Array expects an integer dimension or a list of dimensions."
+
+nonnegative :: Integer -> Either Text Integer
+nonnegative dimension
+  | dimension < 0 = P.Left "Array expects non-negative dimensions."
+  | otherwise = P.Right dimension
+
+boundedDimension :: Integer -> Either Text Int
+boundedDimension dimension
+  | dimension > toInteger (maxBound :: Int) =
+      P.Left "Array dimension is too large for this runtime."
+  | otherwise = P.Right (fromInteger dimension)
+
+sessionArrayOrigins :: Int -> Maybe Expr -> Either Text [Integer]
+sessionArrayOrigins rank Nothing = P.Right (replicate rank 1)
+sessionArrayOrigins rank (Just (Integer origin)) = P.Right (replicate rank origin)
+sessionArrayOrigins 1 (Just (Call (Symbol listHead) [Integer lower, Integer _upper]))
+  | isSessionSystemHead "List" listHead = P.Right [lower]
+sessionArrayOrigins rank (Just (Call (Symbol listHead) origins))
+  | isSessionSystemHead "List" listHead
+  , length origins /= rank =
+      P.Left "Array origin list must have one entry per array dimension."
+  | isSessionSystemHead "List" listHead = traverse requireOrigin origins
+ where
+  requireOrigin (Integer origin) = P.Right origin
+  requireOrigin _ = P.Left "Array origin entries must be explicit integers."
+sessionArrayOrigins _ (Just _) =
+  P.Left "Array currently expects an integer origin or a list of integer origins."
+
+sessionDenseArrayNodes :: [Int] -> Integer
+sessionDenseArrayNodes = go 1 0
+ where
+  go _ total [] = total
+  go prefix total (dimension : remaining) =
+    let nextPrefix = prefix * fromIntegral dimension
+        nextTotal = total + nextPrefix
+     in if nextTotal > 1000000
+          then nextTotal
+          else go nextPrefix nextTotal remaining
+
+liftSessionText
+  :: EvaluationSession
+  -> Either Text value
+  -> RuntimeResult EvaluationExit value
+liftSessionText current = \case
+  P.Left message -> patternFailure current message
+  P.Right value -> Right value
 
 arrayPredicateHasTest :: Text -> [Expr] -> Bool
 arrayPredicateHasTest operation values
