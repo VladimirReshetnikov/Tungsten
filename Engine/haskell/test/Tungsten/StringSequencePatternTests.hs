@@ -47,7 +47,7 @@ valueCases =
 errorCases :: [(Text, Text, Text)]
 errorCases =
   [ ("invalid except width", "StringCases[\"abc\",Except[\"ab\"]]", "String-pattern Except expects a single-character disallowed pattern.")
-  , ("invalid string pattern", "StringCases[\"abc\", Optional[\"a\"] ~~ \"b\"]", "Unsupported Wolfram string-pattern form in the current Tungsten subset: Optional[\"a\"].")
+  , ("invalid string pattern", "StringCases[\"abc\", Optional[\"a\"] ~~ \"b\"]", "Unsupported Wolfram string-pattern form in the current Tungsten subset: \"a\"..")
   , ("replacement requires rules", "StringReplace[\"abc\",\"a\"]", "StringReplace expects a rule or a list of rules.")
   , ("sequence search requires list", "SequenceCases[x,{_}]", "SequenceCases expects a List as its first argument.")
   , ("sequence search requires fixed pattern", "SequenceCount[{1,2},x_]", "SequenceCases / SequencePosition / SequenceCount expect a fixed-arity List pattern, optionally wrapped in Condition or HoldPattern.")

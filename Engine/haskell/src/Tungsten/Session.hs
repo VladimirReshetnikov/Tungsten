@@ -794,6 +794,8 @@ evaluateSessionAtRaw depth session expression = case expression of
             | otherwise -> pure (value, define name (ImmediateValue value) updated)
       Call (Symbol "Set") [lhs@Call {}, rhs] ->
         evaluateDownValueAssignment False depth session lhs rhs
+      Call (Symbol "Set") [_, _] ->
+        sessionFailure session "Set does not support this left-hand side in Tungsten yet."
       Call (Symbol "SetDelayed") [Symbol name, rhs]
         | Just settingName <- specialSessionSettingName name
         , not (validSpecialSessionSetting settingName rhs) ->
@@ -1593,7 +1595,7 @@ evaluateHeldSessionPatternBuiltin headName depth session arguments' =
             patternExpression
             evaluatedExtras
     ("MemberQ", subjectExpression : patternExpression : extras)
-      | length extras <= 1 -> do
+      | length extras <= 2 -> do
           (subject, subjectSession) <-
             evaluateSessionAt (depth + 1) session subjectExpression
           (evaluatedExtras, updated) <-
@@ -1792,17 +1794,18 @@ evaluateSessionMemberQ
   -> [Expr]
   -> SessionResult Expr
 evaluateSessionMemberQ depth session subject patternExpression extras = do
-  bounds <- case extras of
+  let (includeHeads, positionalExtras) = stripSessionHeadsOption False extras
+  bounds <- case positionalExtras of
     [] -> sessionLevelBounds session (Call (Symbol "List") [Integer 1])
     [specification] -> sessionLevelBounds session specification
-    _ -> patternFailure session "MemberQ expects two or three arguments."
+    _ -> patternFailure session "MemberQ expects an expression, a pattern, and an optional level specification."
   (found, updated) <-
     firstSessionMatch
       depth
       session
       bounds
       patternExpression
-      (collectPatternRecords False 0 subject)
+      (collectPatternRecords includeHeads 0 subject)
   Right (sessionBoolean found, updated)
 
 countSessionMatches
@@ -3149,6 +3152,14 @@ reduceSessionEvaluatedCall depth session = \case
           "MapIndexed[f] expects exactly one argument when used as an operator."
   Call (Symbol "AssociationMap") values ->
     Just (evaluateSessionAssociationMap depth session values)
+  Call (Symbol setHead) values
+    | setHead `elem` ["Union", "Intersection", "Complement"]
+    , any isSessionOptionRule values ->
+        Just (evaluateSessionSetOperation setHead depth session values)
+  Call (Symbol equalityHead) values
+    | isSessionSystemHead "Equal" equalityHead
+    , any isSessionOptionRule values ->
+        Just (evaluateSessionEqualWithSameTest depth session values)
   Call (Symbol sortHead) values
     | any (`isSessionSystemHead` sortHead) ["Sort", "ReverseSort"]
     , length values == 2 ->
@@ -3161,7 +3172,7 @@ reduceSessionEvaluatedCall depth session = \case
           )
   Call (Symbol orderingHead) values
     | isSessionSystemHead "Ordering" orderingHead
-    , length values == 3 ->
+    , length values `elem` [3, 4] ->
         Just (evaluateSessionOrdering depth session values)
   Call (Symbol orderedHead) values
     | isSessionSystemHead "OrderedQ" orderedHead
@@ -3889,7 +3900,16 @@ isSessionMessageName = \case
   _ -> False
 
 renderMessageInsertion :: Expr -> Text
-renderMessageInsertion = TextualForms.displayOutputText
+renderMessageInsertion = \case
+  Call (Symbol formHead) [payload@(Call (Symbol listHead) values)]
+    | isSessionSystemHead "FullForm" formHead
+    , isSessionSystemHead "List" listHead
+    , all isMessageNumericAtom values -> inputForm payload
+  expression -> TextualForms.displayOutputText expression
+ where
+  isMessageNumericAtom = \case
+    Integer _ -> True
+    _ -> False
 
 appendSessionMessageInsertions
   :: Int
@@ -7119,6 +7139,104 @@ splitSessionSameTestOptions operation values
   normalizeSameTest (Just (Symbol "Automatic")) = Nothing
   normalizeSameTest other = other
 
+evaluateSessionEqualWithSameTest
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionEqualWithSameTest depth session values =
+  case splitSessionSameTestOptions "Equal" values of
+    P.Left message -> sessionFailure session message
+    P.Right (dataValues, sameTest) ->
+      let compareAdjacent current (left : right : rest) = do
+            (same, updated) <- sessionValuesSame depth sameTest current left right
+            if same
+              then compareAdjacent updated (right : rest)
+              else Right (Symbol "False", updated)
+          compareAdjacent current _ = Right (Symbol "True", current)
+       in compareAdjacent session dataValues
+
+evaluateSessionSetOperation
+  :: Text
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionSetOperation operation depth session values =
+  case splitSessionSameTestOptions operation values of
+    P.Left message -> sessionFailure session message
+    P.Right (dataValues, sameTest) -> case traverse sessionListValues dataValues of
+      Nothing -> sessionFailure session (operation <> " expects a list or association.")
+      Just lists -> case (operation, lists) of
+        ("Union", _) -> do
+          (unique, updated) <- uniqueSessionValues depth sameTest session (concat lists)
+          Right (evaluatedList unique, updated)
+        ("Intersection", first : remaining) -> do
+          (uniqueFirst, firstSession) <- uniqueSessionValues depth sameTest session first
+          (retained, updated) <- retainIntersection sameTest firstSession uniqueFirst remaining
+          Right (evaluatedList retained, updated)
+        ("Complement", first : remaining) -> do
+          (uniqueFirst, firstSession) <- uniqueSessionValues depth sameTest session first
+          (retained, updated) <- removeComplement sameTest firstSession uniqueFirst (concat remaining)
+          Right (evaluatedList retained, updated)
+        _ -> sessionFailure session (operation <> " expects at least one list.")
+ where
+  sessionListValues (Call (Symbol listHead) listValues)
+    | isSessionSystemHead "List" listHead = Just listValues
+  sessionListValues _ = Nothing
+  retainIntersection _ current [] _ = Right ([], current)
+  retainIntersection selectedSameTest current (candidate : rest) lists = do
+    (present, updated) <- presentInEvery selectedSameTest current candidate lists
+    (retained, finalSession) <- retainIntersection selectedSameTest updated rest lists
+    Right (if present then candidate : retained else retained, finalSession)
+  presentInEvery _ current _ [] = Right (True, current)
+  presentInEvery selectedSameTest current candidate (listValues : rest) = do
+    (present, updated) <- anySessionValueSame depth selectedSameTest current candidate listValues
+    if present then presentInEvery selectedSameTest updated candidate rest else Right (False, updated)
+  removeComplement _ current [] _ = Right ([], current)
+  removeComplement selectedSameTest current (candidate : rest) excluded = do
+    (present, updated) <- anySessionValueSame depth selectedSameTest current candidate excluded
+    (retained, finalSession) <- removeComplement selectedSameTest updated rest excluded
+    Right (if present then retained else candidate : retained, finalSession)
+
+uniqueSessionValues
+  :: Int
+  -> Maybe Expr
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult [Expr]
+uniqueSessionValues depth sameTest session values = go session [] (sortBy canonicalCompare values)
+ where
+  go current retained [] = Right (reverse retained, current)
+  go current retained (candidate : rest) = do
+    (duplicate, updated) <- anySessionValueSame depth sameTest current candidate retained
+    go updated (if duplicate then retained else candidate : retained) rest
+
+anySessionValueSame
+  :: Int
+  -> Maybe Expr
+  -> EvaluationSession
+  -> Expr
+  -> [Expr]
+  -> SessionResult Bool
+anySessionValueSame _ _ session _ [] = Right (False, session)
+anySessionValueSame depth sameTest session candidate (value : rest) = do
+  (same, updated) <- sessionValuesSame depth sameTest session candidate value
+  if same
+    then Right (True, updated)
+    else anySessionValueSame depth sameTest updated candidate rest
+
+sessionValuesSame
+  :: Int
+  -> Maybe Expr
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> SessionResult Bool
+sessionValuesSame _ Nothing session left right = Right (left == right, session)
+sessionValuesSame depth (Just function) session left right =
+  evaluateSessionSameTest depth (Just function) session left right
+
 splitTrailingSessionOptions :: [Expr] -> ([Expr], [Expr])
 splitTrailingSessionOptions values =
   (reverse reversedArguments, reverse reversedOptions)
@@ -7193,31 +7311,43 @@ evaluateSessionOrdering
   -> EvaluationSession
   -> [Expr]
   -> SessionResult Expr
-evaluateSessionOrdering depth session = \case
-  [subject, count, function] -> case sessionOrderedCollection subject of
-    Nothing -> sessionFailure session "Ordering expects a nonatomic expression."
-    Just collection -> do
-      (sorted, updated) <-
-        pythonStableSortByStateM
-          compareItems
-          session
-          (sessionCollectionItems collection)
-      case sliceSessionOrderingCount (Just count) sorted of
-        P.Left message -> sessionFailure updated message
-        P.Right selected ->
-          Right (evaluatedList (map (Integer . sessionItemIndex) selected), updated)
-   where
-    compareItems current left right =
-      evaluateSessionOrderingCompare
+evaluateSessionOrdering depth session values =
+  case splitSessionSameTestOptions "Ordering" values of
+    P.Left message -> sessionFailure session message
+    P.Right ([subject, count, function], sameTest) -> case sessionOrderedCollection subject of
+      Nothing -> sessionFailure session "Ordering expects a nonatomic expression."
+      Just collection -> do
+        (sorted, updated) <-
+          pythonStableSortByStateM
+            (compareItems sameTest function)
+            session
+            (sessionCollectionItems collection)
+        case sliceSessionOrderingCount (Just count) sorted of
+          P.Left message -> sessionFailure updated message
+          P.Right selected ->
+            Right (evaluatedList (map (Integer . sessionItemIndex) selected), updated)
+    _ ->
+      sessionFailure
+        session
+        "Ordering expects an expression, an optional count, and an optional ordering function."
+ where
+  compareItems sameTest function current left right = do
+    (same, sameSession) <-
+      sessionValuesSame
         depth
-        function
+        sameTest
         current
         (sessionItemValue left)
         (sessionItemValue right)
-  _ ->
-    sessionFailure
-      session
-      "Ordering expects an expression, an optional count, and an optional ordering function."
+    if same
+      then Right (EQ, sameSession)
+      else
+        evaluateSessionOrderingCompare
+          depth
+          function
+          sameSession
+          (sessionItemValue left)
+          (sessionItemValue right)
 
 evaluateSessionOrderedQ
   :: Int
@@ -10401,7 +10531,10 @@ evaluateSessionModule depth session = \case
   [Call (Symbol listHead) [], body]
     | isSessionSystemHead "List" listHead ->
         evaluateTargetedReturn "Module" depth session body
-  originalArguments@[Call (Symbol listHead) bindingExpressions, body]
+  [Call (Symbol listHead) bindingExpressions, body]
+    | isSessionSystemHead "List" listHead
+    , Just duplicate <- duplicateBindingName bindingExpressions ->
+        sessionFailure session ("Module has duplicate binding for '" <> duplicate <> "'.")
     | isSessionSystemHead "List" listHead
     , Just bindings <- parseModuleBindings bindingExpressions -> do
         let nextCounter = sessionModuleCounter session + 1
@@ -10417,7 +10550,9 @@ evaluateSessionModule depth session = \case
         let renamedBody = renameBoundSymbols renameMap body
         evaluateTargetedReturn "Module" depth bodySession renamedBody
     | otherwise ->
-        Right (Call (Symbol "Module") originalArguments, session)
+        sessionFailure session "Module expects valid symbol locals in its first argument."
+  [_, _] ->
+    sessionFailure session "Module expects a List of locals as its first argument."
   arguments' -> Right (Call (Symbol "Module") arguments', session)
 
 evaluateSessionWith
@@ -10429,19 +10564,25 @@ evaluateSessionWith depth session = \case
   [Call (Symbol listHead) [], body]
     | isSessionSystemHead "List" listHead ->
         evaluateSessionAt (depth + 1) session body
-  originalArguments@[Call (Symbol listHead) bindingExpressions, body]
+  [Call (Symbol listHead) bindingExpressions, body]
     | isSessionSystemHead "List" listHead ->
         inspectRuntimeResult
           (collectWithBindings depth session Set.empty Map.empty bindingExpressions)
           $ \case
           P.Left evaluationExit -> Left evaluationExit
           P.Right (Nothing, updated) ->
-            Right (Call (Symbol "With") originalArguments, updated)
+            case duplicateBindingName bindingExpressions of
+              Just duplicate ->
+                sessionFailure updated ("With has duplicate binding for '" <> duplicate <> "'.")
+              Nothing ->
+                sessionFailure updated "With expects valid symbol bindings in its first argument."
           P.Right (Just substitutions, updated) ->
             evaluateSessionAt
               (depth + 1)
               updated
               (substituteNamedSymbols substitutions body)
+  [_, _] ->
+    sessionFailure session "With expects a List of bindings as its first argument."
   arguments' -> Right (Call (Symbol "With") arguments', session)
 
 collectWithBindings
@@ -10494,7 +10635,10 @@ evaluateSessionBlock headName depth session = \case
   [Call (Symbol listHead) [], body]
     | isSessionSystemHead "List" listHead ->
         evaluateTargetedReturn (blockReturnTarget headName) depth session body
-  originalArguments@[Call (Symbol listHead) bindingExpressions, body]
+  [Call (Symbol listHead) bindingExpressions, body]
+    | isSessionSystemHead "List" listHead
+    , Just duplicate <- duplicateBindingName bindingExpressions ->
+        sessionFailure session ("Block has duplicate binding for '" <> duplicate <> "'.")
     | isSessionSystemHead "List" listHead
     , Just bindings <- parseBlockBindings bindingExpressions ->
         let snapshots =
@@ -10511,8 +10655,26 @@ evaluateSessionBlock headName depth session = \case
                 body
          in restoreScopedResult snapshots scopedResult
     | otherwise ->
-        Right (Call (Symbol headName) originalArguments, session)
+        sessionFailure session "Block expects valid symbol locals in its first argument."
+  [_, _] ->
+    sessionFailure session "Block expects a List of locals as its first argument."
   arguments' -> Right (Call (Symbol headName) arguments', session)
+
+duplicateBindingName :: [Expr] -> Maybe Text
+duplicateBindingName = go Set.empty
+ where
+  go _ [] = Nothing
+  go seen (binding : rest) = case localBindingName binding of
+    Just name
+      | Set.member name seen -> Just name
+      | otherwise -> go (Set.insert name seen) rest
+    Nothing -> go seen rest
+  localBindingName = \case
+    Symbol name -> Just name
+    Call (Symbol setHead) [Symbol name, _]
+      | isSessionSystemHead "Set" setHead
+          || isSessionSystemHead "SetDelayed" setHead -> Just name
+    _ -> Nothing
 
 blockReturnTarget :: Text -> Text
 blockReturnTarget "Internal`InheritedBlock" = "InheritedBlock"
@@ -10700,11 +10862,11 @@ evaluateSessionTable depth session arguments' = case arguments' of
   body : iteratorSpecs@(_ : _) ->
     inspectRuntimeResult (tableLoop depth session body iteratorSpecs) $ \case
       P.Left (InvalidIterator updated) ->
-        Right (Call (Symbol "Table") arguments', updated)
+        sessionFailure updated (iteratorFailureMessage "Table" iteratorSpecs)
       P.Left (IterationEvaluationFailure evaluationExit) ->
         Left evaluationExit
       P.Right result -> Right result
-  _ -> Right (Call (Symbol "Table") arguments', session)
+  _ -> sessionFailure session "Table expects a body and at least one iterator specification."
 
 evaluateSessionDo
   :: Int
@@ -10833,7 +10995,8 @@ evaluateSessionAccumulator headName accumulatorHead depth session arguments' =
           inspectRuntimeResult
             (flatIterationLoop True depth session body iteratorSpecs)
             $ \case
-            P.Left (InvalidIterator updated) -> inert updated
+            P.Left (InvalidIterator updated) ->
+              sessionFailure updated (iteratorFailureMessage headName iteratorSpecs)
             P.Left (IterationEvaluationFailure evaluationExit) ->
               Left evaluationExit
             P.Right (terms, updated) ->
@@ -10844,9 +11007,22 @@ evaluateSessionAccumulator headName accumulatorHead depth session arguments' =
                     (Symbol accumulatorHead)
                     (accumulatorArguments accumulatorHead terms)
                 )
-    _ -> inert session
+      | otherwise ->
+          sessionFailure session (headName <> " iterator specification must be a List.")
+    _ ->
+      sessionFailure session (headName <> " expects a body and at least one iterator specification.")
+iteratorFailureMessage :: Text -> [Expr] -> Text
+iteratorFailureMessage headName specifications
+  | any hasZeroStep specifications = "Iterator step must be a nonzero real number."
+  | otherwise = headName <> " received an invalid iterator specification."
  where
-  inert updated = Right (Call (Symbol headName) arguments', updated)
+  hasZeroStep = \case
+    Call (Symbol listHead) [_, _, _, step]
+      | isSessionSystemHead "List" listHead -> exactIteratorZero step
+    _ -> False
+  exactIteratorZero (Integer 0) = True
+  exactIteratorZero (Rational 0 _) = True
+  exactIteratorZero _ = False
 
 flatIterationLoop
   :: Bool
@@ -11140,7 +11316,10 @@ evaluateSessionIf depth session = \case
       Symbol "False" -> case remaining of
         falseBranch : _ -> evaluateSessionAt (depth + 1) updated falseBranch
         [] -> Right (Symbol "Null", updated)
-      _ -> Right (Call (Symbol "If") (evaluatedCondition : trueBranch : remaining), updated)
+      _ -> case remaining of
+        _falseBranch : unknownBranch : _ ->
+          evaluateSessionAt (depth + 1) updated unknownBranch
+        _ -> Right (Call (Symbol "If") (evaluatedCondition : trueBranch : remaining), updated)
   arguments' -> Right (Call (Symbol "If") arguments', session)
 
 evaluateSessionWhich
@@ -11616,6 +11795,9 @@ stripSessionTransparentUnevaluatedArguments :: Expr -> [Expr] -> [Expr]
 stripSessionTransparentUnevaluatedArguments expressionHead
   | sessionHeadExpressionIsAny
       [ "Composition"
+      , "Head"
+      , "Length"
+      , "Part"
       , "Accuracy"
       , "BlockMap"
       , "ExactNumberQ"

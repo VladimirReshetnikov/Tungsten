@@ -1163,8 +1163,9 @@ gaussianFactorOption (Call (Symbol ruleHead) [Symbol optionName, optionValue])
       ( systemHeadIn "GaussianIntegers" optionName
           && optionValue == Symbol "True"
       )
-        || ( systemHeadIn "Extension" optionName
+       || ( systemHeadIn "Extension" optionName
                && ( optionValue == Symbol "I"
+                      || optionValue == Complex (Integer 0) (Integer 1)
                       || optionValue
                         == Call (Symbol "List") [Complex (Integer 0) (Integer 1)]
                   )

@@ -243,6 +243,9 @@ stripPureTransparentUnevaluatedArguments :: Expr -> [Expr] -> [Expr]
 stripPureTransparentUnevaluatedArguments expressionHead
   | pureHeadExpressionIsAny
       [ "Composition"
+      , "Head"
+      , "Length"
+      , "Part"
       , "Accuracy"
       , "ExactNumberQ"
       , "InexactNumberQ"
@@ -554,7 +557,9 @@ evaluateIf depth = \case
       Symbol "False" -> case remaining of
         falseBranch : _ -> evaluateAt (depth + 1) falseBranch
         [] -> Right (Symbol "Null")
-      _ -> Right (Call (Symbol "If") (evaluatedCondition : trueBranch : remaining))
+      _ -> case remaining of
+        _falseBranch : unknownBranch : _ -> evaluateAt (depth + 1) unknownBranch
+        _ -> Right (Call (Symbol "If") (evaluatedCondition : trueBranch : remaining))
   arguments' -> Right (Call (Symbol "If") arguments')
 
 evaluateAnd :: Int -> [Expr] -> Either EvaluationError Expr
@@ -3082,41 +3087,47 @@ rebuildFactored selected replacement index inserted (value : rest)
 reduceTimes :: [Expr] -> Expr
 reduceTimes originalValues =
   let values = concatMap (flattenHead "Times") originalValues
-   in case reduceExplicitComplexValues multiplyComplexComponents (Integer 1, Integer 0) values of
-        Just complexResult -> complexResult
-        Nothing ->
-          let exactProduct = foldl' multiplyExact (Exact 1 1) (mapMaybe toExact values)
-              symbolic = filter (not . isExact) values
-              collected = sortBy canonicalCompare (collectPowerFactors symbolic)
-              combined
-                | exactProduct == Exact 0 1 = [Integer 0]
-                | exactProduct == Exact 1 1 && not (null collected) = collected
-                | otherwise = fromExact exactProduct : collected
-           in case combined of
-                [] -> Integer 1
-                [single] -> single
-                _ -> Call (Symbol "Times") combined
+   in if any isExplicitZero values && any isComplexInfinity values
+        then Symbol "Indeterminate"
+        else
+          case reduceExplicitComplexValues multiplyComplexComponents (Integer 1, Integer 0) values of
+            Just complexResult -> complexResult
+            Nothing ->
+              let exactProduct = foldl' multiplyExact (Exact 1 1) (mapMaybe toExact values)
+                  symbolic = filter (not . isExact) values
+                  collected = sortBy canonicalCompare (collectPowerFactors symbolic)
+                  combined
+                    | exactProduct == Exact 0 1 = [Integer 0]
+                    | exactProduct == Exact 1 1 && not (null collected) = collected
+                    | otherwise = fromExact exactProduct : collected
+               in case combined of
+                    [] -> Integer 1
+                    [single] -> single
+                    _ -> Call (Symbol "Times") combined
  where
   collectPowerFactors factors =
-    [ reducePower [base, Integer exponentValue]
-    | (_key, (base, exponentValue)) <- Map.toAscList accumulated
-    , exponentValue /= 0
+    [ reducePower [base, exponentValue]
+    | (_key, (base, exponentParts)) <- Map.toAscList accumulated
+    , let exponentValue = reducePlus exponentParts
+    , exponentValue /= Integer 0
     ]
    where
     accumulated = foldl' insertFactor Map.empty factors
     insertFactor retained factor =
-      let (base, exponentValue) = integerPowerFactor factor
+      let (base, exponentValue) = powerFactor factor
           key = fullForm base
        in Map.insertWith
-            (\(_newBase, newExponent) (oldBase, oldExponent) ->
-                (oldBase, oldExponent + newExponent)
+            (\(_newBase, newExponents) (oldBase, oldExponents) ->
+                (oldBase, oldExponents <> newExponents)
             )
             key
-            (base, exponentValue)
+            (base, [exponentValue])
             retained
-    integerPowerFactor (Call (Symbol powerHead) [base, Integer exponentValue])
+    powerFactor (Call (Symbol powerHead) [base, exponentValue])
       | systemHeadIn ["Power"] powerHead = (base, exponentValue)
-    integerPowerFactor factor = (factor, 1)
+    powerFactor factor = (factor, Integer 1)
+  isComplexInfinity (Symbol name) = systemHeadIn ["ComplexInfinity"] name
+  isComplexInfinity _ = False
 
 reduceExplicitComplexValues
   :: ((Expr, Expr) -> (Expr, Expr) -> (Expr, Expr))
@@ -3238,6 +3249,14 @@ reducePower [base, Integer exponentValue]
   | Call (Symbol powerHead) [nestedBase, Integer nestedExponent] <- base
   , systemHeadIn ["Power"] powerHead =
       reducePower [nestedBase, Integer (nestedExponent * exponentValue)]
+  | Call (Symbol powerHead) [nestedBase, nestedExponent] <- base
+  , systemHeadIn ["Power"] powerHead
+  , exponentValue > 0 =
+      reducePower [nestedBase, reduceTimes [Integer exponentValue, nestedExponent]]
+  | Call (Symbol timesHead) factors <- base
+  , systemHeadIn ["Times"] timesHead
+  , exponentValue > 0 =
+      reduceTimes [reducePower [factor, Integer exponentValue] | factor <- factors]
 reducePower [base, exponentValue]
   | Just result <- reduceExactFractionalPower base exponentValue = result
   | Just (Exact 1 1) <- toExact base = Integer 1
@@ -5844,15 +5863,49 @@ reduceCatenate values = Right (Call (Symbol "Catenate") values)
 
 reduceDifferences :: [Expr] -> Either EvaluationError Expr
 reduceDifferences [Call (Symbol "List") values] =
-  Right
-    ( list
-        ( zipWith
-            (\left right -> reducePlus [right, reduceTimes [Integer (-1), left]])
-            values
-            (drop 1 values)
+  Right (differenceAlongAxis 0 (Call (Symbol "List") values))
+reduceDifferences [subject, Integer order]
+  | order >= 0
+  , order <= fromIntegral (maxBound :: Int) =
+      Right (applyDifferenceOrder 0 (fromIntegral order) subject)
+reduceDifferences [subject, Call (Symbol listHead) orders]
+  | systemHeadIn ["List"] listHead
+  , Just integerOrders <- traverse nonnegativeDifferenceOrder orders =
+      Right
+        ( foldl'
+            (\current (axis, order) -> applyDifferenceOrder axis order current)
+            subject
+            (zip [0 :: Int ..] integerOrders)
         )
-    )
 reduceDifferences values = Right (Call (Symbol "Differences") values)
+
+nonnegativeDifferenceOrder :: Expr -> Maybe Int
+nonnegativeDifferenceOrder (Integer value)
+  | value >= 0
+  , value <= fromIntegral (maxBound :: Int) = Just (fromIntegral value)
+nonnegativeDifferenceOrder _ = Nothing
+
+applyDifferenceOrder :: Int -> Int -> Expr -> Expr
+applyDifferenceOrder _ 0 expression = expression
+applyDifferenceOrder axis order expression =
+  applyDifferenceOrder axis (order - 1) (differenceAlongAxis axis expression)
+
+differenceAlongAxis :: Int -> Expr -> Expr
+differenceAlongAxis 0 (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead =
+      list (zipWith subtractArrayValues values (drop 1 values))
+differenceAlongAxis axis (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead
+  , axis > 0 = list (map (differenceAlongAxis (axis - 1)) values)
+differenceAlongAxis _ expression = expression
+
+subtractArrayValues :: Expr -> Expr -> Expr
+subtractArrayValues (Call (Symbol leftHead) left) (Call (Symbol rightHead) right)
+  | systemHeadIn ["List"] leftHead
+  , systemHeadIn ["List"] rightHead
+  , length left == length right = list (zipWith subtractArrayValues left right)
+subtractArrayValues left right =
+  reducePlus [right, reduceTimes [Integer (-1), left]]
 
 reduceRiffle :: [Expr] -> Either EvaluationError Expr
 reduceRiffle = \case
@@ -6233,6 +6286,9 @@ collectionSizes operation maximumSize _ (Just specification) = case specificatio
     | size >= 0 -> Right (inBounds [fromIntegral size])
   Call (Symbol "List") [Integer lower, Integer upper]
     | lower >= 0 && upper >= lower -> Right (inBounds [fromIntegral lower .. fromIntegral upper])
+  Call (Symbol "List") [Integer lower, Integer upper, Integer step]
+    | lower >= 0 && upper >= lower && step > 0 ->
+        Right (inBounds (map fromIntegral [lower, lower + step .. upper]))
   Integer upper
     | upper >= 0 -> Right [0 .. min maximumSize (fromIntegral upper)]
   _ -> Left (EvaluationError (operation <> " received an unsupported size specification"))
@@ -7360,6 +7416,7 @@ naturalSortParts source = case T.uncons source of
 
 reduceLexicographicOrder :: [Expr] -> Either EvaluationError Expr
 reduceLexicographicOrder arguments' = case arguments' of
+  [function] -> Right (Call (Symbol "LexicographicOrder") [function])
   [left, right] -> Right (orderResult (lexicographicCompare Nothing left right))
   [left, right, function] ->
     Right (orderResult (lexicographicCompare (Just function) left right))
@@ -7757,7 +7814,7 @@ reducePick = \case
   pickSubject subject (Call (Symbol "List") selectors) pattern = do
     items <- orderedItems "Pick" subject
     if length items /= length selectors
-      then Left (EvaluationError "Pick expects one selector per first-level value")
+      then Left (EvaluationError "Pick currently expects selector parts compatible with the data shape.")
       else
         pure
           ( rebuildOrdered
@@ -9238,7 +9295,33 @@ reduceTotal [Call (Symbol "List") values] = reducePlus values
 reduceTotal [association]
   | Just entries <- associationEntries association =
       reducePlus [value | AssociationEntry _ _ value <- entries]
+reduceTotal [subject, Call (Symbol listHead) [Integer level]]
+  | systemHeadIn ["List"] listHead
+  , level >= 1
+  , level <= fromIntegral (maxBound :: Int) =
+      totalAtExactLevel (fromIntegral level) subject
+reduceTotal [subject, Integer level]
+  | level >= 1
+  , level <= fromIntegral (maxBound :: Int) =
+      iterateTotal (fromIntegral level) subject
+reduceTotal [subject, Symbol infinityName]
+  | systemHeadIn ["Infinity"] infinityName = reducePlus (arrayLeaves subject)
 reduceTotal values = Call (Symbol "Total") values
+
+totalAtExactLevel :: Int -> Expr -> Expr
+totalAtExactLevel 1 expression = reduceTotal [expression]
+totalAtExactLevel level (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead = list (map (totalAtExactLevel (level - 1)) values)
+totalAtExactLevel _ expression = expression
+
+iterateTotal :: Int -> Expr -> Expr
+iterateTotal 0 expression = expression
+iterateTotal count expression = iterateTotal (count - 1) (reduceTotal [expression])
+
+arrayLeaves :: Expr -> [Expr]
+arrayLeaves (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead = concatMap arrayLeaves values
+arrayLeaves expression = [expression]
 
 reduceAccumulate :: [Expr] -> Either EvaluationError Expr
 reduceAccumulate [subject] = accumulateExpression subject (Symbol "Plus")
@@ -9306,6 +9389,13 @@ reduceRotate :: Bool -> Text -> [Expr] -> Expr
 reduceRotate left headName = \case
   [subject] -> rotate subject 1
   [subject, Integer amount] -> rotate subject amount
+  [subject, Call (Symbol listHead) amounts]
+    | systemHeadIn ["List"] listHead
+    , Just integerAmounts <- traverse integerValue amounts ->
+        foldl'
+          (\current (axis, amount) -> rotateAxis axis amount current)
+          subject
+          (zip [0 :: Int ..] integerAmounts)
   values -> Call (Symbol headName) values
  where
   rotate (Call expressionHead arguments') amount
@@ -9316,6 +9406,11 @@ reduceRotate left headName = \case
             offset = fromIntegral (signed `mod` fromIntegral count)
          in Call expressionHead (drop offset arguments' <> take offset arguments')
   rotate subject amount = Call (Symbol headName) [subject, Integer amount]
+  rotateAxis 0 amount expression = rotate expression amount
+  rotateAxis axis amount (Call (Symbol listHead) values)
+    | systemHeadIn ["List"] listHead
+    , axis > 0 = list (map (rotateAxis (axis - 1) amount) values)
+  rotateAxis _ _ expression = expression
 
 reduceDimensions :: [Expr] -> Either EvaluationError Expr
 reduceDimensions [SparseArray dimensions _ _] =
