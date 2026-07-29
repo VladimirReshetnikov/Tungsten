@@ -19,6 +19,7 @@ import Tungsten.Evaluate (evaluationErrorMessage)
 import Tungsten.Expression
 import Tungsten.Parser
 import Tungsten.Session
+import qualified Tungsten.TextualForms as TextualForms
 
 data ReplState = ReplState
   { replSession :: !EvaluationSession
@@ -164,7 +165,10 @@ exitCode = \case
 runRepl :: Bool -> IO Int
 runRepl showBanner = do
   if showBanner
-    then TextIO.putStrLn "Tungsten Haskell kernel-free REPL. Exit with Exit[] or Quit[]."
+    then do
+      TextIO.putStrLn "Tungsten 0.1.0 Kernel-free Wolfram Language Interpreter for Microsoft Windows (64-bit)"
+      TextIO.putStrLn "Copyright 2026 OpenAI Codex. Structural subset; not a Wolfram kernel."
+      TextIO.putStrLn ""
     else pure ()
   loop initialReplState
  where
@@ -182,7 +186,8 @@ runRepl showBanner = do
           ReplExit code updated -> emitSessionStreams updated *> pure code
           ReplValue line value updated -> do
             emitSessionStreams updated
-            TextIO.putStrLn ("Out[" <> T.pack (show line) <> "]= " <> fullForm value)
+            TextIO.putStrLn ("\nOut[" <> T.pack (show line) <> "]= " <> TextualForms.displayOutputText value)
+            TextIO.putStrLn ""
             loop updated
 
   emitSessionStreams updated = do

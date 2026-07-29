@@ -1362,7 +1362,9 @@ def audit_repl_and_argument_surface(audit: Audit, root: Path) -> None:
 
     native_version = audit.run("native", ["--version"])
     python_version = audit.run("python", ["--version"])
-    if native_version.returncode == 0 and native_version.stdout.startswith("tungsten-cpp "):
+    if native_version.returncode == 0 and native_version.stdout.startswith(
+        ("tungsten-cpp ", "tungsten-hs ")
+    ):
         audit.passed.append("native --version")
         audit.intentional.append(
             {

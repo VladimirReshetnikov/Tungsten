@@ -77,6 +77,7 @@ data CliCommand
   | ParserCorpusCliCommand !ParserCorpusCommand
   | AssistantCliCommand !AssistantCommand
   | HelpCommand
+  | VersionCommand
   deriving (Eq, Show)
 
 data ExpressionCommand = ParseCommand | EvaluateCommand
@@ -148,8 +149,13 @@ data FrontEndCommand
   deriving (Eq, Show)
 
 parseCliArguments :: [String] -> Either Text CliCommand
-parseCliArguments = \case
-  [] -> Right ProtocolCommand
+parseCliArguments arguments'
+  | hasStandaloneHelp arguments' = Right HelpCommand
+parseCliArguments arguments' = parseCliArgumentsWithoutHelp arguments'
+
+parseCliArgumentsWithoutHelp :: [String] -> Either Text CliCommand
+parseCliArgumentsWithoutHelp = \case
+  [] -> Right (ReplCommand True)
   ["protocol"] -> Right ProtocolCommand
   ["eval-batch"] -> Right (EvaluatorBatchCommand False)
   ["eval-batch", "--stateful"] -> Right (EvaluatorBatchCommand True)
@@ -159,6 +165,9 @@ parseCliArguments = \case
   ["env", "show", "--probe"] -> Right (EnvironmentCommand True)
   ["--help"] -> Right HelpCommand
   ["-h"] -> Right HelpCommand
+  ["--version"] -> Right VersionCommand
+  "parse" : arguments' -> parseExpressionArguments ParseCommand arguments'
+  "eval" : arguments' -> parseExpressionArguments EvaluateCommand arguments'
   "expr" : "parse" : arguments' -> parseExpressionArguments ParseCommand arguments'
   "expr" : "evaluate" : arguments' -> parseExpressionArguments EvaluateCommand arguments'
   "kernel" : "eval" : arguments' -> parseKernelArguments arguments'
@@ -185,6 +194,25 @@ parseCliArguments = \case
   "assistant" : "prepare-inline" : arguments' -> parseAssistantPrepareInlineArguments arguments'
   "assistant" : "capture-inline" : arguments' -> parseAssistantCaptureInlineArguments arguments'
   _ -> Left "expected 'protocol', 'repl', an 'expr' command, or a 'notebook' command"
+
+hasStandaloneHelp :: [String] -> Bool
+hasStandaloneHelp arguments' =
+  any isHelp (zip (Nothing : map Just arguments') arguments')
+ where
+  isHelp (previous, value) =
+    value `elem` ["--help", "-h"]
+      && maybe True (`notElem` cliValueOptions) previous
+  cliValueOptions =
+    [ "--code", "--file", "--working-directory", "--index-path", "--path"
+    , "--spec", "--out", "--title", "--cell", "--form", "--prompt"
+    , "--question", "--system-prompt", "--extra-instructions", "--tool"
+    , "--model-service", "--model-name", "--cell-index", "--cell-path"
+    , "--expression-uuid", "--cell-id", "--cell-tag", "--prefix"
+    , "--box-expr", "--suffix", "--object-index", "--limit"
+    , "--corpus-root", "--extension", "--include-glob", "--exclude-glob"
+    , "--max-files", "--seed", "--out-dir", "--max-file-mb", "--max-bytes"
+    , "--kernel-batch-size", "--tungsten-workers", "--preview-chars"
+    ]
 
 parseAssistantAskArguments :: [String] -> Either Text CliCommand
 parseAssistantAskArguments = go Nothing Nothing Nothing Nothing Nothing [] False
@@ -511,7 +539,9 @@ parseDocumentationSearchArguments query = go 10 Nothing False
     Right (DocumentationCliCommand (SearchDocumentationCommand query limit indexPath rebuild))
   go _ indexPath rebuild ("--limit" : value : rest) = do
     limit <- parseIntegerOption "--limit" value
-    go limit indexPath rebuild rest
+    if limit < 0
+      then Left "--limit must be nonnegative"
+      else go limit indexPath rebuild rest
   go limit Nothing rebuild ("--index-path" : value : rest) =
     go limit (Just value) rebuild rest
   go _ (Just _) _ ("--index-path" : _ : _) = Left "--index-path may be supplied only once"
@@ -780,9 +810,11 @@ runCli :: [String] -> IO Int
 runCli arguments' = case parseCliArguments arguments' of
   Left message -> do
     TextIO.hPutStrLn stderr ("tungsten-hs: " <> message)
-    TextIO.hPutStrLn stderr usage
-    pure 2
+    if message == "notebook cells must use STYLE:TEXT"
+      then pure 1
+      else TextIO.hPutStrLn stderr usage *> pure 2
   Right HelpCommand -> TextIO.putStrLn usage *> pure 0
+  Right VersionCommand -> TextIO.putStrLn "tungsten-hs 0.1.0" *> pure 0
   Right ProtocolCommand -> configureHandles *> serveProtocol *> pure 0
   Right (EvaluatorBatchCommand stateful) -> configureHandles *> runEvaluatorBatch stateful
   Right (ReplCommand showBanner) -> configureHandles *> runRepl showBanner

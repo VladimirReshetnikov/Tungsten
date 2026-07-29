@@ -1128,7 +1128,7 @@ checkEvaluatorErrors = do
 checkCliArguments :: IO Bool
 checkCliArguments = do
   let checks =
-        [ assertEqual "CLI defaults to protocol" (Right ProtocolCommand) (parseCliArguments [])
+        [ assertEqual "CLI defaults to REPL" (Right (ReplCommand True)) (parseCliArguments [])
         , assertEqual
             "CLI stateless evaluator batch"
             (Right (EvaluatorBatchCommand False))
