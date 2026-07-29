@@ -962,6 +962,9 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionValueQ depth session arguments'
       Call (Symbol "OwnValues") arguments' ->
         evaluateSessionOwnValues session arguments'
+      Call (Symbol "DownValues") [Symbol historyName]
+        | Just normalizedHistoryName <- sessionHistorySymbolName historyName ->
+            evaluateSessionHistoryDownValues normalizedHistoryName session
       Call (Symbol "DownValues") arguments' ->
         evaluateSessionDefinitionValues
           "DownValues"
@@ -986,6 +989,9 @@ evaluateSessionAtRaw depth session expression = case expression of
           symbolNValues
           session
           arguments'
+      call@(Call (Symbol headName) arguments')
+        | isSessionSystemHead "Exit" headName || isSessionSystemHead "Quit" headName ->
+            evaluateSessionExit call headName depth session arguments'
       Call (Symbol "Module") arguments' ->
         evaluateSessionModule depth session arguments'
       Call (Symbol "With") arguments' ->
@@ -9279,6 +9285,56 @@ evaluateSessionDefinitionValues headName selectDefinitions session = \case
       [ Call (Symbol "HoldPattern") [downValuePattern definition]
       , downValueBody definition
       ]
+
+sessionHistorySymbolName :: Text -> Maybe Text
+sessionHistorySymbolName name
+  | isSessionSystemHead "In" name = Just "In"
+  | isSessionSystemHead "InString" name = Just "InString"
+  | isSessionSystemHead "Out" name = Just "Out"
+  | otherwise = Nothing
+
+evaluateSessionHistoryDownValues
+  :: Text
+  -> EvaluationSession
+  -> SessionResult Expr
+evaluateSessionHistoryDownValues headName session =
+  Right (evaluatedList (map historyRule historyValues), session)
+ where
+  historyValues = case headName of
+    "In" -> Map.toAscList (sessionInputHistory session)
+    "InString" ->
+      [ (index, String source)
+      | (index, source) <- Map.toAscList (sessionInputStringHistory session)
+      ]
+    "Out" -> Map.toAscList (sessionOutputHistory session)
+    _ -> []
+  historyRule (index, value) =
+    Call
+      (Symbol "RuleDelayed")
+      [ Call (Symbol "HoldPattern") [Call (Symbol headName) [Integer index]]
+      , value
+      ]
+
+evaluateSessionExit
+  :: Expr
+  -> Text
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionExit original _ depth session = \case
+  [] -> Right (original, session)
+  [argument] -> do
+    (evaluatedArgument, updated) <- evaluateSessionAt (depth + 1) session argument
+    case evaluatedArgument of
+      Integer _ -> Right (original, updated)
+      _ -> invalid updated
+  _ -> invalid session
+ where
+  invalid current =
+    recoverEvaluationFailure
+      original
+      (sessionFailure current "Exit and Quit expect an optional integer exit code.")
 
 evaluateSessionAttributes
   :: Int

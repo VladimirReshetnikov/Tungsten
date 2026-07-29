@@ -1035,26 +1035,40 @@ runExpressionCommand command sourceSpec requestedForm = do
                   , sessionInputHistory = Map.singleton 1 expression
                   , sessionInputStringHistory = Map.singleton 1 source
                   }
-           in evaluateInSession activeSession expression >>= \case
-            Left evaluationError ->
-              emitError
-                command
-                normalizedForm
-                (Just source)
-                "WolframEvaluationError"
-                (evaluationErrorMessage evaluationError)
-                (Just expression)
-            Right (result, updatedSession) -> do
-              emitJson
-                ( evaluationPayload
-                    normalizedForm
-                    source
-                    expression
-                    result
-                    (sessionVisibleMessages updatedSession)
-                    (sessionPrints updatedSession)
-                )
-              pure 0
+           in cliExitCode activeSession expression >>= \case
+            Just requestedExitCode -> pure requestedExitCode
+            Nothing -> evaluateInSession activeSession expression >>= \case
+              Left evaluationError ->
+                emitError
+                  command
+                  normalizedForm
+                  (Just source)
+                  "WolframEvaluationError"
+                  (evaluationErrorMessage evaluationError)
+                  (Just expression)
+              Right (result, updatedSession) -> do
+                emitJson
+                  ( evaluationPayload
+                      normalizedForm
+                      source
+                      expression
+                      result
+                      (sessionVisibleMessages updatedSession)
+                      (sessionPrints updatedSession)
+                  )
+                pure 0
+
+cliExitCode :: EvaluationSession -> Expr -> IO (Maybe Int)
+cliExitCode session = \case
+  Call (Symbol headName) []
+    | headName `elem` ["Exit", "Quit", "System`Exit", "System`Quit"] ->
+        pure (Just 0)
+  Call (Symbol headName) [argument]
+    | headName `elem` ["Exit", "Quit", "System`Exit", "System`Quit"] ->
+        evaluateInSession session argument >>= \case
+          Right (Integer code, _) -> pure (Just (fromInteger code))
+          _ -> pure Nothing
+  _ -> pure Nothing
 
 readSource :: SourceSpec -> IO (Either Text Text)
 readSource (InlineSource source) = pure (Right source)
