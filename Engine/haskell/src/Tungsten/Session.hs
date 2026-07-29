@@ -4127,19 +4127,29 @@ evaluateSessionMap
   -> EvaluationSession
   -> [Expr]
   -> SessionResult Expr
-evaluateSessionMap depth session = \case
-  [function, subject] -> case sessionOrderedCollection subject of
+evaluateSessionMap depth session values =
+ case stripSessionHeadsOption False values of
+  (includeHeads, [function, subject]) -> case sessionOrderedCollection subject of
     Nothing -> Right (subject, session)
     Just collection -> do
       (mapped, updated) <- mapItems function [] session (sessionCollectionItems collection)
-      Right (rebuildSessionCollection collection mapped, updated)
-  [function, subject, levelSpecification] -> do
+      let rebuilt = rebuildSessionCollection collection mapped
+      if includeHeads && not (sessionCollectionAssociation collection)
+        then case rebuilt of
+          Call expressionHead arguments' -> do
+            (mappedHead, headSession) <-
+              evaluateSessionCallable depth updated function [expressionHead]
+            Right (Call mappedHead arguments', headSession)
+          _ -> Right (rebuilt, updated)
+        else Right (rebuilt, updated)
+  (includeHeads, [function, subject, levelSpecification]) -> do
     (bounds, boundsSession) <-
       liftSessionLevelBounds
         session
         levelSpecification
     evaluateSessionMapLevels
       depth
+      includeHeads
       function
       bounds
       0
@@ -5928,13 +5938,14 @@ sessionExpressionDepth _ = 1
 
 evaluateSessionMapLevels
   :: Int
+  -> Bool
   -> Expr
   -> SessionLevelBounds
   -> Int
   -> EvaluationSession
   -> Expr
   -> SessionResult Expr
-evaluateSessionMapLevels depth function bounds positive session expression =
+evaluateSessionMapLevels depth includeHeads function bounds positive session expression =
   case sessionOrderedCollection expression of
     Just collection
       | sessionCollectionAssociation collection -> do
@@ -5947,10 +5958,22 @@ evaluateSessionMapLevels depth function bounds positive session expression =
     _ -> case expression of
       Call expressionHead values -> do
         (mappedValues, updated) <- walkValues [] session values
-        let rebuilt = normalizeEvaluatedCall expressionHead mappedValues
+        (mappedHead, headSession) <-
+          if includeHeads
+            then
+              evaluateSessionMapLevels
+                depth
+                includeHeads
+                function
+                bounds
+                (positive + 1)
+                updated
+                expressionHead
+            else Right (expressionHead, updated)
+        let rebuilt = normalizeEvaluatedCall mappedHead mappedValues
         if sessionLevelMatches bounds positive expression
-          then evaluateSessionCallable depth updated function [rebuilt]
-          else Right (rebuilt, updated)
+          then evaluateSessionCallable depth headSession function [rebuilt]
+          else Right (rebuilt, headSession)
       _
         | sessionLevelMatches bounds positive expression ->
             evaluateSessionCallable depth session function [expression]
@@ -5961,6 +5984,7 @@ evaluateSessionMapLevels depth function bounds positive session expression =
     (mapped, updated) <-
       evaluateSessionMapLevels
         depth
+        includeHeads
         function
         bounds
         (positive + 1)
@@ -5976,6 +6000,7 @@ evaluateSessionMapLevels depth function bounds positive session expression =
     (mapped, updated) <-
       evaluateSessionMapLevels
         depth
+        includeHeads
         function
         bounds
         (positive + 1)

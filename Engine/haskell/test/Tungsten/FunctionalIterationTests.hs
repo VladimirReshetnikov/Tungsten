@@ -209,7 +209,7 @@ errorCases =
     )
   , ( "map apply level specification"
     , "MapApply[f,x,z]"
-    , "an unsupported level specification was provided"
+    , "Unsupported Level specification: 'z'."
     )
   , ( "map apply operator arity"
     , "MapApply[f][x,y]"

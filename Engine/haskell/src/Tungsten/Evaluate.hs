@@ -8673,7 +8673,7 @@ levelInfinity :: Int
 levelInfinity = maxBound `div` 4
 
 normalizeLevelSpec :: Expr -> Either EvaluationError LevelBounds
-normalizeLevelSpec = \case
+normalizeLevelSpec specification = case specification of
   Integer level
     | level >= 0 -> Right (LevelBounds (if level == 0 then 0 else 1) (integerLevel level))
     | otherwise -> Right (LevelBounds 1 (integerLevel level))
@@ -8681,9 +8681,15 @@ normalizeLevelSpec = \case
   Call (Symbol "List") [bound] -> do
     value <- normalizeLevelBound bound
     Right (LevelBounds value value)
-  Call (Symbol "List") [lower, upper] ->
+  Call (Symbol "List") [lower, upper]
+    | isLevelBound lower
+    , isLevelBound upper ->
     LevelBounds <$> normalizeLevelBound lower <*> normalizeLevelBound upper
-  _ -> Left (EvaluationError "an unsupported level specification was provided")
+  _ ->
+    Left
+      ( EvaluationError
+          ("Unsupported Level specification: '" <> inputForm specification <> "'.")
+      )
  where
   integerLevel value
     | value > fromIntegral levelInfinity = levelInfinity
@@ -8696,7 +8702,13 @@ normalizeLevelBound (Integer value)
   | value < fromIntegral (negate levelInfinity) = Right (negate levelInfinity)
   | otherwise = Right (fromIntegral value)
 normalizeLevelBound (Symbol "Infinity") = Right levelInfinity
-normalizeLevelBound _ = Left (EvaluationError "an unsupported level bound was provided")
+normalizeLevelBound value =
+  Left (EvaluationError ("Unsupported level bound: " <> inputForm value <> "."))
+
+isLevelBound :: Expr -> Bool
+isLevelBound Integer {} = True
+isLevelBound (Symbol "Infinity") = True
+isLevelBound _ = False
 
 reduceLevel :: [Expr] -> Either EvaluationError Expr
 reduceLevel arguments' = case map stripUnevaluated arguments' of
@@ -8705,13 +8717,13 @@ reduceLevel arguments' = case map stripUnevaluated arguments' of
   [expression, specification, Symbol "False"] ->
     levelAtSpecification expression specification
   [_, _, Symbol "True"] ->
-    Left (EvaluationError "Level[..., ..., True] is not implemented yet")
+    Left (EvaluationError "Level[..., ..., True] is not implemented yet.")
   [_, _, _] ->
-    Left (EvaluationError "the optional third Level argument must be True or False")
+    Left (EvaluationError "The optional third Level argument must be True or False.")
   _ ->
     Left
       ( EvaluationError
-          "Level expects an expression, a level specification, and an optional heads flag"
+          "Level expects an expression, a level specification, and an optional heads flag."
       )
  where
   stripUnevaluated (Call (Symbol "Unevaluated") [value]) = value
