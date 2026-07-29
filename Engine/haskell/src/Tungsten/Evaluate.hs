@@ -1009,7 +1009,7 @@ reduceBuiltin headName values = case headName of
   "Quartiles" -> reduceQuartiles values
   "BinCounts" -> reduceBins False values
   "BinLists" -> reduceBins True values
-  "Order" -> Right (reduceOrder values)
+  "Order" -> reduceOrder values
   "OrderedQ" -> reduceOrderedQ values
   "Ordering" -> reduceOrderingIndices values
   "Sort" -> reduceSort False values
@@ -1292,32 +1292,30 @@ reduceClip arguments' = case arguments' of
           "Clip currently expects bounds of the form {min, max}."
       )
   clip value lower upper replacements = do
-    exactValue <-
-      maybe
-        ( Left
-            ( EvaluationError
-                "Clip currently evaluates only for explicit real numeric arguments."
-            )
-        )
-        Right
-        (explicitRealExact value)
-    exactLower <- explicitBound lower
-    exactUpper <- explicitBound upper
-    if compareExact exactValue exactLower == LT
+    if isOrderableReal value
+      then Right ()
+      else Left (EvaluationError valueError)
+    _ <- explicitBound lower
+    _ <- explicitBound upper
+    lowerOrdering <- realOrdering value lower valueError
+    upperOrdering <- realOrdering value upper valueError
+    if lowerOrdering == LT
       then replacementAt 0 replacements lower
       else
-        if compareExact exactValue exactUpper == GT
+        if upperOrdering == GT
           then replacementAt 1 replacements upper
           else Right value
-  explicitBound value =
-    maybe
-      ( Left
-          ( EvaluationError
-              "Clip currently evaluates only for explicit real numeric bounds."
-          )
-      )
-      Right
-      (explicitRealExact value)
+  valueError =
+    "Clip currently evaluates only for explicit real numeric arguments."
+  realOrdering left right message =
+    maybe (Left (EvaluationError message)) Right (compareOrderableReal left right)
+  explicitBound value
+    | isOrderableReal value = Right ()
+    | otherwise =
+      Left
+        ( EvaluationError
+            "Clip currently evaluates only for explicit real numeric bounds."
+        )
   replacementAt :: Int -> Maybe Expr -> Expr -> Either EvaluationError Expr
   replacementAt _ Nothing boundary = Right boundary
   replacementAt index (Just (Call (Symbol "List") [lowerReplacement, upperReplacement])) _ =
@@ -7107,6 +7105,12 @@ data OrderedItem = OrderedItem !Int !Expr !(Maybe AssociationEntry) ![Expr]
 canonicalCompare :: Expr -> Expr -> Ordering
 canonicalCompare left right
   | left == right = EQ
+  | Just (leftReal, leftImaginary) <- orderableComplexParts left
+  , Just (rightReal, rightImaginary) <- orderableComplexParts right =
+      case compareOrderableReal leftReal rightReal of
+        Just EQ -> maybe (compare (fullForm leftImaginary) (fullForm rightImaginary)) id (compareOrderableReal leftImaginary rightImaginary)
+        Just ordering -> ordering
+        Nothing -> compare (fullForm left) (fullForm right)
   | Just leftExact <- toExact left
   , Just rightExact <- toExact right =
       case compareExact leftExact rightExact of
@@ -7122,6 +7126,55 @@ canonicalCompare (Call leftHead leftValues) (Call rightHead rightValues) =
     EQ -> compareExpressionLists leftValues rightValues
     ordering -> ordering
 canonicalCompare left right = compare (fullForm left) (fullForm right)
+
+orderableComplexParts :: Expr -> Maybe (Expr, Expr)
+orderableComplexParts (Complex realPart imaginaryPart)
+  | isOrderableReal realPart
+  , isOrderableReal imaginaryPart = Just (realPart, imaginaryPart)
+orderableComplexParts expression
+  | isOrderableReal expression = Just (expression, Integer 0)
+orderableComplexParts _ = Nothing
+
+isOrderableReal :: Expr -> Bool
+isOrderableReal expression = case expression of
+  Integer {} -> True
+  Rational {} -> True
+  Real {} -> True
+  SpecialReal {} -> True
+  Symbol name -> systemHeadIn ["Infinity", "-Infinity"] name
+  _ -> False
+
+compareOrderableReal :: Expr -> Expr -> Maybe Ordering
+compareOrderableReal left right
+  | left == right = Just EQ
+compareOrderableReal (SpecialReal OverflowReal) _ = Just GT
+compareOrderableReal _ (SpecialReal OverflowReal) = Just LT
+compareOrderableReal (SpecialReal UnderflowReal) right =
+  compareUnderflowRight right
+compareOrderableReal left (SpecialReal UnderflowReal) =
+  invertOrdering <$> compareUnderflowRight left
+compareOrderableReal (Symbol leftName) _right
+  | systemHeadIn ["Infinity"] leftName = Just GT
+  | systemHeadIn ["-Infinity"] leftName = Just LT
+compareOrderableReal _left (Symbol rightName)
+  | systemHeadIn ["Infinity"] rightName = Just LT
+  | systemHeadIn ["-Infinity"] rightName = Just GT
+compareOrderableReal left right
+  | Real {} <- left = compare <$> explicitRealDouble left <*> explicitRealDouble right
+  | Real {} <- right = compare <$> explicitRealDouble left <*> explicitRealDouble right
+  | Just leftExact <- explicitRealExact left
+  , Just rightExact <- explicitRealExact right = Just (compareExact leftExact rightExact)
+compareOrderableReal _ _ = Nothing
+
+compareUnderflowRight :: Expr -> Maybe Ordering
+compareUnderflowRight expression
+  | Symbol name <- expression
+  , systemHeadIn ["Infinity"] name = Just LT
+  | Symbol name <- expression
+  , systemHeadIn ["-Infinity"] name = Just GT
+  | otherwise = do
+      value <- explicitRealDouble expression
+      Just (if value <= 0 then GT else LT)
 
 compareExact :: Exact -> Exact -> Ordering
 compareExact (Exact leftNumerator leftDenominator) (Exact rightNumerator rightDenominator) =
@@ -7191,12 +7244,14 @@ orderingFunctionCompare (Just function) = compareWithFunction
       _ -> EQ
     _ -> canonicalCompare left right
 
-reduceOrder :: [Expr] -> Expr
-reduceOrder [left, right] = Integer $ case canonicalCompare left right of
-  LT -> 1
-  EQ -> 0
-  GT -> -1
-reduceOrder values = Call (Symbol "Order") values
+reduceOrder :: [Expr] -> Either EvaluationError Expr
+reduceOrder [left, right] = Right (Integer result)
+ where
+  result = case canonicalCompare left right of
+    LT -> 1
+    EQ -> 0
+    GT -> -1
+reduceOrder _ = Left (EvaluationError "Order expects exactly two arguments.")
 
 reduceOrderedQ :: [Expr] -> Either EvaluationError Expr
 reduceOrderedQ = \case

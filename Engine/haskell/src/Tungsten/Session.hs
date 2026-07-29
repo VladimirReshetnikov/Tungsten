@@ -3149,6 +3149,24 @@ reduceSessionEvaluatedCall depth session = \case
           "MapIndexed[f] expects exactly one argument when used as an operator."
   Call (Symbol "AssociationMap") values ->
     Just (evaluateSessionAssociationMap depth session values)
+  Call (Symbol sortHead) values
+    | any (`isSessionSystemHead` sortHead) ["Sort", "ReverseSort"]
+    , length values == 2 ->
+        Just
+          ( evaluateSessionSort
+              (isSessionSystemHead "ReverseSort" sortHead)
+              depth
+              session
+              values
+          )
+  Call (Symbol orderingHead) values
+    | isSessionSystemHead "Ordering" orderingHead
+    , length values == 3 ->
+        Just (evaluateSessionOrdering depth session values)
+  Call (Symbol orderedHead) values
+    | isSessionSystemHead "OrderedQ" orderedHead
+    , length values == 2 ->
+        Just (evaluateSessionOrderedQ depth session values)
   Call (Symbol arrayHead) values
     | arrayHead == "Array" ->
         Just (evaluateSessionArray depth session values)
@@ -7118,6 +7136,108 @@ sessionOptionRuleParts = \case
   Call (Symbol ruleHead) [Symbol name, value]
     | ruleHead `elem` ["Rule", "RuleDelayed"] -> Just (name, value)
   _ -> Nothing
+
+evaluateSessionSort
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionSort reverseMode depth session = \case
+  [subject, specification] -> case sessionOrderedCollection subject of
+    Nothing -> sessionFailure session (operation <> " expects a nonatomic expression.")
+    Just collection -> do
+      (sorted, updated) <-
+        pythonStableSortByStateM
+          compareItems
+          session
+          (sessionCollectionItems collection)
+      Right (rebuildSessionCollection collection sorted, updated)
+   where
+    compareItems current left right = do
+      ordering <- case sameTestFunction specification of
+        Just test -> do
+          (same, updated) <-
+            evaluateSessionSameTest
+              depth
+              (Just test)
+              current
+              (sessionItemValue left)
+              (sessionItemValue right)
+          Right
+            ( if same
+                then EQ
+                else canonicalCompare (sessionItemValue left) (sessionItemValue right)
+            , updated
+            )
+        Nothing ->
+          evaluateSessionOrderingCompare
+            depth
+            specification
+            current
+            (sessionItemValue left)
+            (sessionItemValue right)
+      let (result, updated) = ordering
+      Right (if reverseMode then invertSessionOrdering result else result, updated)
+  _ -> sessionFailure session (operation <> " expects one or two arguments.")
+ where
+  operation = if reverseMode then "ReverseSort" else "Sort"
+  sameTestFunction (Call (Symbol ruleHead) [Symbol optionName, function])
+    | isSessionSystemHead "Rule" ruleHead
+        || isSessionSystemHead "RuleDelayed" ruleHead
+    , isSessionSystemHead "SameTest" optionName = Just function
+  sameTestFunction _ = Nothing
+
+evaluateSessionOrdering
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionOrdering depth session = \case
+  [subject, count, function] -> case sessionOrderedCollection subject of
+    Nothing -> sessionFailure session "Ordering expects a nonatomic expression."
+    Just collection -> do
+      (sorted, updated) <-
+        pythonStableSortByStateM
+          compareItems
+          session
+          (sessionCollectionItems collection)
+      case sliceSessionOrderingCount (Just count) sorted of
+        P.Left message -> sessionFailure updated message
+        P.Right selected ->
+          Right (evaluatedList (map (Integer . sessionItemIndex) selected), updated)
+   where
+    compareItems current left right =
+      evaluateSessionOrderingCompare
+        depth
+        function
+        current
+        (sessionItemValue left)
+        (sessionItemValue right)
+  _ ->
+    sessionFailure
+      session
+      "Ordering expects an expression, an optional count, and an optional ordering function."
+
+evaluateSessionOrderedQ
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionOrderedQ depth session = \case
+  [subject, function] -> case sessionOrderedCollection subject of
+    Nothing -> sessionFailure session "OrderedQ expects a nonatomic expression."
+    Just collection ->
+      checkPairs session (map sessionItemValue (sessionCollectionItems collection))
+   where
+    checkPairs current (left : right : remaining) = do
+      (outcome, updated) <-
+        evaluateSessionCallable depth current function [left, right]
+      if outcome == Symbol "True"
+        then checkPairs updated (right : remaining)
+        else Right (Symbol "False", updated)
+    checkPairs current _ = Right (Symbol "True", current)
+  _ -> sessionFailure session "OrderedQ expects one or two arguments."
 
 evaluateSessionSortBy
   :: Bool
