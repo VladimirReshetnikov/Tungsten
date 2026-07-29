@@ -63,6 +63,7 @@ import Tungsten.WolframString (WolframStringSegment (..))
 
 data CliCommand
   = ProtocolCommand
+  | EvaluatorBatchCommand !Bool
   | ReplCommand !Bool
   | EnvironmentCommand !Bool
   | KernelCommand !SourceSpec !(Maybe FilePath) !Bool !Bool
@@ -148,6 +149,8 @@ parseCliArguments :: [String] -> Either Text CliCommand
 parseCliArguments = \case
   [] -> Right ProtocolCommand
   ["protocol"] -> Right ProtocolCommand
+  ["eval-batch"] -> Right (EvaluatorBatchCommand False)
+  ["eval-batch", "--stateful"] -> Right (EvaluatorBatchCommand True)
   ["repl"] -> Right (ReplCommand True)
   ["repl", "--no-banner"] -> Right (ReplCommand False)
   ["env", "show"] -> Right (EnvironmentCommand False)
@@ -776,6 +779,7 @@ runCli arguments' = case parseCliArguments arguments' of
     pure 2
   Right HelpCommand -> TextIO.putStrLn usage *> pure 0
   Right ProtocolCommand -> configureHandles *> serveProtocol *> pure 0
+  Right (EvaluatorBatchCommand stateful) -> configureHandles *> runEvaluatorBatch stateful
   Right (ReplCommand showBanner) -> configureHandles *> runRepl showBanner
   Right (EnvironmentCommand includeProbe) -> do
     installation <- discoverInstallation
@@ -941,6 +945,65 @@ serveProtocol = do
         Right request -> handleProtocolRequest request
       TextIO.putStr (encodeResponseLine response)
       serveProtocol
+
+-- | Evaluate one JSON-encoded InputForm string per line.  This deliberately
+-- matches the native evaluator batch protocol used by the Python-reference
+-- differential suites, including a process-local stateful mode.
+runEvaluatorBatch :: Bool -> IO Int
+runEvaluatorBatch stateful = loop emptySession
+ where
+  loop session = do
+    finished <- hIsEOF stdin
+    if finished
+      then pure 0
+      else do
+        line <- TextIO.hGetLine stdin
+        case parseJson line of
+          Left jsonError -> do
+            emitJson (batchFailurePayload (jsonErrorMessage jsonError))
+            loop session
+          Right (JsonString source) ->
+            case parseInputForm source of
+              Left parseError -> do
+                emitJson (batchFailurePayload (parseErrorMessage parseError))
+                loop session
+              Right expression ->
+                evaluateInSession session expression >>= \case
+                  Left evaluationError -> do
+                    emitJson (batchFailurePayload (evaluationErrorMessage evaluationError))
+                    loop session
+                  Right (result, updatedSession) -> do
+                    emitJson (batchSuccessPayload result updatedSession)
+                    loop (if stateful then updatedSession else emptySession)
+          Right _ -> do
+            emitJson (batchFailurePayload "eval-batch input must contain one JSON string per line")
+            loop session
+
+batchSuccessPayload :: Expr -> EvaluationSession -> JsonValue
+batchSuccessPayload result session =
+  JsonObject
+    ( Map.fromList
+        [ ("full_form", JsonString (fullForm result))
+        , ("message_texts", JsonArray (map (JsonString . evaluationMessageText) messages))
+        , ("messages", JsonArray (map (JsonString . fullForm . evaluationMessageFullName) messages))
+        , ("prints", JsonArray (map JsonString (sessionPrints session)))
+        , ("success", JsonBool True)
+        ]
+    )
+ where
+  messages = sessionVisibleMessages session
+
+batchFailurePayload :: Text -> JsonValue
+batchFailurePayload message =
+  JsonObject
+    ( Map.fromList
+        [ ("error", JsonString message)
+        , ("message_texts", JsonArray [])
+        , ("messages", JsonArray [])
+        , ("prints", JsonArray [])
+        , ("success", JsonBool False)
+        ]
+    )
 
 runExpressionCommand :: ExpressionCommand -> SourceSpec -> Text -> IO Int
 runExpressionCommand command sourceSpec requestedForm = do
@@ -1682,6 +1745,7 @@ usage =
   T.unlines
     [ "Usage:"
     , "  tungsten-hs protocol"
+    , "  tungsten-hs eval-batch [--stateful]"
     , "  tungsten-hs repl [--no-banner]"
     , "  tungsten-hs env show"
     , "  tungsten-hs kernel eval (--code TEXT | --file PATH) [--working-directory PATH] [--front-end] [--require-success]"

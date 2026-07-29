@@ -1123,6 +1123,14 @@ checkCliArguments = do
   let checks =
         [ assertEqual "CLI defaults to protocol" (Right ProtocolCommand) (parseCliArguments [])
         , assertEqual
+            "CLI stateless evaluator batch"
+            (Right (EvaluatorBatchCommand False))
+            (parseCliArguments ["eval-batch"])
+        , assertEqual
+            "CLI stateful evaluator batch"
+            (Right (EvaluatorBatchCommand True))
+            (parseCliArguments ["eval-batch", "--stateful"])
+        , assertEqual
             "CLI inline parse"
             (Right (ExpressionCliCommand ParseCommand (InlineSource "1+2") "input"))
             (parseCliArguments ["expr", "parse", "--code", "1+2"])
