@@ -1083,7 +1083,7 @@ reduceBuiltin headName values = case headName of
   "Flatten" -> reduceFlatten values
   "Delete" -> reduceDelete values
   "Insert" -> reduceInsert values
-  "ReplacePart" -> Right (reduceReplacePart values)
+  "ReplacePart" -> reduceReplacePart values
   "Map" -> Right (reduceMap values)
   "Operate" -> reduceOperate values
   "Thread" -> reduceThread values
@@ -5225,19 +5225,28 @@ reduceExtract [sparse@SparseArray {}, positions] = case sparseExtractPaths posit
         Right (if multiple then evaluatedList selected else firstSelected)
       [] -> Left (EvaluationError "Extract received an empty internal position set")
 reduceExtract [subject, positions] = do
-  let paths = positionPaths positions
-  if null paths
-    then Left (EvaluationError "Extract received an invalid position specification")
-    else do
-      selected <- traverse extractPath paths
-      case selected of
-        firstSelected : _ ->
-          pure (if hasMultiplePositionPaths positions then evaluatedList selected else firstSelected)
-        [] -> Left (EvaluationError "Extract received an empty internal position set")
+  paths <-
+    maybe
+      ( Left
+          ( EvaluationError
+              "Extract positions must be a position list or a list of position lists."
+          )
+      )
+      Right
+      (operationPositionPaths positions)
+  selected <- traverse extractPath paths
+  case selected of
+    firstSelected : _ ->
+      pure (if hasMultiplePositionPaths positions then evaluatedList selected else firstSelected)
+    [] -> Left (EvaluationError "Extract received an empty internal position set")
  where
   extractPath path =
     maybe
-      (Left (EvaluationError "Extract received an invalid position"))
+      ( Left
+          ( EvaluationError
+              ("Part specifications are invalid for " <> inputForm subject <> ".")
+          )
+      )
       Right
       (selectAtPath path subject)
 reduceExtract values = Right (Call (Symbol "Extract") values)
@@ -5286,7 +5295,8 @@ data PathSelector
   deriving (Eq, Show)
 
 keySelectorValue :: Expr -> Maybe Expr
-keySelectorValue (Call (Symbol "Key") [key]) = Just key
+keySelectorValue (Call (Symbol keyHead) [key])
+  | systemHeadIn ["Key"] keyHead = Just key
 keySelectorValue _ = Nothing
 
 associationPartSelector :: Expr -> Maybe PathSelector
@@ -12308,32 +12318,243 @@ flattenNamedHead target remaining (Call expressionHead values) =
 flattenNamedHead _ _ expression = expression
 
 reduceDelete :: [Expr] -> Either EvaluationError Expr
-reduceDelete [subject, positions] =
-  foldM deleteOne subject (sortOperationPaths (positionPaths positions))
+reduceDelete [subject, positions] = do
+  (paths, invalid) <- expandOperationPaths subject positions
+  let uniquePaths = List.nub paths
+  if invalid || any null uniquePaths
+    then invalidPositions
+    else foldM deleteOne subject (sortOperationPaths uniquePaths)
  where
   deleteOne expression path = case deleteAtPath path expression of
     Just result -> Right result
-    Nothing -> Left (EvaluationError "Delete received an invalid position")
+    Nothing -> invalidPositions
+  invalidPositions =
+    Left
+      ( EvaluationError
+          ("Delete positions are invalid for " <> inputForm subject <> ".")
+      )
 reduceDelete values = Right (Call (Symbol "Delete") values)
 
 reduceInsert :: [Expr] -> Either EvaluationError Expr
-reduceInsert [subject, item, positions] =
-  foldM insertOne subject (sortOperationPaths (positionPaths positions))
+reduceInsert [subject, item, positions] = do
+  paths <- insertPositionPaths positions
+  foldM insertOne subject (sortOperationPaths paths)
  where
   insertOne expression path = case insertAtPath path item expression of
     Just result -> Right result
-    Nothing -> Left (EvaluationError "Insert received an invalid position")
+    Nothing ->
+      Left
+        ( EvaluationError
+            ("Insert positions are invalid for " <> inputForm subject <> ".")
+        )
 reduceInsert values = Right (Call (Symbol "Insert") values)
 
-reduceReplacePart :: [Expr] -> Expr
-reduceReplacePart [subject, replacements] =
-  foldl applyReplacement subject (sortReplacementRules (replacePartRules replacements))
+reduceReplacePart :: [Expr] -> Either EvaluationError Expr
+reduceReplacePart [subject, replacements] = do
+  rules <- replacePartRuleExpressions replacements
+  planned <- foldM planRule [] rules
+  pure (foldl applyReplacement subject (sortReplacementRules planned))
  where
+  planRule planned (position, replacement) = do
+    (paths, _invalid) <- expandOperationPaths subject position
+    pure
+      ( foldl
+          (\items path -> if any ((== path) . fst) items then items else items <> [(path, replacement)])
+          planned
+          paths
+      )
   applyReplacement expression (path, Symbol "Nothing") =
     maybe expression id (deleteAtPath path expression)
   applyReplacement expression (path, replacement) =
     maybe expression id (replaceAtPath path replacement expression)
-reduceReplacePart values = Call (Symbol "ReplacePart") values
+reduceReplacePart values = Right (Call (Symbol "ReplacePart") values)
+
+replacePartRuleExpressions :: Expr -> Either EvaluationError [(Expr, Expr)]
+replacePartRuleExpressions (Call (Symbol ruleHead) [position, replacement])
+  | systemHeadIn ["Rule", "RuleDelayed"] ruleHead =
+      Right [(position, replacement)]
+replacePartRuleExpressions (Call (Symbol ruleHead) _)
+  | systemHeadIn ["Rule", "RuleDelayed"] ruleHead =
+      Left (EvaluationError "ReplacePart rules must contain exactly two arguments.")
+replacePartRuleExpressions (Call (Symbol listHead) rules)
+  | systemHeadIn ["List"] listHead = traverse requireRule rules
+ where
+  requireRule (Call (Symbol ruleHead) [position, replacement])
+    | systemHeadIn ["Rule", "RuleDelayed"] ruleHead =
+        Right (position, replacement)
+  requireRule _ =
+    Left (EvaluationError "ReplacePart expects a rule or a list of rules.")
+replacePartRuleExpressions _ =
+  Left (EvaluationError "ReplacePart expects a rule or a list of rules.")
+
+insertPositionPaths :: Expr -> Either EvaluationError [[PathSelector]]
+insertPositionPaths (Integer position) = Right [[ArgumentSelector position]]
+insertPositionPaths (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead
+  , Just path <- traverse integerSelector values = Right [path]
+  | systemHeadIn ["List"] listHead = traverse explicitIntegerPath values
+ where
+  integerSelector (Integer position) = Just (ArgumentSelector position)
+  integerSelector _ = Nothing
+  explicitIntegerPath (Call (Symbol nestedHead) components)
+    | systemHeadIn ["List"] nestedHead
+    , Just path <- traverse integerSelector components = Right path
+  explicitIntegerPath _ = invalid
+  invalid =
+    Left
+      ( EvaluationError
+          "Insert expects an integer position, a position list, or a list of position lists."
+      )
+insertPositionPaths _ =
+  Left
+    ( EvaluationError
+        "Insert expects an integer position, a position list, or a list of position lists."
+    )
+
+-- Resolve destructive-operation paths against the original expression before
+-- applying edits.  This preserves negative-index and multi-position semantics
+-- when earlier deletions or replacements change argument counts.
+expandOperationPaths :: Expr -> Expr -> Either EvaluationError ([[PathSelector]], Bool)
+expandOperationPaths subject specification
+  | isPositionCollection specification
+  , Call _ positionExpressions <- specification = do
+      expanded <- traverse (expandPositionExpression subject) positionExpressions
+      pure (concatMap fst expanded, any snd expanded)
+  | isSinglePositionExpression specification =
+      expandPositionExpression subject specification
+  | otherwise =
+      Left
+        ( EvaluationError
+            ("Unsupported position specification: " <> inputForm specification <> ".")
+        )
+
+expandPositionExpression :: Expr -> Expr -> Either EvaluationError ([[PathSelector]], Bool)
+expandPositionExpression subject specification =
+  expandPositionComponents subject (positionComponents specification)
+
+positionComponents :: Expr -> [Expr]
+positionComponents (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead = values
+positionComponents selector = [selector]
+
+expandPositionComponents :: Expr -> [Expr] -> Either EvaluationError ([[PathSelector]], Bool)
+expandPositionComponents _ [] = Right ([[]], False)
+expandPositionComponents subject (component : remaining) = do
+  (selections, invalidHere) <- operationComponentSelections subject component
+  expanded <- traverse expandSelection selections
+  pure
+    ( concatMap fst expanded
+    , invalidHere || any snd expanded
+    )
+ where
+  expandSelection (selector, child) = do
+    (paths, invalid) <- expandPositionComponents child remaining
+    pure (map (selector :) paths, invalid)
+
+operationComponentSelections
+  :: Expr
+  -> Expr
+  -> Either EvaluationError ([(PathSelector, Expr)], Bool)
+operationComponentSelections _ (Integer 0) =
+  Left (EvaluationError "Position does not support index 0 in this position.")
+operationComponentSelections subject component
+  | Just entries <- associationEntries subject =
+      associationSelections entries component
+operationComponentSelections (Call _ values) component = do
+  (indices, invalid) <- resolveNumericPartSelectors (length values) component
+  pure
+    ( [(ArgumentSelector (fromIntegral index + 1), values !! index) | index <- indices]
+    , invalid
+    )
+operationComponentSelections _ _ = Right ([], True)
+
+associationSelections
+  :: [AssociationEntry]
+  -> Expr
+  -> Either EvaluationError ([(PathSelector, Expr)], Bool)
+associationSelections entries component
+  | Just selector <- associationPartSelector component =
+      case associationEntryIndex selector entries of
+        Nothing -> Right ([], True)
+        Just index ->
+          Right ([normalizedAssociationSelection entries selector index], False)
+associationSelections entries (Call (Symbol listHead) selectors)
+  | systemHeadIn ["List"] listHead
+  , all isPartKeySelector selectors =
+      foldM appendKey ([], False) selectors
+  | systemHeadIn ["List"] listHead
+  , any isPartKeySelector selectors =
+      Left
+        ( EvaluationError
+            "Association selector lists may not mix numeric and key selectors."
+        )
+ where
+  appendKey (selected, invalid) selector =
+    case associationPartSelector selector of
+      Nothing -> Right (selected, True)
+      Just path -> case associationEntryIndex path entries of
+        Nothing -> Right (selected, True)
+        Just index ->
+          Right
+            ( selected <> [normalizedAssociationSelection entries path index]
+            , invalid
+            )
+associationSelections entries component = do
+  (indices, invalid) <- resolveNumericPartSelectors (length entries) component
+  pure
+    ( [ normalizedAssociationSelection
+          entries
+          (ArgumentSelector (fromIntegral index + 1))
+          index
+      | index <- indices
+      ]
+    , invalid
+    )
+
+normalizedAssociationSelection
+  :: [AssociationEntry]
+  -> PathSelector
+  -> Int
+  -> (PathSelector, Expr)
+normalizedAssociationSelection entries selector index =
+  ( case selector of
+      KeySelector key -> KeySelector key
+      ArgumentSelector _ -> ArgumentSelector (fromIntegral index + 1)
+  , associationEntryValue (entries !! index)
+  )
+
+isPositionCollection :: Expr -> Bool
+isPositionCollection (Call (Symbol listHead) values) =
+  systemHeadIn ["List"] listHead
+    && not (null values)
+    && all isExplicitPosition values
+ where
+  isExplicitPosition (Call (Symbol nestedHead) components) =
+    systemHeadIn ["List"] nestedHead && all isPositionComponent components
+  isExplicitPosition _ = False
+isPositionCollection _ = False
+
+isSinglePositionExpression :: Expr -> Bool
+isSinglePositionExpression Integer {} = True
+isSinglePositionExpression expression
+  | isPartKeySelector expression = True
+isSinglePositionExpression (Call (Symbol listHead) components) =
+  systemHeadIn ["List"] listHead && all isPositionComponent components
+isSinglePositionExpression _ = False
+
+isPositionComponent :: Expr -> Bool
+isPositionComponent expression
+  | isPositionSelectorAtom expression = True
+isPositionComponent (Call (Symbol listHead) selectors) =
+  systemHeadIn ["List"] listHead && all isPositionSelectorAtom selectors
+isPositionComponent _ = False
+
+isPositionSelectorAtom :: Expr -> Bool
+isPositionSelectorAtom Integer {} = True
+isPositionSelectorAtom (Symbol allName) = systemHeadIn ["All"] allName
+isPositionSelectorAtom (Call (Symbol spanHead) _)
+  | systemHeadIn ["Span"] spanHead = True
+isPositionSelectorAtom expression = isPartKeySelector expression
 
 reduceMapAt :: [Expr] -> Expr
 reduceMapAt [function, subject, positions] =
@@ -12382,13 +12603,6 @@ hasMultiplePositionPaths (Call (Symbol "List") values) =
     maybe False (const True) (traverse pathSelector components)
   isExplicitPath _ = False
 hasMultiplePositionPaths _ = False
-
-replacePartRules :: Expr -> [([PathSelector], Expr)]
-replacePartRules (Call (Symbol "List") rules) = concatMap replacePartRules rules
-replacePartRules (Call (Symbol ruleHead) [position, replacement])
-  | ruleHead `elem` ["Rule", "RuleDelayed"] =
-      [(path, replacement) | path <- positionPaths position]
-replacePartRules _ = []
 
 sortOperationPaths :: [[PathSelector]] -> [[PathSelector]]
 sortOperationPaths = sortBy compareOperationPath
