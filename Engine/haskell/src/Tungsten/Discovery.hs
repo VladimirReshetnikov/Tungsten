@@ -11,7 +11,7 @@ module Tungsten.Discovery
 
 import Control.Monad (filterM)
 import Data.Char (isDigit, toLower)
-import Data.List (isInfixOf, nubBy, sortBy)
+import Data.List (isInfixOf, isPrefixOf, nubBy, sort, sortBy)
 import Data.Maybe (catMaybes, listToMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -96,7 +96,7 @@ discoverInstallation = do
         Just _ | explicitHome /= Nothing -> Just "TUNGSTEN_WOLFRAM_HOME"
         Just _ | requestedFamily /= Nothing -> ("TUNGSTEN_WOLFRAM_PRODUCT=" <>) <$> requestedFamily
         Just _ -> Just "default-product-preference"
-  buildInstallation selected available selectionReason
+  buildInstallation explicitHome selected available selectionReason
 
 discoverCandidates :: Maybe FilePath -> IO [InstallationSummary]
 discoverCandidates explicitHome = do
@@ -173,11 +173,12 @@ selectInstallation explicitHome requestedFamily available
   | otherwise = listToMaybe available
 
 buildInstallation
-  :: Maybe InstallationSummary
+  :: Maybe FilePath
+  -> Maybe InstallationSummary
   -> [InstallationSummary]
   -> Maybe Text
   -> IO WolframInstallation
-buildInstallation selected available selectionReason = do
+buildInstallation explicitHome selected available selectionReason = do
   localAppData <- lookupEnv "LOCALAPPDATA"
   appData <- lookupEnv "APPDATA"
   programData <- lookupEnv "ProgramData"
@@ -191,11 +192,15 @@ buildInstallation selected available selectionReason = do
       systemBase = Just (maybe "C:\\ProgramData" id programData </> userBaseName)
       mathpassCandidates =
         catMaybes
-          [ (</> "Licensing" </> "mathpass") <$> userBase
-          , (</> "Licensing" </> "mathpass") <$> systemBase
+          [ (</> "Licensing" </> "mathpass") <$> systemBase
+          , (</> "Licensing" </> "mathpass") <$> userBase
           ]
       cacheRoot = maybe (home </> ".cache") id localAppData
-      indexVersion = maybe "unknown" T.unpack version
+      indexVersion =
+        maybe
+          (maybe "unknown" takeFileName explicitHome)
+          T.unpack
+          version
       indexPrefix = if family == "engine" then "wolfram-engine" else "wolfram"
       defaultIndexPath = cacheRoot </> "Tungsten" </> "docs" </> (indexPrefix <> "-" <> indexVersion <> ".sqlite3")
   kernelExecutable <- optionalExisting installDir ["WolframKernel.exe", "WolframKernel"]
@@ -226,12 +231,26 @@ buildInstallation selected available selectionReason = do
 
 discoverDocsRoots :: Maybe FilePath -> Maybe FilePath -> IO [FilePath]
 discoverDocsRoots installDir appData = do
-  let candidates = catMaybes
+  let staticCandidates = catMaybes
         [ (</> "Documentation" </> "English" </> "System") <$> installDir
         , (</> "Wolfram" </> "Documentation" </> "English") <$> appData
         , (</> "WolframEngine" </> "Documentation" </> "English") <$> appData
         ]
-  filterM doesDirectoryExist candidates
+  pacletCandidates <- case appData of
+    Nothing -> pure []
+    Just root -> do
+      let repository = root </> "Wolfram" </> "Paclets" </> "Repository"
+      exists <- doesDirectoryExist repository
+      if not exists
+        then pure []
+        else do
+          entries <- reverse . sort <$> listDirectory repository
+          pure
+            [ repository </> entry </> "Documentation" </> "English"
+            | entry <- entries
+            , "SystemDocsUpdate" `isPrefixOf` entry
+            ]
+  filterM doesDirectoryExist (pacletCandidates <> staticCandidates)
 
 optionalExisting :: Maybe FilePath -> [FilePath] -> IO (Maybe FilePath)
 optionalExisting Nothing _ = pure Nothing

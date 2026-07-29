@@ -15,23 +15,28 @@ module Tungsten.Session
   , emptySession
   , evaluateInSession
   , evaluateInSessionWithRuntime
+  , sessionHistoryLengthLimit
   ) where
 
 import Control.Concurrent (threadDelay)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import Data.Char (isAlpha, isAlphaNum, isPrint, ord)
-import Data.List (sortBy)
+import Data.List (findIndex, sortBy, transpose)
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Clock (getMonotonicTimeNSec)
 import Numeric (showHex)
 import Prelude hiding (Left, Right)
 import qualified Prelude as P
+import System.Random (randomRIO)
 import Text.Read (readMaybe)
+import qualified Tungsten.AlgebraicRoots as AlgebraicRoots
 import Tungsten.Evaluate
 import Tungsten.Expression
+import qualified Tungsten.PolynomialAlgebra as PolynomialAlgebra
 import Tungsten.PythonSort (pythonStableSortByStateM)
+import qualified Tungsten.Random as Random
 import qualified Tungsten.StringPatterns as SP
 import Tungsten.SystemSymbols
   ( SymbolAttribute (..)
@@ -42,6 +47,7 @@ import Tungsten.SystemSymbols
   , systemSymbolAttributes
   , systemSymbolNames
   )
+import qualified Tungsten.TextualForms as TextualForms
 
 data Definition
   = ImmediateValue !Expr
@@ -159,6 +165,12 @@ data EvaluationSession = EvaluationSession
   , sessionGeneratedMessages :: ![EvaluationMessage]
   , sessionVisibleMessages :: ![EvaluationMessage]
   , sessionPrints :: ![Text]
+  , sessionHistoryLine :: !(Maybe Integer)
+  , sessionInputHistory :: !(Map.Map Integer Expr)
+  , sessionInputStringHistory :: !(Map.Map Integer Text)
+  , sessionOutputHistory :: !(Map.Map Integer Expr)
+  , sessionMessageHistory :: !(Map.Map Integer [EvaluationMessage])
+  , sessionExpandingInputHistory :: !(Set.Set Integer)
   }
   deriving (Eq, Show)
 
@@ -182,6 +194,12 @@ emptySession =
     , sessionGeneratedMessages = []
     , sessionVisibleMessages = []
     , sessionPrints = []
+    , sessionHistoryLine = Nothing
+    , sessionInputHistory = Map.empty
+    , sessionInputStringHistory = Map.empty
+    , sessionOutputHistory = Map.empty
+    , sessionMessageHistory = Map.empty
+    , sessionExpandingInputHistory = Set.empty
     }
 
 initialSessionSymbols :: Map.Map Text SymbolState
@@ -238,6 +256,7 @@ data EvaluationExit
 data SessionEffect value where
   ReadMonotonicTime :: SessionEffect Double
   SleepForSeconds :: !Double -> SessionEffect ()
+  RandomBelow :: !Integer -> SessionEffect Integer
 
 data RuntimeResult failure value where
   Left :: !failure -> RuntimeResult failure value
@@ -278,6 +297,7 @@ type SessionResult value =
 data SessionRuntime = SessionRuntime
   { sessionRuntimeMonotonicSeconds :: IO Double
   , sessionRuntimeSleepSeconds :: Double -> IO ()
+  , sessionRuntimeRandomBelow :: Integer -> IO Integer
   }
 
 defaultSessionRuntime :: SessionRuntime
@@ -289,6 +309,10 @@ defaultSessionRuntime =
         if seconds <= 0
           then pure ()
           else threadDelay (ceiling (seconds * 1000000))
+    , sessionRuntimeRandomBelow = \exclusiveUpperBound ->
+        if exclusiveUpperBound <= 0
+          then ioError (userError "random-below requires a positive upper bound")
+          else randomRIO (0, exclusiveUpperBound - 1)
     }
 
 -- Pattern matching can invoke arbitrary Condition and PatternTest callbacks.
@@ -506,6 +530,7 @@ evaluateInSessionWithRuntime runtime session expression = do
                 , sessionGeneratedMessages = []
                 , sessionVisibleMessages = []
                 , sessionPrints = []
+                , sessionExpandingInputHistory = Set.empty
                 }
               expression
           )
@@ -536,6 +561,9 @@ runRuntimeResult runtime = \case
   RuntimeEffect (SleepForSeconds seconds) resume ->
     sessionRuntimeSleepSeconds runtime seconds
       >> runRuntimeResult runtime (resume ())
+  RuntimeEffect (RandomBelow exclusiveUpperBound) resume ->
+    sessionRuntimeRandomBelow runtime exclusiveUpperBound
+      >>= runRuntimeResult runtime . resume
 
 inspectRuntimeResult
   :: RuntimeResult failure value
@@ -665,6 +693,9 @@ evaluateSessionAtRaw
   -> SessionResult Expr
 evaluateSessionAtRaw depth session expression = case expression of
       Symbol name
+        | resolvedSymbolStorageName name session == "$Line"
+        , Just line <- sessionHistoryLine session ->
+            Right (Integer line, session)
         | resolvedSymbolStorageName name session == "$MessageList" ->
             Right (currentSessionMessageList session, session)
         | resolvedSymbolStorageName name session == "$Context" ->
@@ -680,6 +711,15 @@ evaluateSessionAtRaw depth session expression = case expression of
         | isSystemSymbol name
         , displaySessionSymbolName name == "$MachinePrecision" ->
             Right (Real "15.954589770191003", session)
+        | isSystemSymbol name
+        , displaySessionSymbolName name == "$MaxMachineNumber" ->
+            Right (Real "1.7976931348623157*^+308", session)
+        | isSystemSymbol name
+        , displaySessionSymbolName name == "$MinMachineNumber" ->
+            Right (Real "2.2250738585072014*^-308", session)
+        | isSystemSymbol name
+        , displaySessionSymbolName name == "$MachineEpsilon" ->
+            Right (Real "2.220446049250313*^-16", session)
         | otherwise -> case symbolOwnValueFor name session of
             Nothing ->
               Right
@@ -730,6 +770,11 @@ evaluateSessionAtRaw depth session expression = case expression of
                   session
                   (Symbol qualifiedName)
                   arguments'
+      Call (Symbol "MessageList") arguments' ->
+        evaluateSessionHistoricalMessageList depth session arguments'
+      Call (Symbol historyHead) arguments'
+        | historyHead `elem` ["In", "InString", "Out"] ->
+            evaluateSessionHistoryCall historyHead depth session arguments'
       Call (Symbol "TagSet") arguments' ->
         evaluateSessionTagSet False depth session arguments'
       Call (Symbol "TagSetDelayed") arguments' ->
@@ -758,6 +803,8 @@ evaluateSessionAtRaw depth session expression = case expression of
             | otherwise -> pure (value, define name (ImmediateValue value) updated)
       Call (Symbol "Set") [lhs@Call {}, rhs] ->
         evaluateDownValueAssignment False depth session lhs rhs
+      Call (Symbol "Set") [_, _] ->
+        sessionFailure session "Set does not support this left-hand side in Tungsten yet."
       Call (Symbol "SetDelayed") [Symbol name, rhs]
         | Just settingName <- specialSessionSettingName name
         , not (validSpecialSessionSetting settingName rhs) ->
@@ -838,6 +885,10 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionConfirmBy depth session arguments'
       Call (Symbol "ConfirmMatch") arguments' ->
         evaluateSessionConfirmMatch depth session arguments'
+      Call (Symbol "ConfirmAssert") arguments' ->
+        evaluateSessionConfirmAssert depth session arguments'
+      Call (Symbol "Assert") arguments' ->
+        evaluateSessionAssert depth session arguments'
       Call (Symbol "Abort") arguments' ->
         evaluateSessionAbort session arguments'
       Call (Symbol "CheckAbort") arguments' ->
@@ -911,6 +962,9 @@ evaluateSessionAtRaw depth session expression = case expression of
         evaluateSessionValueQ depth session arguments'
       Call (Symbol "OwnValues") arguments' ->
         evaluateSessionOwnValues session arguments'
+      Call (Symbol "DownValues") [Symbol historyName]
+        | Just normalizedHistoryName <- sessionHistorySymbolName historyName ->
+            evaluateSessionHistoryDownValues normalizedHistoryName session
       Call (Symbol "DownValues") arguments' ->
         evaluateSessionDefinitionValues
           "DownValues"
@@ -935,6 +989,9 @@ evaluateSessionAtRaw depth session expression = case expression of
           symbolNValues
           session
           arguments'
+      call@(Call (Symbol headName) arguments')
+        | isSessionSystemHead "Exit" headName || isSessionSystemHead "Quit" headName ->
+            evaluateSessionExit call headName depth session arguments'
       Call (Symbol "Module") arguments' ->
         evaluateSessionModule depth session arguments'
       Call (Symbol "With") arguments' ->
@@ -1179,7 +1236,10 @@ evaluatedHeadAllowsDispatch _ evaluatedHead = case evaluatedHead of
 qualifiedAliasDispatchHeads :: [Text]
 qualifiedAliasDispatchHeads =
   [ "Abs"
+  , "Accuracy"
+  , "Apart"
   , "And"
+  , "Arg"
   , "AtomQ"
   , "BernoulliB"
   , "Binomial"
@@ -1195,27 +1255,57 @@ qualifiedAliasDispatchHeads =
   , "BitXor"
   , "ByteArrayQ"
   , "CarmichaelLambda"
+  , "Cancel"
   , "ChineseRemainder"
+  , "Complex"
+  , "ComplexExpand"
   , "CompositeQ"
+  , "Conjugate"
+  , "Coefficient"
+  , "CoefficientList"
+  , "Collect"
+  , "Comap"
+  , "ComapApply"
+  , "ComposeList"
+  , "Construct"
   , "ContinuedFraction"
   , "Context"
   , "Contexts"
+  , "CountRoots"
+  , "Decompose"
+  , "Denominator"
   , "DigitCount"
+  , "Discriminant"
   , "DiscreteDelta"
   , "DivisorSigma"
   , "Divisors"
   , "Equal"
   , "EvenQ"
+  , "ExactNumberQ"
   , "EulerPhi"
   , "EulerE"
+  , "Expand"
+  , "Exponent"
   , "FailureQ"
   , "FactorInteger"
+  , "Factor"
+  , "FactorList"
+  , "FullSimplify"
   , "Fibonacci"
+  , "FixedPoint"
+  , "FixedPointList"
+  , "Fold"
+  , "FoldList"
+  , "FoldWhile"
+  , "FoldWhileList"
+  , "FoldPair"
+  , "FoldPairList"
   , "FromContinuedFraction"
   , "FromDigits"
   , "GCD"
   , "Greater"
   , "GreaterEqual"
+  , "GroebnerBasis"
   , "HarmonicNumber"
   , "IntegerDigits"
   , "IntegerExponent"
@@ -1223,7 +1313,10 @@ qualifiedAliasDispatchHeads =
   , "IntegerPartitions"
   , "IntegerQ"
   , "IntegerReverse"
+  , "InexactNumberQ"
+  , "Im"
   , "Inequality"
+  , "IsolatingInterval"
   , "JacobiSymbol"
   , "JordanTotient"
   , "KroneckerDelta"
@@ -1233,10 +1326,16 @@ qualifiedAliasDispatchHeads =
   , "LessEqual"
   , "LiouvilleLambda"
   , "LucasL"
+  , "MapAll"
+  , "MapApply"
+  , "MachineIntegerQ"
+  , "MachineNumberQ"
   , "Max"
   , "Min"
+  , "MinimalPolynomial"
   , "MissingQ"
   , "Mod"
+  , "MonomialList"
   , "ModularInverse"
   , "MoebiusMu"
   , "Multinomial"
@@ -1244,37 +1343,84 @@ qualifiedAliasDispatchHeads =
   , "N"
   , "NameQ"
   , "Names"
+  , "Nest"
+  , "NestList"
   , "NextPrime"
+  , "Numerator"
   , "Not"
   , "NumberQ"
+  , "NumericQ"
   , "OddQ"
   , "Or"
+  , "Overflow"
   , "PartitionsP"
   , "PartitionsQ"
   , "Plus"
   , "Power"
   , "PowerMod"
+  , "Precision"
+  , "SetAccuracy"
+  , "SetPrecision"
   , "Prime"
   , "PrimePi"
   , "PrimePowerQ"
   , "PrimeQ"
+  , "PolynomialQ"
+  , "PolynomialGCD"
+  , "PolynomialLCM"
+  , "PolynomialMod"
+  , "PolynomialQuotient"
+  , "PolynomialReduce"
+  , "PolynomialRemainder"
   , "PrimitiveRoot"
   , "Quotient"
   , "QuotientRemainder"
   , "Ramp"
+  , "RandomPermutation"
+  , "RandomSample"
   , "RamanujanTau"
+  , "Rational"
+  , "Re"
   , "RealAbs"
   , "RealSign"
+  , "RealValuedNumberQ"
+  , "ReIm"
+  , "Resultant"
+  , "Root"
+  , "RootIntervals"
+  , "RootReduce"
+  , "RootSum"
   , "Sign"
   , "Sqrt"
+  , "Simplify"
+  , "Solve"
   , "StringQ"
+  , "Subresultants"
   , "Symbol"
   , "SymbolName"
   , "Times"
+  , "ToRadicals"
+  , "Together"
+  , "TrueQ"
   , "UnitStep"
   , "Unitize"
+  , "Underflow"
   , "Unequal"
   , "Unique"
+  , "Variables"
+  ] <> numericTranscendentalDispatchHeads
+
+numericTranscendentalDispatchHeads :: [Text]
+numericTranscendentalDispatchHeads =
+  [ "Exp", "Log"
+  , "Sin", "Cos", "Tan", "Cot", "Sec", "Csc"
+  , "ArcSin", "ArcCos", "ArcTan", "ArcCot", "ArcSec", "ArcCsc"
+  , "Sinh", "Cosh", "Tanh", "Coth", "Sech", "Csch"
+  , "ArcSinh", "ArcCosh", "ArcTanh", "ArcCoth", "ArcSech", "ArcCsch"
+  , "Haversine", "InverseHaversine", "Gudermannian", "InverseGudermannian"
+  , "SinDegrees", "CosDegrees", "TanDegrees", "CotDegrees", "SecDegrees", "CscDegrees"
+  , "ArcSinDegrees", "ArcCosDegrees", "ArcTanDegrees", "ArcCotDegrees"
+  , "ArcSecDegrees", "ArcCscDegrees"
   ]
 
 directSessionDispatchHead :: Text -> Bool
@@ -1306,6 +1452,8 @@ directSessionDispatchHead name =
              , "Confirm"
              , "ConfirmBy"
              , "ConfirmMatch"
+             , "ConfirmAssert"
+             , "Assert"
              , "Abort"
              , "CheckAbort"
              , "AbortProtect"
@@ -1323,6 +1471,10 @@ directSessionDispatchHead name =
              , "Label"
              , "Goto"
              , "Message"
+             , "MessageList"
+             , "In"
+             , "InString"
+             , "Out"
              , "Off"
              , "On"
              , "Quiet"
@@ -1458,7 +1610,7 @@ evaluateHeldSessionPatternBuiltin headName depth session arguments' =
             patternExpression
             evaluatedExtras
     ("MemberQ", subjectExpression : patternExpression : extras)
-      | length extras <= 1 -> do
+      | length extras <= 2 -> do
           (subject, subjectSession) <-
             evaluateSessionAt (depth + 1) session subjectExpression
           (evaluatedExtras, updated) <-
@@ -1657,17 +1809,18 @@ evaluateSessionMemberQ
   -> [Expr]
   -> SessionResult Expr
 evaluateSessionMemberQ depth session subject patternExpression extras = do
-  bounds <- case extras of
+  let (includeHeads, positionalExtras) = stripSessionHeadsOption False extras
+  bounds <- case positionalExtras of
     [] -> sessionLevelBounds session (Call (Symbol "List") [Integer 1])
     [specification] -> sessionLevelBounds session specification
-    _ -> patternFailure session "MemberQ expects two or three arguments."
+    _ -> patternFailure session "MemberQ expects an expression, a pattern, and an optional level specification."
   (found, updated) <-
     firstSessionMatch
       depth
       session
       bounds
       patternExpression
-      (collectPatternRecords False 0 subject)
+      (collectPatternRecords includeHeads 0 subject)
   Right (sessionBoolean found, updated)
 
 countSessionMatches
@@ -2068,7 +2221,7 @@ replaceSessionStringMatches depth = go 0 0 []
         Nothing -> tryMatches appliedSession matches
 
 sessionStringExpressionFromPieces :: [Expr] -> Expr
-sessionStringExpressionFromPieces pieces = case merge pieces of
+sessionStringExpressionFromPieces pieces = case removeNeutralEmpty (merge pieces) of
   [] -> String ""
   [single] -> single
   merged
@@ -2076,6 +2229,9 @@ sessionStringExpressionFromPieces pieces = case merge pieces of
         String (T.concat [value | String value <- merged])
     | otherwise -> Call (Symbol "StringExpression") merged
  where
+  removeNeutralEmpty merged
+    | any (not . isStringValue) merged = filter (/= String "") merged
+    | otherwise = merged
   merge = foldl append [] . concatMap flatten
   flatten (Call (Symbol stringExpressionHead) values)
     | isSessionSystemHead "StringExpression" stringExpressionHead =
@@ -2864,6 +3020,70 @@ reduceSessionEvaluatedCall depth session = \case
     Just $ do
       parsed <- liftPureEvaluation session (reduceEvaluatedCall expression)
       evaluateSessionAt (depth + 1) session parsed
+  Call (Symbol "Collect") values@[_, _, _] ->
+    Just (evaluateSessionCollect depth session values)
+  Call (Symbol "Exponent") values@[_, _, _] ->
+    Just (evaluateSessionExponent depth session values)
+  Call (Symbol "Normal") [expression]
+    | Just expanded <-
+        AlgebraicRoots.expandRootSumForNormal
+          (sessionAlgebraicRootContext session)
+          expression ->
+        Just (evaluateSessionAt (depth + 1) session expanded)
+  expression@(Call (Symbol normalizationHead) _)
+    | normalizationHead
+        `elem` ( [ "Collect"
+                 , "Decompose"
+                 , "Discriminant"
+                 , "GroebnerBasis"
+                 , "MonomialList"
+                 , "N"
+                 , "Normal"
+                 , "PolynomialMod"
+                 , "PolynomialReduce"
+                 , "Resultant"
+                 , "SetAccuracy"
+                 , "SetPrecision"
+                 , "Subresultants"
+                 ]
+                   <> numericTranscendentalDispatchHeads
+               ) ->
+    Just $ do
+      reduced <- liftPureEvaluation session (reduceEvaluatedCall expression)
+      if reduced == expression
+        then Right (reduced, session)
+        else evaluateSessionAt (depth + 1) session reduced
+  expression@(Call (Symbol algebraicHead) values)
+    | algebraicHead `elem` algebraicRootDispatchHeads ->
+        let context = sessionAlgebraicRootContext session
+            normalizedValues
+              | algebraicHead == "Root" =
+                  map (AlgebraicRoots.canonicalizeNestedAlgebraicRoots context) values
+              | otherwise = values
+         in Just $ case
+          AlgebraicRoots.reduceAlgebraicRootBuiltin
+            context
+            algebraicHead
+            normalizedValues of
+          Nothing -> Right (expression, session)
+          Just reduced
+            | reduced == expression -> Right (reduced, session)
+            | otherwise -> evaluateSessionAt (depth + 1) session reduced
+  Call (Symbol "RandomSample") values ->
+    Just $ case values of
+      [expression] ->
+        evaluateSessionRandomPlan session (Random.randomSamplePlan expression Nothing)
+      [expression, count] ->
+        evaluateSessionRandomPlan session (Random.randomSamplePlan expression (Just count))
+      _ ->
+        sessionFailure
+          session
+          "RandomSample expects an expression and an optional count."
+  Call (Symbol "RandomPermutation") values ->
+    Just $ case values of
+      [lengthExpression] ->
+        evaluateSessionRandomPlan session (Random.randomPermutationPlan lengthExpression)
+      _ -> sessionFailure session "RandomPermutation expects an integer length."
   Call (Symbol "Symbol") values ->
     Just (evaluateSessionSymbol session values)
   Call (Symbol "SymbolName") values ->
@@ -2892,8 +3112,117 @@ reduceSessionEvaluatedCall depth session = \case
         sessionFailure
           session
           "ReverseSortBy[f] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "OrderingBy") [functions]) values ->
+    Just $ case values of
+      [subject] -> evaluateSessionOrderingBy depth session [subject, functions]
+      _ ->
+        sessionFailure
+          session
+          "OrderingBy[f] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "MinimalBy") [functions]) values ->
+    Just $ case values of
+      [subject] ->
+        evaluateSessionExtremeBy False depth session [subject, functions]
+      _ ->
+        sessionFailure
+          session
+          "MinimalBy[f] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "MaximalBy") [functions]) values ->
+    Just $ case values of
+      [subject] ->
+        evaluateSessionExtremeBy True depth session [subject, functions]
+      _ ->
+        sessionFailure
+          session
+          "MaximalBy[f] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "Comap") [functions]) values ->
+    Just $ case values of
+      [subject] -> evaluateSessionComap False depth session [functions, subject]
+      _ ->
+        sessionFailure
+          session
+          "Comap[functions] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "ComapApply") [functions]) values ->
+    Just $ case values of
+      [subject] -> evaluateSessionComap True depth session [functions, subject]
+      _ ->
+        sessionFailure
+          session
+          "ComapApply[functions] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "MapAll") [function]) values ->
+    Just $ case values of
+      [subject] -> evaluateSessionMapAll depth session [function, subject]
+      _ ->
+        sessionFailure
+          session
+          "MapAll[f] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "MapApply") [function]) values ->
+    Just $ case values of
+      [subject] -> evaluateSessionMapApply depth session [function, subject]
+      _ ->
+        sessionFailure
+          session
+          "MapApply[f] expects exactly one argument when used as an operator."
+  Call (Call (Symbol "MapIndexed") [function]) values ->
+    Just $ case values of
+      [subject] -> evaluateSessionMapIndexed depth session [function, subject]
+      _ ->
+        sessionFailure
+          session
+          "MapIndexed[f] expects exactly one argument when used as an operator."
   Call (Symbol "AssociationMap") values ->
     Just (evaluateSessionAssociationMap depth session values)
+  Call (Symbol setHead) values
+    | setHead `elem` ["Union", "Intersection", "Complement"]
+    , any isSessionOptionRule values ->
+        Just (evaluateSessionSetOperation setHead depth session values)
+  Call (Symbol equalityHead) values
+    | isSessionSystemHead "Equal" equalityHead
+    , any isSessionOptionRule values ->
+        Just (evaluateSessionEqualWithSameTest depth session values)
+  Call (Symbol sortHead) values
+    | any (`isSessionSystemHead` sortHead) ["Sort", "ReverseSort"]
+    , length values == 2 ->
+        Just
+          ( evaluateSessionSort
+              (isSessionSystemHead "ReverseSort" sortHead)
+              depth
+              session
+              values
+          )
+  Call (Symbol orderingHead) values
+    | isSessionSystemHead "Ordering" orderingHead
+    , length values `elem` [3, 4] ->
+        Just (evaluateSessionOrdering depth session values)
+  Call (Symbol orderedHead) values
+    | isSessionSystemHead "OrderedQ" orderedHead
+    , length values == 2 ->
+        Just (evaluateSessionOrderedQ depth session values)
+  Call (Symbol arrayHead) values
+    | arrayHead == "Array" ->
+        Just (evaluateSessionArray depth session values)
+  Call (Symbol arrayHead) values
+    | any (`isSessionSystemHead` arrayHead) ["ArrayQ", "VectorQ", "MatrixQ"]
+    , arrayPredicateHasTest arrayHead values ->
+        Just (evaluateSessionArrayPredicate depth session arrayHead values)
+  Call (Symbol truthHead) values
+    | any (`isSessionSystemHead` truthHead) ["AllTrue", "AnyTrue", "NoneTrue"] ->
+        Just (evaluateSessionTruthCollection depth session truthHead values)
+  Call (Symbol tallyHead) values
+    | any (`isSessionSystemHead` tallyHead) ["Tally", "Counts"]
+    , length values == 2 ->
+        Just (evaluateSessionTallyCounts depth session tallyHead values)
+  Call (Symbol countsByHead) values
+    | isSessionSystemHead "CountsBy" countsByHead ->
+        Just (evaluateSessionCountsBy depth session values)
+  Call (Symbol accumulateHead) values
+    | isSessionSystemHead "Accumulate" accumulateHead
+    , length values == 2 ->
+        Just (evaluateSessionAccumulate depth session values)
+  Call (Symbol containsOnlyHead) values
+    | isSessionSystemHead "ContainsOnly" containsOnlyHead
+    , Just test <- sessionContainsOnlyCallback values ->
+        Just (evaluateSessionContainsOnly depth session test values)
   Call (Symbol "Apply") values ->
     Just (evaluateSessionApply depth session values)
   Call (Symbol "KeyMap") values ->
@@ -2902,8 +3231,66 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionKeyValueMap depth session values)
   Call (Symbol "Map") values ->
     Just (evaluateSessionMap depth session values)
+  Call (Symbol "Scan") values ->
+    Just (evaluateSessionScan depth session values)
+  Call (Symbol "Operate") values ->
+    Just (evaluateSessionOperate depth session values)
+  Call (Symbol "Inner") values ->
+    Just (evaluateSessionInner depth session values)
+  Call (Symbol "Outer") values ->
+    Just (evaluateSessionOuter depth session values)
+  Call (Symbol "Through") values ->
+    Just (evaluateSessionThrough depth session values)
+  Call (Symbol "Tr") values ->
+    Just (evaluateSessionTr depth session values)
+  Call (Symbol "MapAll") values ->
+    Just (evaluateSessionMapAll depth session values)
+  Call (Symbol "MapApply") values ->
+    Just (evaluateSessionMapApply depth session values)
+  Call (Symbol "MapIndexed") values ->
+    Just (evaluateSessionMapIndexed depth session values)
+  Call (Symbol "MapThread") values ->
+    Just (evaluateSessionMapThread depth session values)
+  Call (Symbol "BlockMap") values ->
+    Just (evaluateSessionBlockMap depth session values)
+  Call (Symbol "SubsetMap") values ->
+    Just (evaluateSessionSubsetMap depth session values)
+  Call (Symbol "FlattenAt") values ->
+    Just (evaluateSessionFlattenAt session values)
   Call (Symbol "MapAt") values ->
     Just (evaluateSessionMapAt depth session values)
+  Call (Symbol "Construct") values ->
+    Just (evaluateSessionConstruct depth session values)
+  Call (Symbol "ComposeList") values ->
+    Just (evaluateSessionComposeList depth session values)
+  Call (Symbol "Comap") values ->
+    Just (evaluateSessionComap False depth session values)
+  Call (Symbol "ComapApply") values ->
+    Just (evaluateSessionComap True depth session values)
+  Call (Symbol "Nest") values ->
+    Just (evaluateSessionNest False depth session values)
+  Call (Symbol "NestList") values ->
+    Just (evaluateSessionNest True depth session values)
+  Call (Symbol "NestWhile") values ->
+    Just (evaluateSessionNestWhile False depth session values)
+  Call (Symbol "NestWhileList") values ->
+    Just (evaluateSessionNestWhile True depth session values)
+  Call (Symbol "FixedPoint") values ->
+    Just (evaluateSessionFixedPoint False depth session values)
+  Call (Symbol "FixedPointList") values ->
+    Just (evaluateSessionFixedPoint True depth session values)
+  Call (Symbol "Fold") values ->
+    Just (evaluateSessionFold False depth session values)
+  Call (Symbol "FoldList") values ->
+    Just (evaluateSessionFold True depth session values)
+  Call (Symbol "FoldWhile") values ->
+    Just (evaluateSessionFoldWhile False depth session values)
+  Call (Symbol "FoldWhileList") values ->
+    Just (evaluateSessionFoldWhile True depth session values)
+  Call (Symbol "FoldPair") values ->
+    Just (evaluateSessionFoldPair False depth session values)
+  Call (Symbol "FoldPairList") values ->
+    Just (evaluateSessionFoldPair True depth session values)
   Call (Symbol "Total") values ->
     Just (evaluateSessionTotal depth session values)
   Call (Symbol "SequenceFold") values ->
@@ -2920,6 +3307,12 @@ reduceSessionEvaluatedCall depth session = \case
     Just (evaluateSessionSortBy False depth session values)
   Call (Symbol "ReverseSortBy") values ->
     Just (evaluateSessionSortBy True depth session values)
+  Call (Symbol "OrderingBy") values ->
+    Just (evaluateSessionOrderingBy depth session values)
+  Call (Symbol "MinimalBy") values ->
+    Just (evaluateSessionExtremeBy False depth session values)
+  Call (Symbol "MaximalBy") values ->
+    Just (evaluateSessionExtremeBy True depth session values)
   Call (Symbol "TakeWhile") values ->
     Just (evaluateSessionTakeWhile depth session values)
   Call (Symbol "LengthWhile") values ->
@@ -2927,6 +3320,104 @@ reduceSessionEvaluatedCall depth session = \case
   Call (Symbol "KeySelect") values ->
     Just (evaluateSessionKeySelect depth session values)
   _ -> Nothing
+
+evaluateSessionRandomPlan
+  :: EvaluationSession
+  -> Random.RandomPlan Expr
+  -> SessionResult Expr
+evaluateSessionRandomPlan session = \case
+  Random.RandomDone value -> Right (value, session)
+  Random.RandomFailed failure ->
+    sessionFailure session (Random.randomPlanErrorMessage failure)
+  Random.RandomBelow exclusiveUpperBound resume ->
+    RuntimeEffect
+      (RandomBelow exclusiveUpperBound)
+      (evaluateSessionRandomPlan session . resume)
+
+algebraicRootDispatchHeads :: [Text]
+algebraicRootDispatchHeads =
+  [ "CountRoots"
+  , "IsolatingInterval"
+  , "MinimalPolynomial"
+  , "Root"
+  , "RootIntervals"
+  , "RootReduce"
+  , "RootSum"
+  , "Solve"
+  , "ToRadicals"
+  ]
+
+sessionAlgebraicRootContext
+  :: EvaluationSession
+  -> AlgebraicRoots.AlgebraicRootContext
+sessionAlgebraicRootContext session =
+  AlgebraicRoots.defaultAlgebraicRootContext
+    { AlgebraicRoots.simplifyAlgebraicExpression = simplifyGenerated
+    , AlgebraicRoots.maximumAlgebraicRootDegree = maximumDegree
+    }
+ where
+  maximumDegree = case currentSpecialSessionSettingValue "$MaxRootDegree" session of
+    Integer value -> value
+    _ -> 1000
+
+  simplifyGenerated expression =
+    case evaluate expression of
+      P.Left _ -> expression
+      P.Right result -> result
+
+evaluateSessionCollect
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionCollect depth session values = case values of
+  [expression, variableSpec, function] ->
+    case
+      PolynomialAlgebra.collectCoefficientPlan
+        canonicalCompare
+        expression
+        variableSpec of
+      Nothing -> Right (Call (Symbol "Collect") values, session)
+      Just (PolynomialAlgebra.CollectDirect coefficient) ->
+        evaluateSessionCallable depth session function [coefficient]
+      Just (PolynomialAlgebra.CollectTerms terms) ->
+        applyTerms function [] session terms
+   where
+    applyTerms _ retained currentSession [] =
+      evaluateSessionAt
+        (depth + 1)
+        currentSession
+        (Call (Symbol "Plus") (reverse retained))
+    applyTerms callback retained currentSession ((monomial, coefficient) : rest) = do
+      (transformed, transformedSession) <-
+        evaluateSessionCallable depth currentSession callback [coefficient]
+      (term, termSession) <-
+        if monomial == Integer 1
+          then Right (transformed, transformedSession)
+          else
+            evaluateSessionAt
+              (depth + 1)
+              transformedSession
+              (Call (Symbol "Times") [monomial, transformed])
+      applyTerms callback (term : retained) termSession rest
+  _ -> Right (Call (Symbol "Collect") values, session)
+
+evaluateSessionExponent
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionExponent depth session values = case values of
+  [expression, form, function] ->
+    case
+      PolynomialAlgebra.exponentValuesForForm
+        canonicalCompare
+        expression
+        form of
+      Nothing -> Right (Call (Symbol "Exponent") values, session)
+      Just exponentValues ->
+        evaluateSessionCallable depth session function exponentValues
+  _ -> Right (Call (Symbol "Exponent") values, session)
 
 reduceSessionEvaluatedCallForDispatch
   :: Bool
@@ -2967,7 +3458,9 @@ reducerDispatchView allowQualified session expression = case expression of
             let barrierName = reducerBarrierName shortName session expression
                 protectBareSameHead =
                   originalHead /= shortName
-                    || not (symbolHasAttribute originalHead Flat session)
+                    || ( shortName `notElem` ["Power", "Root"]
+                           && not (symbolHasAttribute originalHead Flat session)
+                       )
                 dispatchedValues =
                   if protectBareSameHead
                     then map (shieldReducerArgument shortName barrierName) values
@@ -3072,16 +3565,7 @@ evaluateSessionMessage depth session = \case
     | isSessionMessageName messageName -> do
         (insertions, updated) <-
           evaluateArguments depth session insertionExpressions
-        Right
-          ( Symbol "Null"
-          , appendSessionMessage
-              messageName
-              ( if null insertions
-                  then "Message generated."
-                  else T.intercalate ", " (map renderMessageInsertion insertions)
-              )
-              updated
-          )
+        appendSessionMessageInsertions depth updated messageName insertions
     | otherwise ->
         sessionFailure
           session
@@ -3311,6 +3795,127 @@ currentSessionMessageList session =
     | message <- sessionGeneratedMessages session
     ]
 
+evaluateSessionHistoricalMessageList
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionHistoricalMessageList depth session arguments' =
+  case sessionHistoryLine session of
+    Nothing -> Right (evaluatedList [], session)
+    Just currentLine -> case arguments' of
+      [lineSpecification] -> do
+        (evaluatedIndex, updated) <-
+          evaluateSessionAt (depth + 1) session lineSpecification
+        case evaluatedIndex of
+          Integer requested ->
+            let resolved =
+                  if requested < 0
+                    then currentLine + requested
+                    else requested
+                messages =
+                  Map.findWithDefault [] resolved (sessionMessageHistory updated)
+             in Right
+                  ( Call
+                      (Symbol "List")
+                      [ Call
+                          (Symbol "HoldForm")
+                          [evaluationMessageFullName message]
+                      | message <- messages
+                      ]
+                  , updated
+                  )
+          _ ->
+            sessionFailure
+              updated
+              "History functions expect an integer line specification."
+      _ ->
+        sessionFailure
+          session
+          "MessageList expects exactly one line specification."
+
+evaluateSessionHistoryCall
+  :: Text
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionHistoryCall headName depth session arguments' =
+  case sessionHistoryLine session of
+    Nothing -> Right (Call (Symbol headName) arguments', session)
+    Just currentLine -> case arguments' of
+      [] -> resolveAt (currentLine - 1) session
+      [lineSpecification] -> do
+        (evaluatedIndex, updated) <-
+          evaluateSessionAt (depth + 1) session lineSpecification
+        case evaluatedIndex of
+          Integer requested ->
+            resolveAt
+              (if requested < 0 then currentLine + requested else requested)
+              updated
+          _ ->
+            sessionFailure
+              updated
+              "History functions expect an integer line specification."
+      _ ->
+        sessionFailure
+          session
+          (headName <> " expects zero or one line specification.")
+ where
+  unresolved index = Call (Symbol headName) [Integer index]
+
+  resolveAt index current = case headName of
+    "Out" ->
+      Right
+        ( Map.findWithDefault
+            (unresolved index)
+            index
+            (sessionOutputHistory current)
+        , current
+        )
+    "InString" ->
+      Right
+        ( maybe
+            (unresolved index)
+            String
+            (Map.lookup index (sessionInputStringHistory current))
+        , current
+        )
+    _ -> case Map.lookup index (sessionInputHistory current) of
+      Nothing -> Right (unresolved index, current)
+      Just stored
+        | Set.member index (sessionExpandingInputHistory current) ->
+            Right (unresolved index, current)
+        | otherwise ->
+            restoreSessionInputExpansion
+              (sessionExpandingInputHistory current)
+              ( evaluateSessionAt
+                  (depth + 1)
+                  current
+                    { sessionExpandingInputHistory =
+                        Set.insert index (sessionExpandingInputHistory current)
+                    }
+                  stored
+              )
+
+restoreSessionInputExpansion
+  :: Set.Set Integer
+  -> SessionResult Expr
+  -> SessionResult Expr
+restoreSessionInputExpansion expanding result =
+  inspectRuntimeResult result $ \case
+    P.Right (value, session) ->
+      Right
+        ( value
+        , session {sessionExpandingInputHistory = expanding}
+        )
+    P.Left evaluationExit ->
+      Left
+        ( mapEvaluationExitSession
+            (\session -> session {sessionExpandingInputHistory = expanding})
+            evaluationExit
+        )
+
 isSessionMessageName :: Expr -> Bool
 isSessionMessageName = \case
   Call (Symbol messageHead) _ -> isSessionSystemHead "MessageName" messageHead
@@ -3318,12 +3923,71 @@ isSessionMessageName = \case
 
 renderMessageInsertion :: Expr -> Text
 renderMessageInsertion = \case
-  Call (Symbol formHead) (payload : _)
-    | isSessionSystemHead "FullForm" formHead -> fullForm payload
-    | any (`isSessionSystemHead` formHead) ["InputForm", "StandardForm"] ->
-        inputForm payload
-  String value -> value
-  expression -> inputForm expression
+  Call (Symbol formHead) [payload@(Call (Symbol listHead) values)]
+    | isSessionSystemHead "FullForm" formHead
+    , isSessionSystemHead "List" listHead
+    , all isMessageNumericAtom values -> inputForm payload
+  expression -> TextualForms.displayOutputText expression
+ where
+  isMessageNumericAtom = \case
+    Integer _ -> True
+    _ -> False
+
+appendSessionMessageInsertions
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+appendSessionMessageInsertions depth session messageName insertions
+  | sessionMessageIsDisabled messageName session =
+      Right
+        ( Symbol "Null"
+        , appendSessionMessage messageName "Message generated." session
+        )
+  | otherwise = do
+      (messageText, formattedSession) <-
+        formatSessionMessageInsertions depth session insertions
+      Right
+        ( Symbol "Null"
+        , appendEnabledSessionMessage messageName messageText formattedSession
+        )
+
+formatSessionMessageInsertions
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Text
+formatSessionMessageInsertions depth = go []
+ where
+  go rendered session [] =
+    Right
+      ( if null rendered
+          then "Message generated."
+          else T.intercalate ", " (reverse rendered)
+      , session
+      )
+  go rendered session (insertion : rest) = do
+    (transformed, updated) <-
+      applySessionMessagePrePrint depth session insertion
+    go (renderMessageInsertion transformed : rendered) updated rest
+
+applySessionMessagePrePrint
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult Expr
+applySessionMessagePrePrint depth session insertion =
+  case symbolOwnValueFor "$MessagePrePrint" session of
+    Nothing -> Right (insertion, session)
+    Just _ -> do
+      (function, updated) <-
+        evaluateSessionAt (depth + 1) session (Symbol "$MessagePrePrint")
+      case function of
+        Symbol name
+          | isSessionSystemHead "Automatic" name ->
+              Right (insertion, updated)
+        _ -> evaluateSessionCallable depth updated function [insertion]
 
 evaluateSessionPrint
   :: Int
@@ -3341,8 +4005,7 @@ evaluateSessionPrint depth session values = do
     )
 
 renderPrintValue :: Expr -> Text
-renderPrintValue (String value) = value
-renderPrintValue expression = inputForm expression
+renderPrintValue = TextualForms.displayOutputText
 
 evaluateSessionSelectionOperator
   :: Text
@@ -3386,6 +4049,31 @@ evaluateSessionCallable depth session function arguments' = case function of
   Call (Symbol compositionHead) functions
     | isSessionSystemHead "RightComposition" compositionHead ->
         evaluateSessionComposition True depth session functions arguments'
+  Call (Symbol scanHead) scanArguments
+    | isSessionSystemHead "Scan" scanHead ->
+        case scanArguments of
+          [callbackFunction] -> case arguments' of
+            [subject] ->
+              evaluateSessionScan depth session [callbackFunction, subject]
+            _ ->
+              sessionFailure
+                session
+                "Scan[f] expects exactly one argument when used as an operator."
+          [callbackFunction, levelSpecification] -> case arguments' of
+            [subject] ->
+              evaluateSessionScan
+                depth
+                session
+                [callbackFunction, subject, levelSpecification]
+            _ ->
+              sessionFailure
+                session
+                "Scan[f, levelspec] expects exactly one argument when used as an operator."
+          _ ->
+            evaluateSessionAt
+              (depth + 1)
+              session
+              (Call function arguments')
   Call (Symbol associationHead) associationValues
     | isSessionSystemHead "Association" associationHead
     , [key] <- arguments'
@@ -3435,6 +4123,9 @@ isSessionStructuralCallable = \case
   Call (Symbol callableHead) arguments' ->
     isSessionSystemHead "Composition" callableHead
       || isSessionSystemHead "RightComposition" callableHead
+      || ( isSessionSystemHead "Scan" callableHead
+             && length arguments' `elem` [1, 2]
+         )
       || ( isSessionSystemHead "Failsafe" callableHead
              && length arguments' `elem` [1, 2, 3]
          )
@@ -3519,24 +4210,385 @@ evaluateSessionAssociationMap depth session = \case
       updated
       rest
 
+sessionListOrAssociationCollection :: Expr -> Maybe SessionOrderedCollection
+sessionListOrAssociationCollection expression@(Call (Symbol expressionHead) _)
+  | isSessionSystemHead "List" expressionHead = sessionOrderedCollection expression
+  | isSessionSystemHead "Association" expressionHead = do
+      collection <- sessionOrderedCollection expression
+      if sessionCollectionAssociation collection then Just collection else Nothing
+sessionListOrAssociationCollection _ = Nothing
+
+evaluateSessionArray
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionArray depth session values = case values of
+  [function, dimensionsExpression] ->
+    build function dimensionsExpression Nothing
+  [function, dimensionsExpression, originsExpression] ->
+    build function dimensionsExpression (Just originsExpression)
+  _ -> sessionFailure session "Array expects two or three arguments."
+ where
+  build function dimensionsExpression originsExpression = do
+    arbitraryDimensions <-
+      liftSessionText session (sessionArrayDimensions dimensionsExpression)
+    origins <-
+      liftSessionText
+        session
+        (sessionArrayOrigins (length arbitraryDimensions) originsExpression)
+    case arbitraryDimensions of
+      0 : _ -> Right (evaluatedList [], session)
+      _ -> do
+        dimensions <-
+          liftSessionText session (traverse boundedDimension arbitraryDimensions)
+        if sessionDenseArrayNodes dimensions > 1000000
+          then sessionFailure session "Array output exceeds the native materialization limit."
+          else buildLevel function dimensions origins [] session
+
+  buildLevel function [] origins reversedIndices current =
+    evaluateSessionCallable
+      depth
+      current
+      function
+      [ Integer (origin + fromIntegral index)
+      | (origin, index) <- zip origins (reverse reversedIndices)
+      ]
+  buildLevel function (dimension : remaining) origins reversedIndices current =
+    buildChildren 0 [] current
+   where
+    buildChildren index retained childSession
+      | index >= dimension = Right (evaluatedList retained, childSession)
+      | otherwise = do
+          (child, updated) <-
+            buildLevel
+              function
+              remaining
+              origins
+              (index : reversedIndices)
+              childSession
+          buildChildren (index + 1) (retained <> [child]) updated
+
+sessionArrayDimensions :: Expr -> Either Text [Integer]
+sessionArrayDimensions (Integer dimension) =
+  pure <$> nonnegative dimension
+sessionArrayDimensions (Call (Symbol listHead) dimensions)
+  | isSessionSystemHead "List" listHead = traverse requireDimension dimensions
+ where
+  requireDimension (Integer dimension) = nonnegative dimension
+  requireDimension _ = P.Left "Array expects an integer argument."
+sessionArrayDimensions _ =
+  P.Left "Array expects an integer dimension or a list of dimensions."
+
+nonnegative :: Integer -> Either Text Integer
+nonnegative dimension
+  | dimension < 0 = P.Left "Array expects non-negative dimensions."
+  | otherwise = P.Right dimension
+
+boundedDimension :: Integer -> Either Text Int
+boundedDimension dimension
+  | dimension > toInteger (maxBound :: Int) =
+      P.Left "Array dimension is too large for this runtime."
+  | otherwise = P.Right (fromInteger dimension)
+
+sessionArrayOrigins :: Int -> Maybe Expr -> Either Text [Integer]
+sessionArrayOrigins rank Nothing = P.Right (replicate rank 1)
+sessionArrayOrigins rank (Just (Integer origin)) = P.Right (replicate rank origin)
+sessionArrayOrigins 1 (Just (Call (Symbol listHead) [Integer lower, Integer _upper]))
+  | isSessionSystemHead "List" listHead = P.Right [lower]
+sessionArrayOrigins rank (Just (Call (Symbol listHead) origins))
+  | isSessionSystemHead "List" listHead
+  , length origins /= rank =
+      P.Left "Array origin list must have one entry per array dimension."
+  | isSessionSystemHead "List" listHead = traverse requireOrigin origins
+ where
+  requireOrigin (Integer origin) = P.Right origin
+  requireOrigin _ = P.Left "Array origin entries must be explicit integers."
+sessionArrayOrigins _ (Just _) =
+  P.Left "Array currently expects an integer origin or a list of integer origins."
+
+sessionDenseArrayNodes :: [Int] -> Integer
+sessionDenseArrayNodes = go 1 0
+ where
+  go _ total [] = total
+  go prefix total (dimension : remaining) =
+    let nextPrefix = prefix * fromIntegral dimension
+        nextTotal = total + nextPrefix
+     in if nextTotal > 1000000
+          then nextTotal
+          else go nextPrefix nextTotal remaining
+
+liftSessionText
+  :: EvaluationSession
+  -> Either Text value
+  -> RuntimeResult EvaluationExit value
+liftSessionText current = \case
+  P.Left message -> patternFailure current message
+  P.Right value -> Right value
+
+arrayPredicateHasTest :: Text -> [Expr] -> Bool
+arrayPredicateHasTest operation values
+  | isSessionSystemHead "ArrayQ" operation = length values == 3
+  | otherwise = length values == 2
+
+evaluateSessionArrayPredicate
+  :: Int
+  -> EvaluationSession
+  -> Text
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionArrayPredicate depth session operation values = do
+  let (subject, test, shapeArguments) = case values of
+        [expression, depthExpression, predicate] ->
+          (expression, predicate, [expression, depthExpression])
+        [expression, predicate] -> (expression, predicate, [expression])
+        _ -> (Symbol "Null", Symbol "False", [])
+  shapeResult <-
+    liftPureEvaluation
+      session
+      (reduceEvaluatedCall (Call (Symbol operation) shapeArguments))
+  if shapeResult /= Symbol "True"
+    then Right (shapeResult, session)
+    else testElements test session (arrayPredicateValues subject)
+ where
+  testElements _ current [] = Right (Symbol "True", current)
+  testElements predicate current (value : remaining) = do
+    (outcome, updated) <-
+      evaluateSessionCallable depth current predicate [value]
+    if outcome == Symbol "True"
+      then testElements predicate updated remaining
+      else Right (Symbol "False", updated)
+
+arrayPredicateValues :: Expr -> [Expr]
+arrayPredicateValues (SparseArray dimensions entries fill) =
+  ( if product dimensions > fromIntegral (length entries)
+      then [fill]
+      else []
+  )
+    <> [value | SparseEntry _ value <- entries]
+arrayPredicateValues (Call (Symbol listHead) values)
+  | isSessionSystemHead "List" listHead = concatMap arrayPredicateValues values
+arrayPredicateValues expression = [expression]
+
+evaluateSessionTruthCollection
+  :: Int
+  -> EvaluationSession
+  -> Text
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionTruthCollection depth session operation = \case
+  [subject, test] -> case sessionListOrAssociationCollection subject of
+    Nothing ->
+      sessionFailure session (operation <> " expects a list or association.")
+    Just collection ->
+      testValues session (map sessionItemValue (sessionCollectionItems collection))
+   where
+    testValues current [] =
+      Right (Symbol (if isAny then "False" else "True"), current)
+    testValues current (value : remaining) = do
+      (outcome, updated) <-
+        evaluateSessionCallable depth current test [value]
+      let succeeded = outcome == Symbol "True"
+      if isAny
+        then
+          if succeeded
+            then Right (Symbol "True", updated)
+            else testValues updated remaining
+        else
+          if isNone
+            then
+              if succeeded
+                then Right (Symbol "False", updated)
+                else testValues updated remaining
+            else
+              if succeeded
+                then testValues updated remaining
+                else Right (Symbol "False", updated)
+    isAny = isSessionSystemHead "AnyTrue" operation
+    isNone = isSessionSystemHead "NoneTrue" operation
+  _ ->
+    sessionFailure
+      session
+      (operation <> " expects a list and a test function.")
+
+evaluateSessionTallyCounts
+  :: Int
+  -> EvaluationSession
+  -> Text
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionTallyCounts depth session operation = \case
+  [subject, test] -> case sessionListOrAssociationCollection subject of
+    Nothing ->
+      sessionFailure session (operation <> " expects a list or association.")
+    Just collection -> do
+      (groups, updated) <-
+        groupValues [] session (map sessionItemValue (sessionCollectionItems collection))
+      let row (key, count) = evaluatedList [key, Integer count]
+          rule (key, count) = Call (Symbol "Rule") [key, Integer count]
+      Right
+        ( if isSessionSystemHead "Tally" operation
+            then evaluatedList (map row groups)
+            else normalizedSessionAssociation (map rule groups)
+        , updated
+        )
+   where
+    groupValues retained current [] = Right (retained, current)
+    groupValues retained current (value : remaining) = do
+      (matching, updated) <- findGroup 0 current value retained
+      let next = case matching of
+            Nothing -> retained <> [(value, 1)]
+            Just index ->
+              let (key, count) = retained !! index
+               in replaceSessionListIndex index (key, count + 1) retained
+      groupValues next updated remaining
+    findGroup _ current _ [] = Right (Nothing, current)
+    findGroup index current value ((key, _) : remaining) = do
+      (outcome, updated) <-
+        evaluateSessionCallable depth current test [key, value]
+      if outcome == Symbol "True"
+        then Right (Just index, updated)
+        else findGroup (index + 1) updated value remaining
+  _ ->
+    sessionFailure
+      session
+      ( operation
+          <> if isSessionSystemHead "Tally" operation
+            then " expects a list and an optional binary test."
+            else " expects a list or association and an optional binary test."
+      )
+
+evaluateSessionCountsBy
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionCountsBy depth session = \case
+  [subject, function] -> case sessionListOrAssociationCollection subject of
+    Nothing -> sessionFailure session "CountsBy expects a list or association."
+    Just collection -> do
+      (groups, updated) <-
+        countKeys [] session (map sessionItemValue (sessionCollectionItems collection))
+      Right
+        ( normalizedSessionAssociation
+            [Call (Symbol "Rule") [key, Integer count] | (key, count) <- groups]
+        , updated
+        )
+   where
+    countKeys retained current [] = Right (retained, current)
+    countKeys retained current (value : remaining) = do
+      (key, updated) <- evaluateSessionCallable depth current function [value]
+      let next = case findIndex ((== key) . fst) retained of
+            Nothing -> retained <> [(key, 1)]
+            Just index ->
+              let (firstKey, count) = retained !! index
+               in replaceSessionListIndex index (firstKey, count + 1) retained
+      countKeys next updated remaining
+  _ -> sessionFailure session "CountsBy expects a list and a key function."
+
+evaluateSessionAccumulate
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionAccumulate depth session = \case
+  [subject, combiner] -> case sessionListOrAssociationCollection subject of
+    Nothing -> sessionFailure session "Accumulate expects a list or association."
+    Just collection -> do
+      (accumulated, updated) <-
+        accumulate session (map sessionItemValue (sessionCollectionItems collection))
+      let items = zipWith replaceSessionItemValue (sessionCollectionItems collection) accumulated
+      Right (rebuildSessionCollection collection items, updated)
+   where
+    accumulate current [] = Right ([], current)
+    accumulate current (firstValue : remaining) =
+      go firstValue [firstValue] current remaining
+    go _ retained current [] = Right (retained, current)
+    go accumulator retained current (value : remaining) = do
+      (next, updated) <-
+        evaluateSessionCallable depth current combiner [accumulator, value]
+      go next (retained <> [next]) updated remaining
+  _ ->
+    sessionFailure
+      session
+      "Accumulate expects a list and an optional binary combiner."
+
+sessionContainsOnlyCallback :: [Expr] -> Maybe Expr
+sessionContainsOnlyCallback values = case drop 2 values of
+  [] -> Nothing
+  options -> foldl retain Nothing options
+ where
+  retain _current (Call (Symbol ruleHead) [Symbol optionName, function])
+    | isSessionSystemHead "Rule" ruleHead
+        || isSessionSystemHead "RuleDelayed" ruleHead
+    , isSessionSystemHead "SameTest" optionName =
+        if isAutomatic function then Nothing else Just function
+  retain current _ = current
+  isAutomatic (Symbol name) = isSessionSystemHead "Automatic" name
+  isAutomatic _ = False
+
+evaluateSessionContainsOnly
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionContainsOnly depth session test values = case take 2 values of
+  [left, right] ->
+    case (sessionListOrAssociationCollection left, sessionListOrAssociationCollection right) of
+      (Just leftCollection, Just rightCollection) ->
+        checkLeft
+          session
+          (map sessionItemValue (sessionCollectionItems leftCollection))
+          (map sessionItemValue (sessionCollectionItems rightCollection))
+      _ -> sessionFailure session "ContainsOnly expects a list or association."
+  _ ->
+    sessionFailure
+      session
+      "ContainsOnly expects two arguments and an optional SameTest rule."
+ where
+  checkLeft current [] _ = Right (Symbol "True", current)
+  checkLeft current (value : remaining) candidates = do
+    (found, updated) <- anyMatch current value candidates
+    if found
+      then checkLeft updated remaining candidates
+      else Right (Symbol "False", updated)
+  anyMatch current _ [] = Right (False, current)
+  anyMatch current value (candidate : remaining) = do
+    (outcome, updated) <-
+      evaluateSessionCallable depth current test [value, candidate]
+    if outcome == Symbol "True"
+      then Right (True, updated)
+      else anyMatch updated value remaining
+
 evaluateSessionMap
   :: Int
   -> EvaluationSession
   -> [Expr]
   -> SessionResult Expr
-evaluateSessionMap depth session = \case
-  [function, subject] -> case sessionOrderedCollection subject of
+evaluateSessionMap depth session values =
+ case stripSessionHeadsOption False values of
+  (includeHeads, [function, subject]) -> case sessionOrderedCollection subject of
     Nothing -> Right (subject, session)
     Just collection -> do
       (mapped, updated) <- mapItems function [] session (sessionCollectionItems collection)
-      Right (rebuildSessionCollection collection mapped, updated)
-  [function, subject, levelSpecification] -> do
+      let rebuilt = rebuildSessionCollection collection mapped
+      if includeHeads && not (sessionCollectionAssociation collection)
+        then case rebuilt of
+          Call expressionHead arguments' -> do
+            (mappedHead, headSession) <-
+              evaluateSessionCallable depth updated function [expressionHead]
+            Right (Call mappedHead arguments', headSession)
+          _ -> Right (rebuilt, updated)
+        else Right (rebuilt, updated)
+  (includeHeads, [function, subject, levelSpecification]) -> do
     (bounds, boundsSession) <-
       liftSessionLevelBounds
         session
         levelSpecification
     evaluateSessionMapLevels
       depth
+      includeHeads
       function
       bounds
       0
@@ -3556,6 +4608,1489 @@ evaluateSessionMap depth session = \case
       (retained <> [replaceSessionItemValue item value])
       updated
       rest
+
+evaluateSessionScan
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionScan depth session values =
+  case stripSessionHeadsOption False values of
+    (_includeHeads, [_function]) ->
+      Right (Call (Symbol "Scan") values, session)
+    (includeHeads, [function, subject]) ->
+      scanWithBounds
+        includeHeads
+        function
+        (SessionLevelBounds 1 1)
+        session
+        subject
+    (includeHeads, [function, subject, levelSpecification]) -> do
+      (bounds, boundsSession) <-
+        liftSessionLevelBounds session levelSpecification
+      scanWithBounds includeHeads function bounds boundsSession subject
+    _ ->
+      sessionFailure
+        session
+        "Scan expects a function, an expression, and an optional level specification."
+ where
+  scanWithBounds includeHeads function bounds currentSession subject = do
+    (_, updated) <-
+      scanTree includeHeads function bounds 0 currentSession subject
+    Right (Symbol "Null", updated)
+
+  scanTree includeHeads function bounds positive currentSession expression = do
+    (_, descendantsSession) <-
+      case sessionOrderedCollection expression of
+        Just collection
+          | sessionCollectionAssociation collection ->
+              scanItems
+                includeHeads
+                function
+                bounds
+                positive
+                currentSession
+                (sessionCollectionItems collection)
+        _ -> case expression of
+          Call expressionHead arguments' -> do
+            (_, headSession) <-
+              if includeHeads
+                then
+                  scanTree
+                    includeHeads
+                    function
+                    bounds
+                    (positive + 1)
+                    currentSession
+                    expressionHead
+                else Right (expressionHead, currentSession)
+            scanValues
+              includeHeads
+              function
+              bounds
+              positive
+              headSession
+              arguments'
+          _ -> Right (expression, currentSession)
+    if sessionLevelMatches bounds positive expression
+      then do
+        (_, callbackSession) <-
+          evaluateSessionCallable
+            depth
+            descendantsSession
+            function
+            [expression]
+        Right (expression, callbackSession)
+      else Right (expression, descendantsSession)
+
+  scanItems _ _ _ _ currentSession [] =
+    Right (Symbol "Null", currentSession)
+  scanItems includeHeads function bounds positive currentSession (item : rest) = do
+    (_, updated) <-
+      scanTree
+        includeHeads
+        function
+        bounds
+        (positive + 1)
+        currentSession
+        (sessionItemValue item)
+    scanItems includeHeads function bounds positive updated rest
+
+  scanValues _ _ _ _ currentSession [] =
+    Right (Symbol "Null", currentSession)
+  scanValues includeHeads function bounds positive currentSession (value : rest) = do
+    (_, updated) <-
+      scanTree
+        includeHeads
+        function
+        bounds
+        (positive + 1)
+        currentSession
+        value
+    scanValues includeHeads function bounds positive updated rest
+
+evaluateSessionMapIndexed
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionMapIndexed depth session = \case
+  [function] ->
+    Right (Call (Symbol "MapIndexed") [function], session)
+  [function, subject] ->
+    mapTree function (SessionLevelBounds 1 1) 0 [] session subject
+  [function, subject, levelSpecification] -> do
+    (bounds, boundsSession) <-
+      liftSessionLevelBounds session levelSpecification
+    mapTree function bounds 0 [] boundsSession subject
+  _ ->
+    sessionFailure
+      session
+      "MapIndexed expects a function, an expression, and an optional level specification."
+ where
+  mapTree function bounds positive path currentSession expression = do
+    (rebuilt, rebuiltSession) <-
+      case sessionOrderedCollection expression of
+        Just collection
+          | sessionCollectionAssociation collection -> do
+              (mappedItems, updated) <-
+                walkItems
+                  function
+                  bounds
+                  positive
+                  path
+                  []
+                  currentSession
+                  (sessionCollectionItems collection)
+              Right (rebuildSessionCollection collection mappedItems, updated)
+        _ -> case expression of
+          Call expressionHead values -> do
+            (mappedValues, updated) <-
+              walkValues
+                function
+                bounds
+                positive
+                path
+                1
+                []
+                currentSession
+                values
+            Right (normalizeEvaluatedCall expressionHead mappedValues, updated)
+          _ -> Right (expression, currentSession)
+    if positive >= 1 && sessionLevelMatches bounds positive rebuilt
+      then
+        evaluateSessionCallable
+          depth
+          rebuiltSession
+          function
+          [rebuilt, Call (Symbol "List") path]
+      else Right (rebuilt, rebuiltSession)
+
+  walkItems _ _ _ _ retained currentSession [] =
+    Right (retained, currentSession)
+  walkItems function bounds positive path retained currentSession (item : rest) = do
+    let component = case sessionItemKey item of
+          Just key -> Call (Symbol "Key") [key]
+          Nothing -> Integer (sessionItemIndex item)
+    (mapped, updated) <-
+      mapTree
+        function
+        bounds
+        (positive + 1)
+        (path <> [component])
+        currentSession
+        (sessionItemValue item)
+    walkItems
+      function
+      bounds
+      positive
+      path
+      (retained <> [replaceSessionItemValue item mapped])
+      updated
+      rest
+
+  walkValues _ _ _ _ _ retained currentSession [] =
+    Right (retained, currentSession)
+  walkValues function bounds positive path index retained currentSession (value : rest) = do
+    (mapped, updated) <-
+      mapTree
+        function
+        bounds
+        (positive + 1)
+        (path <> [Integer index])
+        currentSession
+        value
+    walkValues
+      function
+      bounds
+      positive
+      path
+      (index + 1)
+      (retained <> [mapped])
+      updated
+      rest
+
+evaluateSessionMapThread
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionMapThread depth session = \case
+  [function, sequences] ->
+    threadSequences function sequences 1 session
+  [function, sequences, Integer requestedDepth]
+    | requestedDepth < 0 ->
+        sessionFailure session "MapThread expects a non-negative depth."
+    | requestedDepth > fromIntegral (maxBound :: Int) ->
+        threadSequences function sequences maxBound session
+    | otherwise ->
+        threadSequences function sequences (fromIntegral requestedDepth) session
+  [_, _, _] ->
+    sessionFailure session "MapThread expects an integer argument."
+  _ ->
+    sessionFailure
+      session
+      "MapThread expects a function, a list of sequences, and an optional level."
+ where
+  threadSequences
+    :: Expr
+    -> Expr
+    -> Int
+    -> EvaluationSession
+    -> SessionResult Expr
+  threadSequences function sequences requestedDepth currentSession =
+    case sequences of
+      Call (Symbol listHead) sequenceValues
+        | isSessionSystemHead "List" listHead ->
+            if null sequenceValues
+              then Right (Call (Symbol "List") [], currentSession)
+              else threadAtDepth function requestedDepth currentSession sequenceValues
+      _ ->
+        sessionFailure
+          currentSession
+          "MapThread expects a list of sequences."
+
+  threadAtDepth
+    :: Expr
+    -> Int
+    -> EvaluationSession
+    -> [Expr]
+    -> SessionResult Expr
+  threadAtDepth function remaining currentSession sequenceValues
+    | remaining == 0 =
+        evaluateSessionCallable depth currentSession function sequenceValues
+    | otherwise =
+        case traverse parallelListValues sequenceValues of
+          Nothing ->
+            sessionFailure
+              currentSession
+              "MapThread expects parallel List structures down to the requested depth."
+          Just parallelValues -> case parallelValues of
+            [] -> Right (Call (Symbol "List") [], currentSession)
+            firstValues : remainingValues
+              | any ((/= length firstValues) . length) remainingValues ->
+                  sessionFailure
+                    currentSession
+                    "MapThread expects sequences of the same length."
+              | otherwise ->
+                  threadColumns
+                    function
+                    (remaining - 1)
+                    []
+                    currentSession
+                    parallelValues
+
+  parallelListValues :: Expr -> Maybe [Expr]
+  parallelListValues = \case
+    Call (Symbol listHead) values
+      | isSessionSystemHead "List" listHead -> Just values
+    _ -> Nothing
+
+  threadColumns
+    :: Expr
+    -> Int
+    -> [Expr]
+    -> EvaluationSession
+    -> [[Expr]]
+    -> SessionResult Expr
+  threadColumns function remaining retained currentSession parallelValues =
+    case splitParallelValues parallelValues of
+      Nothing ->
+        Right (normalizeEvaluatedCall (Symbol "List") retained, currentSession)
+      Just (column, rest) -> do
+        (mapped, updated) <-
+          threadAtDepth function remaining currentSession column
+        threadColumns function remaining (retained <> [mapped]) updated rest
+
+  splitParallelValues :: [[Expr]] -> Maybe ([Expr], [[Expr]])
+  splitParallelValues [] = Nothing
+  splitParallelValues values = collect [] [] values
+   where
+    collect retainedHeads retainedTails [] =
+      Just (reverse retainedHeads, reverse retainedTails)
+    collect _ _ ([] : _) = Nothing
+    collect retainedHeads retainedTails ((value : rest) : remaining) =
+      collect (value : retainedHeads) (rest : retainedTails) remaining
+
+evaluateSessionBlockMap
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionBlockMap depth session = \case
+  [function, subject, Integer window] ->
+    blockMap function subject window window session
+  [function, subject, Integer window, Integer offset] ->
+    blockMap function subject window offset session
+  [_, _, _] ->
+    sessionFailure session "BlockMap expects an integer argument."
+  [_, _, _, _] ->
+    sessionFailure session "BlockMap expects an integer argument."
+  _ ->
+    sessionFailure
+      session
+      "BlockMap currently supports a function, an expression, a block size, and an optional offset."
+ where
+  blockMap function subject window offset currentSession
+    | window <= 0 || offset <= 0 =
+        sessionFailure
+          currentSession
+          "BlockMap expects positive integer block sizes and offsets."
+    | otherwise = case sessionOrderedCollection subject of
+        Nothing ->
+          sessionFailure
+            currentSession
+            "BlockMap expects a nonatomic expression."
+        Just collection ->
+          mapWindows
+            function
+            collection
+            window
+            offset
+            0
+            []
+            currentSession
+
+  mapWindows function collection window offset start retained currentSession
+    | start + window > itemCount =
+        Right (normalizeEvaluatedCall (Symbol "List") retained, currentSession)
+    | otherwise = do
+        let items = sessionCollectionItems collection
+            blockItems =
+              take
+                (fromIntegral window)
+                (drop (fromIntegral start) items)
+            block = rebuildSessionCollection collection blockItems
+        (mapped, updated) <-
+          evaluateSessionCallable depth currentSession function [block]
+        mapWindows
+          function
+          collection
+          window
+          offset
+          (start + offset)
+          (retained <> [mapped])
+          updated
+   where
+    itemCount = toInteger (length (sessionCollectionItems collection))
+
+evaluateSessionSubsetMap
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionSubsetMap depth session = \case
+  [function, Call (Symbol targetHead) targetValues, positions]
+    | isSessionSystemHead "List" targetHead ->
+        case positions of
+          Call (Symbol positionsHead) rawPositions
+            | isSessionSystemHead "List" positionsHead ->
+                case traverse normalizePosition rawPositions of
+                  P.Left message -> sessionFailure session message
+                  P.Right requestedPositions ->
+                    case traverse (resolvePosition (length targetValues)) requestedPositions of
+                      P.Left message -> sessionFailure session message
+                      P.Right resolvedPositions ->
+                        case traverse (`sessionListItemAt` targetValues) resolvedPositions of
+                          Nothing ->
+                            sessionFailure
+                              session
+                              "SubsetMap could not resolve a validated position."
+                          Just selectedValues -> do
+                            (callbackResult, callbackSession) <-
+                              evaluateSessionCallable
+                                depth
+                                session
+                                function
+                                [Call (Symbol "List") selectedValues]
+                            (transformed, transformedSession) <-
+                              evaluateSessionAt (depth + 1) callbackSession callbackResult
+                            case transformed of
+                              Call (Symbol transformedHead) transformedValues
+                                | isSessionSystemHead "List" transformedHead
+                                , length transformedValues == length resolvedPositions ->
+                                    Right
+                                      ( normalizeEvaluatedCall
+                                          (Symbol targetHead)
+                                          ( replaceSelectedValues
+                                              targetValues
+                                              (zip resolvedPositions transformedValues)
+                                          )
+                                      , transformedSession
+                                      )
+                              _ -> invalidCallbackResult transformedSession
+          _ ->
+            sessionFailure
+              session
+              "SubsetMap expects a List of positions as the third argument."
+  [_, _, _] ->
+    sessionFailure
+      session
+      "SubsetMap currently expects a List as the second argument."
+  _ ->
+    sessionFailure
+      session
+      "SubsetMap expects a function, a list, and a list of positions."
+ where
+  normalizePosition = \case
+    Integer position -> P.Right position
+    Call (Symbol listHead) [Integer position]
+      | isSessionSystemHead "List" listHead -> P.Right position
+    _ ->
+      P.Left
+        "SubsetMap currently supports flat integer positions (or one-element ``{i}`` lists)."
+
+  resolvePosition count position
+    | position == 0 =
+        P.Left "Only top-level Part specifications may use index 0."
+    | otherwise =
+        case resolveSessionPosition count position of
+          Just resolved -> P.Right resolved
+          Nothing ->
+            P.Left
+              ( "Part index "
+                  <> T.pack (show position)
+                  <> " is out of range for length "
+                  <> T.pack (show count)
+                  <> "."
+              )
+
+  replaceSelectedValues values [] = values
+  replaceSelectedValues values ((index, replacement) : rest) =
+    replaceSelectedValues
+      (replaceSessionListIndex index replacement values)
+      rest
+
+  invalidCallbackResult currentSession =
+    sessionFailure
+      currentSession
+      "SubsetMap expects the function to return a List of the same length as the selection."
+
+evaluateSessionOperate
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionOperate depth session = \case
+  [operator, subject] -> operateSessionAtLevel depth session operator subject 1
+  [operator, subject, Integer level]
+    | level >= 0 -> operateSessionAtLevel depth session operator subject level
+    | otherwise ->
+        sessionFailure session "Operate expects a non-negative integer level."
+  [_, _, _] -> sessionFailure session "Operate expects an integer argument."
+  _ ->
+    sessionFailure
+      session
+      "Operate expects an operator, an expression, and an optional positive level."
+
+evaluateSessionInner
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionInner depth session = \case
+  [function, Call _ leftValues, Call _ rightValues, combiner]
+    | length leftValues /= length rightValues ->
+        sessionFailure session "Inner expects expressions with the same length."
+    | otherwise -> combinePairs function combiner session [] leftValues rightValues
+  [_, _, _, _] ->
+    sessionFailure session "Inner expects a nonatomic expression."
+  _ -> sessionFailure session "Inner expects exactly four arguments."
+ where
+  combinePairs _ combiner current combined [] [] =
+    evaluateSessionCallable depth current combiner (reverse combined)
+  combinePairs function combiner current combined (left : leftRest) (right : rightRest) = do
+    (value, updated) <-
+      evaluateSessionCallable depth current function [left, right]
+    combinePairs
+      function
+      combiner
+      updated
+      (value : combined)
+      leftRest
+      rightRest
+  combinePairs _ _ current _ _ _ =
+    sessionFailure current "Inner expects expressions with the same length."
+
+evaluateSessionOuter
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionOuter depth session values =
+  case outerTraversalPlan values of
+    P.Left (EvaluationError message) -> sessionFailure session message
+    P.Right (function, sequences) -> recurse function sequences [] session
+ where
+  recurse function [] chosen current =
+    evaluateSessionCallable depth current function (reverse chosen)
+  recurse function ((node, remainingDepth) : rest) chosen current =
+    descend function node remainingDepth rest chosen current
+
+  descend function node (Just 0) rest chosen current =
+    recurse function rest (node : chosen) current
+  descend function (Call expressionHead children) remainingDepth rest chosen current = do
+    (descended, updated) <-
+      descendChildren
+        function
+        (fmap (subtract 1) remainingDepth)
+        rest
+        chosen
+        []
+        current
+        children
+    Right (rebuildOuterCall expressionHead descended, updated)
+  descend function node _ rest chosen current =
+    recurse function rest (node : chosen) current
+
+  descendChildren _ _ _ _ retained current [] =
+    Right (reverse retained, current)
+  descendChildren function remainingDepth rest chosen retained current (child : children) = do
+    (descended, updated) <-
+      descend function child remainingDepth rest chosen current
+    descendChildren
+      function
+      remainingDepth
+      rest
+      chosen
+      (descended : retained)
+      updated
+      children
+
+  rebuildOuterCall expressionHead@Symbol {} = rebuildWithSplicing expressionHead
+  rebuildOuterCall expressionHead = Call expressionHead
+
+evaluateSessionThrough
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionThrough depth session = \case
+  [subject] -> through subject Nothing
+  [subject, targetHead] -> through subject (Just targetHead)
+  _ ->
+    sessionFailure
+      session
+      "Through expects an expression and an optional restricting head."
+ where
+  through subject@Call {} targetHead = case targetHead of
+    Nothing -> distribute subject
+    Just (Symbol targetName)
+      | targetMatches subject targetName -> distribute subject
+      | otherwise -> Right (subject, session)
+    Just _ ->
+      sessionFailure
+        session
+        "Through's second argument must be a Symbol head."
+  through subject _ = Right (subject, session)
+
+  targetMatches (Call functionsContainer _) targetName =
+    case functionsContainer of
+      Call (Symbol containerHead) _ -> containerHead == targetName
+      _ -> False
+  targetMatches _ _ = False
+
+  distribute subject@(Call functionsContainer callArguments) =
+    case sessionAssociationEntries functionsContainer of
+      Just entries -> mapAssociation callArguments [] session entries
+      Nothing -> case functionsContainer of
+        Call containerHead functions ->
+          mapFunctions containerHead callArguments [] session functions
+        _ -> Right (subject, session)
+  distribute subject = Right (subject, session)
+
+  mapAssociation _ retained current [] =
+    Right (normalizedSessionAssociation (reverse retained), current)
+  mapAssociation callArguments retained current (SessionAssociationEntry ruleHead key function : rest) = do
+    (value, updated) <-
+      evaluateSessionCallable depth current function callArguments
+    mapAssociation
+      callArguments
+      (Call (Symbol ruleHead) [key, value] : retained)
+      updated
+      rest
+
+  mapFunctions containerHead _ retained current [] =
+    Right (rebuildContainer containerHead (reverse retained), current)
+  mapFunctions containerHead callArguments retained current (function : rest) = do
+    (value, updated) <-
+      evaluateSessionCallable depth current function callArguments
+    mapFunctions
+      containerHead
+      callArguments
+      (value : retained)
+      updated
+      rest
+
+  rebuildContainer containerHead@Symbol {} = rebuildWithSplicing containerHead
+  rebuildContainer containerHead = Call containerHead
+
+evaluateSessionTr
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionTr depth session trInputs =
+  case trEvaluationPlan trInputs of
+    P.Left (EvaluationError message) -> sessionFailure session message
+    P.Right (TrTermsPlan combiner terms) ->
+      combineTerms combiner terms session
+    P.Right (TrLevelPlan combiner subject level) ->
+      contractLevel combiner subject level session
+ where
+  combineTerms combiner terms current = case combiner of
+    Symbol combinerName
+      | isSessionSystemHead "Plus" combinerName ->
+          evaluateSessionAt
+            (depth + 1)
+            current
+            (Call (Symbol "Plus") terms)
+    _ -> do
+      (combined, updated) <-
+        evaluateSessionCallable depth current combiner terms
+      evaluateSessionAt (depth + 1) updated combined
+
+  contractLevel combiner subject level current
+    | level == 1 = case requireList subject of
+        P.Left message -> sessionFailure current message
+        P.Right values -> case equalWidthRows values of
+          Just rows -> combineColumns combiner [] current (transpose rows)
+          Nothing -> combineTerms combiner values current
+    | otherwise = case requireList subject of
+        P.Left message -> sessionFailure current message
+        P.Right values ->
+          contractChildren combiner (level - 1) [] current values
+
+  contractChildren combiner _ retained current [] =
+    contractLevel
+      combiner
+      (Call (Symbol "List") (reverse retained))
+      1
+      current
+  contractChildren combiner level retained current (value : rest) = do
+    (contracted, updated) <- contractLevel combiner value level current
+    contractChildren combiner level (contracted : retained) updated rest
+
+  combineColumns _ retained current [] =
+    Right
+      ( rebuildWithSplicing (Symbol "List") (reverse retained)
+      , current
+      )
+  combineColumns combiner retained current (column : rest) = do
+    (combined, updated) <- combineTerms combiner column current
+    combineColumns combiner (combined : retained) updated rest
+
+  requireList expression = case listValues expression of
+    Just values -> P.Right values
+    Nothing -> case expression of
+      Call {} ->
+        P.Left "Tr expects a List at every contracted level."
+      _ -> P.Left "Tr expects a nonatomic expression."
+
+  equalWidthRows [] = Nothing
+  equalWidthRows values = do
+    rows <- traverse listValues values
+    case rows of
+      [] -> Nothing
+      firstRow : remaining
+        | all ((== length firstRow) . length) remaining -> Just rows
+        | otherwise -> Nothing
+
+  listValues (Call (Symbol listHead) listItems)
+    | isSessionSystemHead "List" listHead = Just listItems
+  listValues _ = Nothing
+
+operateSessionAtLevel
+  :: Int
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> Integer
+  -> SessionResult Expr
+operateSessionAtLevel depth session operator subject level
+  | level == 0 = evaluateSessionCallable depth session operator [subject]
+  | level > toInteger (sessionCallHeadDepth subject) = Right (subject, session)
+  | otherwise = descend level session subject
+ where
+  descend 0 current value =
+    evaluateSessionCallable depth current operator [value]
+  descend remaining current (Call expressionHead values) = do
+    (operatedHead, updated) <- descend (remaining - 1) current expressionHead
+    Right (Call operatedHead values, updated)
+  descend _ current value = Right (value, current)
+
+sessionCallHeadDepth :: Expr -> Int
+sessionCallHeadDepth (Call expressionHead _) = 1 + sessionCallHeadDepth expressionHead
+sessionCallHeadDepth _ = 0
+
+evaluateSessionMapAll
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionMapAll depth session values =
+  case stripSessionHeadsOption False values of
+    (_includeHeads, [_function]) ->
+      Right (Call (Symbol "MapAll") values, session)
+    (includeHeads, [function, subject]) ->
+      mapTree includeHeads function session subject
+    _ ->
+      sessionFailure
+        session
+        "MapAll currently supports exactly two arguments."
+ where
+  mapTree includeHeads function currentSession expression =
+    case sessionOrderedCollection expression of
+      Just collection
+        | sessionCollectionAssociation collection -> do
+            (mappedItems, updated) <-
+              mapItems
+                includeHeads
+                function
+                []
+                currentSession
+                (sessionCollectionItems collection)
+            evaluateSessionCallable
+              depth
+              updated
+              function
+              [rebuildSessionCollection collection mappedItems]
+      _ -> case expression of
+        Call expressionHead arguments' -> do
+          (mappedArguments, argumentsSession) <-
+            mapValues
+              includeHeads
+              function
+              []
+              currentSession
+              arguments'
+          (mappedHead, headSession) <-
+            if includeHeads
+              then mapTree includeHeads function argumentsSession expressionHead
+              else Right (expressionHead, argumentsSession)
+          evaluateSessionCallable
+            depth
+            headSession
+            function
+            [normalizeEvaluatedCall mappedHead mappedArguments]
+        _ ->
+          evaluateSessionCallable
+            depth
+            currentSession
+            function
+            [expression]
+
+  mapItems _ _ retained currentSession [] =
+    Right (retained, currentSession)
+  mapItems includeHeads function retained currentSession (item : rest) = do
+    (mapped, updated) <-
+      mapTree
+        includeHeads
+        function
+        currentSession
+        (sessionItemValue item)
+    mapItems
+      includeHeads
+      function
+      (retained <> [replaceSessionItemValue item mapped])
+      updated
+      rest
+
+  mapValues _ _ retained currentSession [] =
+    Right (retained, currentSession)
+  mapValues includeHeads function retained currentSession (value : rest) = do
+    (mapped, updated) <-
+      mapTree includeHeads function currentSession value
+    mapValues
+      includeHeads
+      function
+      (retained <> [mapped])
+      updated
+      rest
+
+evaluateSessionMapApply
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionMapApply depth session = \case
+  [function] -> Right (Call (Symbol "MapApply") [function], session)
+  [function, subject] -> mapImmediate function session subject
+  [function, subject, levelSpecification] -> do
+    (bounds, boundsSession) <-
+      liftSessionLevelBounds session levelSpecification
+    mapTree function bounds 0 boundsSession subject
+  _ ->
+    sessionFailure
+      session
+      "MapApply expects a function, an expression, and an optional level specification."
+ where
+  mapImmediate function currentSession expression =
+    case sessionOrderedCollection expression of
+      Just collection
+        | sessionCollectionAssociation collection -> do
+            (mappedItems, updated) <-
+              mapImmediateItems
+                function
+                []
+                currentSession
+                (sessionCollectionItems collection)
+            Right (rebuildSessionCollection collection mappedItems, updated)
+      _ -> case expression of
+        Call expressionHead arguments' -> do
+          (mappedArguments, updated) <-
+            mapImmediateValues function [] currentSession arguments'
+          Right
+            ( normalizeEvaluatedCall expressionHead mappedArguments
+            , updated
+            )
+        _ -> Right (expression, currentSession)
+
+  mapImmediateItems _ retained currentSession [] =
+    Right (retained, currentSession)
+  mapImmediateItems function retained currentSession (item : rest) = do
+    (mapped, updated) <-
+      evaluateSessionTraversalHead
+        depth
+        function
+        currentSession
+        (sessionItemValue item)
+    mapImmediateItems
+      function
+      (retained <> [replaceSessionItemValue item mapped])
+      updated
+      rest
+
+  mapImmediateValues _ retained currentSession [] =
+    Right (retained, currentSession)
+  mapImmediateValues function retained currentSession (value : rest) = do
+    (mapped, updated) <-
+      evaluateSessionTraversalHead depth function currentSession value
+    mapImmediateValues
+      function
+      (retained <> [mapped])
+      updated
+      rest
+
+  mapTree function bounds positive currentSession expression =
+    case sessionOrderedCollection expression of
+      Just collection
+        | sessionCollectionAssociation collection -> do
+            (mappedItems, updated) <-
+              mapTreeItems
+                function
+                bounds
+                (positive + 1)
+                []
+                currentSession
+                (sessionCollectionItems collection)
+            let rebuilt = rebuildSessionCollection collection mappedItems
+            if selected bounds positive expression
+              then
+                evaluateSessionTraversalHead depth function updated rebuilt
+              else Right (rebuilt, updated)
+      _ -> case expression of
+        Call expressionHead arguments' -> do
+          (mappedArguments, updated) <-
+            mapTreeValues
+              function
+              bounds
+              (positive + 1)
+              []
+              currentSession
+              arguments'
+          let rebuilt = normalizeEvaluatedCall expressionHead mappedArguments
+          if selected bounds positive expression
+            then
+              evaluateSessionTraversalHead depth function updated rebuilt
+            else
+              Right (rebuilt, updated)
+        _ -> Right (expression, currentSession)
+
+  selected bounds positive expression =
+    positive >= 1 && sessionLevelMatches bounds positive expression
+
+  mapTreeItems _ _ _ retained currentSession [] =
+    Right (retained, currentSession)
+  mapTreeItems function bounds positive retained currentSession (item : rest) = do
+    (mapped, updated) <-
+      mapTree
+        function
+        bounds
+        positive
+        currentSession
+        (sessionItemValue item)
+    mapTreeItems
+      function
+      bounds
+      positive
+      (retained <> [replaceSessionItemValue item mapped])
+      updated
+      rest
+
+  mapTreeValues _ _ _ retained currentSession [] =
+    Right (retained, currentSession)
+  mapTreeValues function bounds positive retained currentSession (value : rest) = do
+    (mapped, updated) <-
+      mapTree function bounds positive currentSession value
+    mapTreeValues
+      function
+      bounds
+      positive
+      (retained <> [mapped])
+      updated
+      rest
+
+evaluateSessionTraversalHead
+  :: Int
+  -> Expr
+  -> EvaluationSession
+  -> Expr
+  -> SessionResult Expr
+evaluateSessionTraversalHead depth function session expression =
+  case sessionOrderedCollection expression of
+    Just collection
+      | sessionCollectionAssociation collection ->
+          evaluateSessionCallable
+            depth
+            session
+            function
+            (map sessionItemValue (sessionCollectionItems collection))
+    _ -> case expression of
+      Call _ values -> evaluateSessionCallable depth session function values
+      _ -> Right (expression, session)
+
+evaluateSessionConstruct
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionConstruct _ session [] =
+  sessionFailure session "Construct expects at least one argument."
+evaluateSessionConstruct depth session (function : functionArguments) =
+  evaluateSessionCallable depth session function functionArguments
+
+evaluateSessionComposeList
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionComposeList depth session = \case
+  [Call _ functions, initial] ->
+    compose functions initial [initial] session
+  [_functions, _initial] ->
+    sessionFailure
+      session
+      "ComposeList expects a list or other nonatomic expression of functions."
+  _ -> sessionFailure session "ComposeList expects exactly two arguments."
+ where
+  compose [] _ retained currentSession =
+    Right (evaluatedList retained, currentSession)
+  compose (function : remaining) current retained currentSession = do
+    (updated, nextSession) <-
+      evaluateSessionCallable depth currentSession function [current]
+    compose remaining updated (retained <> [updated]) nextSession
+
+evaluateSessionComap
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionComap applyToArguments depth session arguments' =
+  case arguments' of
+    [functions] -> Right (Call (Symbol operation) [functions], session)
+    [functions, subject] -> mapFunctions functions subject
+    _ ->
+      sessionFailure
+        session
+        (operation <> " expects exactly two arguments.")
+ where
+  operation = if applyToArguments then "ComapApply" else "Comap"
+
+  mapFunctions functions subject = case sessionOrderedCollection functions of
+    Nothing -> Right (functions, session)
+    Just collection -> do
+      (mapped, updated) <-
+        mapItems subject [] session (sessionCollectionItems collection)
+      Right (rebuildSessionCollection collection mapped, updated)
+
+  mapItems _ retained currentSession [] = Right (retained, currentSession)
+  mapItems subject retained currentSession (item : rest) = do
+    (value, updated) <-
+      applyFunction subject currentSession (sessionItemValue item)
+    mapItems
+      subject
+      (retained <> [replaceComapItemValue item value])
+      updated
+      rest
+
+  applyFunction subject currentSession function
+    | applyToArguments = case comapApplyArguments subject of
+        Nothing -> Right (subject, currentSession)
+        Just values ->
+          evaluateSessionCallable depth currentSession function values
+    | otherwise =
+        evaluateSessionCallable depth currentSession function [subject]
+
+  comapApplyArguments subject = case sessionOrderedCollection subject of
+    Just collection
+      | sessionCollectionAssociation collection ->
+          Just (map sessionItemValue (sessionCollectionItems collection))
+    _ -> case subject of
+      Call _ values -> Just values
+      _ -> Nothing
+
+  replaceComapItemValue item value =
+    item
+      { sessionItemValue = value
+      , sessionItemOriginal = case sessionItemOriginal item of
+          Call ruleHead [key, _] -> Call ruleHead [key, value]
+          _ -> value
+      }
+
+evaluateSessionNest
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionNest returnHistory depth session = \case
+  [function, initial, countExpression] -> do
+    iterations <-
+      sessionNonNegativeIterationCount
+        operation
+        "expects a non-negative integer iteration count."
+        session
+        countExpression
+    build function iterations [initial] session
+  _ ->
+    sessionFailure
+      session
+      (operation <> " expects exactly three arguments.")
+ where
+  operation = if returnHistory then "NestList" else "Nest"
+  build _ 0 retained currentSession =
+    Right
+      ( if returnHistory then evaluatedList retained else last retained
+      , currentSession
+      )
+  build function remaining retained currentSession = do
+    (updated, nextSession) <-
+      evaluateSessionCallable depth currentSession function [last retained]
+    build function (remaining - 1) (retained <> [updated]) nextSession
+
+evaluateSessionNestWhile
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionNestWhile returnHistory depth session arguments' =
+  case arguments' of
+    [function, initial, test] ->
+      nestWhile function initial test Nothing Nothing
+    [function, initial, test, historyExpression] ->
+      nestWhile function initial test (Just historyExpression) Nothing
+    [function, initial, test, historyExpression, maximumExpression] ->
+      nestWhile
+        function
+        initial
+        test
+        (Just historyExpression)
+        (Just maximumExpression)
+    _ ->
+      sessionFailure
+        session
+        (operation <> " expects f, expr, test, optional m, optional max.")
+ where
+  operation = if returnHistory then "NestWhileList" else "NestWhile"
+
+  nestWhile function initial test historyExpression maximumExpression = do
+    historySize <- normalizeHistory historyExpression
+    maximumIterations <- normalizeMaximum maximumExpression
+    iterateWhile function test historySize maximumIterations 0 [initial] session
+
+  normalizeHistory Nothing = Right (Just 1)
+  normalizeHistory (Just (Integer value))
+    | value >= 1 = Right (Just value)
+  normalizeHistory (Just (Symbol name))
+    | isSessionSystemHead "All" name = Right Nothing
+  normalizeHistory _ =
+    patternFailure
+      session
+      "NestWhile history size must be a positive integer or All."
+
+  normalizeMaximum Nothing = Right Nothing
+  normalizeMaximum (Just (Integer value)) = Right (Just (max 0 value))
+  normalizeMaximum (Just (Symbol name))
+    | isSessionSystemHead "Infinity" name = Right Nothing
+  normalizeMaximum _ =
+    patternFailure
+      session
+      "NestWhile max iterations must be a non-negative integer or Infinity."
+
+  iterateWhile function test historySize maximumIterations iterations history currentSession = do
+    (predicateResult, testedSession) <-
+      predicateWithHistory test historySize history currentSession
+    if not predicateResult
+      then finish history testedSession
+      else
+        if iterations >= sessionIterationSafetyLimit
+          then
+            sessionFailure
+              testedSession
+              (operation <> " exceeded the Tungsten iteration safety limit.")
+          else case maximumIterations of
+            Just maximumValue
+              | iterations >= maximumValue -> finish history testedSession
+            _ -> do
+              (updated, nextSession) <-
+                evaluateSessionCallable
+                  depth
+                  testedSession
+                  function
+                  [last history]
+              iterateWhile
+                function
+                test
+                historySize
+                maximumIterations
+                (iterations + 1)
+                (history <> [updated])
+                nextSession
+
+  predicateWithHistory test historySize history currentSession =
+    case historySize of
+      Just required
+        | fromIntegral (length history) < required -> Right (True, currentSession)
+        | otherwise ->
+            applyPredicate
+              test
+              (drop (length history - fromIntegral required) history)
+              currentSession
+      Nothing -> applyPredicate test history currentSession
+
+  applyPredicate test predicateArguments currentSession = do
+    (result, updated) <-
+      evaluateSessionCallable depth currentSession test predicateArguments
+    Right (result == Symbol "True", updated)
+
+  finish history currentSession =
+    Right
+      (if returnHistory then evaluatedList history else last history, currentSession)
+
+evaluateSessionFixedPoint
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionFixedPoint returnHistory depth session = \case
+  [function, initial] ->
+    findFixedPoint function initial sessionIterationSafetyLimit False
+  [function, initial, countExpression] -> do
+    limit <-
+      sessionNonNegativeIterationCount
+        operation
+        "expects a non-negative maximum iteration count."
+        session
+        countExpression
+    findFixedPoint function initial limit True
+  _ ->
+    sessionFailure
+      session
+      ( operation
+          <> " expects a function, an expression, and an optional iteration limit."
+      )
+ where
+  operation = if returnHistory then "FixedPointList" else "FixedPoint"
+  findFixedPoint callback initial limit explicitLimit =
+    iterateUntilStable limit initial [initial] session
+   where
+    iterateUntilStable 0 current retained currentSession
+      | explicitLimit = finish current retained currentSession
+      | otherwise =
+          sessionFailure
+            currentSession
+            (operation <> " exceeded the Tungsten iteration safety limit.")
+    iterateUntilStable remaining current retained currentSession = do
+      (updated, nextSession) <-
+        evaluateSessionCallable depth currentSession callback [current]
+      let nextRetained = retained <> [updated]
+      if updated == current
+        then finish current nextRetained nextSession
+        else
+          iterateUntilStable
+            (remaining - 1)
+            updated
+            nextRetained
+            nextSession
+    finish current retained currentSession =
+      Right
+        (if returnHistory then evaluatedList retained else current, currentSession)
+
+evaluateSessionFold
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionFold returnHistory depth session = \case
+  [function, subject] -> do
+    values <- sessionSequenceValues session operation subject
+    case values of
+      []
+        | returnHistory -> Right (evaluatedList [], session)
+        | otherwise ->
+            sessionFailure
+              session
+              "Fold[f, expr] expects a nonempty sequence."
+      initial : remaining -> finish function initial remaining
+  [function, initial, subject] -> do
+    values <- sessionSequenceValues session operation subject
+    finish function initial values
+  _ ->
+    sessionFailure
+      session
+      (operation <> " expects two or three arguments.")
+ where
+  operation = if returnHistory then "FoldList" else "Fold"
+  finish function initial values =
+    build function initial values [initial] session
+  build _ current [] retained currentSession =
+    Right
+      (if returnHistory then evaluatedList retained else current, currentSession)
+  build function current (value : remaining) retained currentSession = do
+    (updated, nextSession) <-
+      evaluateSessionCallable depth currentSession function [current, value]
+    build
+      function
+      updated
+      remaining
+      (retained <> [updated])
+      nextSession
+
+evaluateSessionFoldWhile
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionFoldWhile returnHistory depth session arguments' =
+  case arguments' of
+    [function, initial, subject, test] ->
+      foldWhile function initial subject test Nothing Nothing
+    [function, initial, subject, test, historyExpression] ->
+      foldWhile function initial subject test (Just historyExpression) Nothing
+    [function, initial, subject, test, historyExpression, trailingExpression] ->
+      foldWhile
+        function
+        initial
+        subject
+        test
+        (Just historyExpression)
+        (Just trailingExpression)
+    _ ->
+      sessionFailure
+        session
+        ( operation
+            <> " currently supports a function, an initial value, inputs, a test, and optional history and trailing counts."
+        )
+ where
+  operation = if returnHistory then "FoldWhileList" else "FoldWhile"
+
+  foldWhile function initial subject test historyExpression trailingExpression = do
+    inputs <- sessionSequenceValues session "FoldWhileList" subject
+    historySize <- normalizeHistory historyExpression
+    (initialSucceeds, testedSession) <-
+      testHistory test historySize [initial] session
+    if initialSucceeds
+      then
+        foldInputs
+          function
+          test
+          historySize
+          trailingExpression
+          [initial]
+          inputs
+          testedSession
+      else finish [initial] testedSession
+
+  normalizeHistory Nothing = Right (Just 1)
+  normalizeHistory (Just (Integer value))
+    | value > 0 = Right (Just value)
+  normalizeHistory (Just (Symbol name))
+    | isSessionSystemHead "All" name = Right Nothing
+  normalizeHistory _ =
+    patternFailure
+      session
+      "FoldWhileList expects a positive history length or All."
+
+  foldInputs _ _ _ _ results [] currentSession = finish results currentSession
+  foldInputs function test historySize trailingExpression results (inputValue : remaining) currentSession = do
+    (updated, functionSession) <-
+      evaluateSessionCallable
+        depth
+        currentSession
+        function
+        [last results, inputValue]
+    let nextResults = results <> [updated]
+    (predicateSucceeds, testedSession) <-
+      testHistory test historySize nextResults functionSession
+    if predicateSucceeds
+      then
+        foldInputs
+          function
+          test
+          historySize
+          trailingExpression
+          nextResults
+          remaining
+          testedSession
+      else
+        finishFailure
+          function
+          trailingExpression
+          nextResults
+          remaining
+          testedSession
+
+  finishFailure function trailingExpression results remaining currentSession =
+    case trailingExpression of
+      Nothing -> finish results currentSession
+      Just (Integer trailing)
+        | trailing < 0 ->
+            let retainedCount =
+                  min
+                    (toInteger (length results))
+                    (max 1 (toInteger (length results) + trailing))
+             in finish (take (fromInteger retainedCount) results) currentSession
+        | otherwise ->
+            appendTrailing function trailing results remaining currentSession
+      Just _ ->
+        patternFailure
+          currentSession
+          "FoldWhileList expects an integer argument."
+
+  appendTrailing _ 0 results _ currentSession = finish results currentSession
+  appendTrailing _ _ results [] currentSession = finish results currentSession
+  appendTrailing function remainingCount results (inputValue : remaining) currentSession = do
+    (updated, nextSession) <-
+      evaluateSessionCallable
+        depth
+        currentSession
+        function
+        [last results, inputValue]
+    appendTrailing
+      function
+      (remainingCount - 1)
+      (results <> [updated])
+      remaining
+      nextSession
+
+  testHistory test historySize history currentSession = do
+    (result, updated) <-
+      evaluateSessionCallable
+        depth
+        currentSession
+        test
+        (historyArguments historySize history)
+    Right (result == Symbol "True", updated)
+
+  historyArguments Nothing history = history
+  historyArguments (Just required) history
+    | required >= toInteger (length history) = history
+    | otherwise = drop (length history - fromInteger required) history
+
+  finish results currentSession =
+    let retained = filter (/= Symbol "Nothing") results
+     in Right
+          ( case (returnHistory, retained) of
+              (True, _) -> evaluatedList retained
+              (False, []) -> Symbol "Nothing"
+              (False, _) -> last retained
+          , currentSession
+          )
+
+evaluateSessionFoldPair
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionFoldPair returnHistory depth session arguments' =
+  case arguments' of
+    [function, initial, subject] ->
+      foldPairs function initial subject Nothing
+    [function, initial, subject, projection] ->
+      foldPairs function initial subject (Just projection)
+    _ ->
+      sessionFailure
+        session
+        ( operation
+            <> " currently supports a function, an initial value, inputs, and an optional projection."
+        )
+ where
+  operation = if returnHistory then "FoldPairList" else "FoldPair"
+  foldPairs function initial subject projection = do
+    inputs <- sessionSequenceValues session "FoldPairList" subject
+    (projected, updated) <-
+      build function projection initial inputs [] session
+    let retained = filter (/= Symbol "Nothing") projected
+    case retained of
+      []
+        | returnHistory -> Right (evaluatedList [], updated)
+        | otherwise -> Right (Call (Symbol "FoldPair") arguments', updated)
+      _
+        | returnHistory -> Right (evaluatedList retained, updated)
+        | otherwise -> Right (last retained, updated)
+
+  build _ _ _ [] retained currentSession = Right (retained, currentSession)
+  build function projection current (inputValue : remaining) retained currentSession = do
+    (pairExpression, pairSession) <-
+      evaluateSessionCallable depth currentSession function [current, inputValue]
+    case pairExpression of
+      Call (Symbol listHead) [first, second]
+        | isSessionSystemHead "List" listHead -> do
+            (projected, projectionSession) <- case projection of
+              Nothing -> Right (first, pairSession)
+              Just projectionFunction ->
+                evaluateSessionCallable
+                  depth
+                  pairSession
+                  projectionFunction
+                  [evaluatedList [first, second]]
+            build
+              function
+              projection
+              second
+              remaining
+              (retained <> [projected])
+              projectionSession
+      _ ->
+        sessionFailure
+          pairSession
+          ( "FoldPairList expects each function application to return a list of two elements, got "
+              <> inputForm pairExpression
+              <> "."
+          )
+
+sessionNonNegativeIterationCount
+  :: Text
+  -> Text
+  -> EvaluationSession
+  -> Expr
+  -> RuntimeResult EvaluationExit Integer
+sessionNonNegativeIterationCount operation negativeMessage session = \case
+  Integer value
+    | value >= 0 -> Right value
+    | otherwise ->
+        patternFailure session (operation <> " " <> negativeMessage)
+  _ -> patternFailure session (operation <> " expects an integer argument.")
+
+sessionIterationSafetyLimit :: Integer
+sessionIterationSafetyLimit = 65536
 
 evaluateSessionSequenceFold
   :: Bool
@@ -3842,13 +6377,14 @@ sessionExpressionDepth _ = 1
 
 evaluateSessionMapLevels
   :: Int
+  -> Bool
   -> Expr
   -> SessionLevelBounds
   -> Int
   -> EvaluationSession
   -> Expr
   -> SessionResult Expr
-evaluateSessionMapLevels depth function bounds positive session expression =
+evaluateSessionMapLevels depth includeHeads function bounds positive session expression =
   case sessionOrderedCollection expression of
     Just collection
       | sessionCollectionAssociation collection -> do
@@ -3861,10 +6397,22 @@ evaluateSessionMapLevels depth function bounds positive session expression =
     _ -> case expression of
       Call expressionHead values -> do
         (mappedValues, updated) <- walkValues [] session values
-        let rebuilt = normalizeEvaluatedCall expressionHead mappedValues
+        (mappedHead, headSession) <-
+          if includeHeads
+            then
+              evaluateSessionMapLevels
+                depth
+                includeHeads
+                function
+                bounds
+                (positive + 1)
+                updated
+                expressionHead
+            else Right (expressionHead, updated)
+        let rebuilt = normalizeEvaluatedCall mappedHead mappedValues
         if sessionLevelMatches bounds positive expression
-          then evaluateSessionCallable depth updated function [rebuilt]
-          else Right (rebuilt, updated)
+          then evaluateSessionCallable depth headSession function [rebuilt]
+          else Right (rebuilt, headSession)
       _
         | sessionLevelMatches bounds positive expression ->
             evaluateSessionCallable depth session function [expression]
@@ -3875,6 +6423,7 @@ evaluateSessionMapLevels depth function bounds positive session expression =
     (mapped, updated) <-
       evaluateSessionMapLevels
         depth
+        includeHeads
         function
         bounds
         (positive + 1)
@@ -3890,6 +6439,7 @@ evaluateSessionMapLevels depth function bounds positive session expression =
     (mapped, updated) <-
       evaluateSessionMapLevels
         depth
+        includeHeads
         function
         bounds
         (positive + 1)
@@ -3961,7 +6511,9 @@ evaluateSessionTotal
   -> SessionResult Expr
 evaluateSessionTotal depth session = \case
   [subject] -> totalSubject subject
-  values@[_, _] -> Right (Call (Symbol "Total") values, session)
+  values@[_, _] -> do
+    result <- liftPureEvaluation session (evaluate (Call (Symbol "Total") values))
+    Right (result, session)
   _ ->
     sessionFailure
       session
@@ -4015,6 +6567,104 @@ data SessionPathSelector
   = SessionArgumentSelector !Integer
   | SessionKeySelector !Expr
   deriving (Eq, Show)
+
+evaluateSessionFlattenAt
+  :: EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionFlattenAt session = \case
+  [target, positions] -> do
+    (subject, subjectSession) <- densifyTarget target
+    case expandSessionPositionPaths subject positions of
+      P.Left message -> sessionFailure subjectSession message
+      P.Right (resolvedPaths, invalid)
+        | invalid || any null uniquePaths -> invalidPositions subjectSession subject
+        | otherwise ->
+            flattenPaths
+              subject
+              subject
+              subjectSession
+              (sortSessionPaths uniquePaths)
+       where
+        uniquePaths = deduplicateSessionPaths resolvedPaths
+  _ -> sessionFailure session "FlattenAt expects exactly two arguments."
+ where
+  densifyTarget sparse@SparseArray {} = do
+    dense <-
+      liftPureEvaluation
+        session
+        (reduceEvaluatedCall (Call (Symbol "Normal") [sparse]))
+    Right (dense, session)
+  densifyTarget target = Right (target, session)
+
+  flattenPaths _ result currentSession [] = Right (result, currentSession)
+  flattenPaths originalSubject result currentSession (path : rest) =
+    case flattenSessionAtPath result path of
+      Nothing -> invalidPositions currentSession originalSubject
+      Just updated ->
+        flattenPaths originalSubject updated currentSession rest
+
+  invalidPositions currentSession subject =
+    sessionFailure
+      currentSession
+      ("FlattenAt positions are invalid for " <> inputForm subject <> ".")
+
+deduplicateSessionPaths :: [[SessionPathSelector]] -> [[SessionPathSelector]]
+deduplicateSessionPaths = foldl retain []
+ where
+  retain paths path
+    | path `elem` paths = paths
+    | otherwise = paths <> [path]
+
+flattenSessionAtPath :: Expr -> [SessionPathSelector] -> Maybe Expr
+flattenSessionAtPath _ [] = Nothing
+flattenSessionAtPath expression (selector : remaining) = case (expression, selector) of
+  (Call expressionHead values, SessionArgumentSelector position) -> do
+    index <- resolveSessionPosition (length values) position
+    selected <- sessionListItemAt index values
+    if null remaining
+      then case selected of
+        Call _ nestedValues ->
+          Just
+            ( rebuildSessionFlattenAtCall
+                expressionHead
+                (take index values <> nestedValues <> drop (index + 1) values)
+            )
+        _ -> Nothing
+      else do
+        updated <- flattenSessionAtPath selected remaining
+        Just
+          ( rebuildSessionFlattenAtCall
+              expressionHead
+              (replaceSessionListIndex index updated values)
+          )
+  _ -> Nothing
+
+rebuildSessionFlattenAtCall :: Expr -> [Expr] -> Expr
+rebuildSessionFlattenAtCall expressionHead values = case expressionHead of
+  Symbol headName -> Call expressionHead retained
+   where
+    spliced
+      | headName `elem` ["HoldComplete", "Rule", "RuleDelayed", "Unevaluated"] =
+          values
+      | otherwise = concatMap spliceArgument values
+    retained
+      | headName `elem` ["Association", "List"] =
+          filter (/= Symbol "Nothing") spliced
+      | otherwise = spliced
+    spliceArgument = \case
+      Call (Symbol sequenceHead) sequenceValues
+        | isSessionSystemHead "Sequence" sequenceHead -> sequenceValues
+      Call (Symbol spliceHead) [Call (Symbol listHead) spliceValues]
+        | isSessionSystemHead "Splice" spliceHead
+        , isSessionSystemHead "List" listHead
+        , expressionHead == Symbol "List" -> spliceValues
+      Call (Symbol spliceHead) [Call (Symbol listHead) spliceValues, target]
+        | isSessionSystemHead "Splice" spliceHead
+        , isSessionSystemHead "List" listHead
+        , target == expressionHead -> spliceValues
+      value -> [value]
+  _ -> Call expressionHead values
 
 evaluateSessionMapAt
   :: Int
@@ -4129,8 +6779,9 @@ expandSessionPositionPaths
 expandSessionPositionPaths expression specification
   | isSessionPositionCollection specification =
       case specification of
-        Call (Symbol "List") pathExpressions ->
-          expandPaths [] False pathExpressions
+        Call (Symbol listHead) pathExpressions
+          | isSessionSystemHead "List" listHead ->
+              expandPaths [] False pathExpressions
         _ -> unsupportedPositionSpecification specification
   | isSingleSessionPositionSpecification specification =
       expandSessionExactPath
@@ -4204,16 +6855,17 @@ resolveSessionAssociationComponent
 resolveSessionAssociationComponent items component
   | Just key <- sessionKeySelectorValue component =
       selectSessionAssociationKeys items [key]
-resolveSessionAssociationComponent items component@(Call (Symbol "List") selectors) =
-  case traverse sessionAssociationSelectorKind selectors of
-    Nothing -> unsupportedSelectorInsidePosition component
-    Just kinds
-      | any id kinds && any not kinds ->
-          P.Left "Association selector lists may not mix numeric and key selectors."
-      | any id kinds ->
-          selectKeys
-            (mapMaybeSession sessionKeySelectorValue selectors)
-      | otherwise -> selectNumeric
+resolveSessionAssociationComponent items component@(Call (Symbol listHead) selectors)
+  | isSessionSystemHead "List" listHead =
+      case traverse sessionAssociationSelectorKind selectors of
+        Nothing -> unsupportedSelectorInsidePosition component
+        Just kinds
+          | any id kinds && any not kinds ->
+              P.Left "Association selector lists may not mix numeric and key selectors."
+          | any id kinds ->
+              selectKeys
+                (mapMaybeSession sessionKeySelectorValue selectors)
+          | otherwise -> selectNumeric
  where
   selectNumeric = do
     (indices, invalid) <-
@@ -4274,14 +6926,17 @@ resolveSessionNumericSelectors count component = case component of
    where
     resolved = resolveSessionPosition count position
   Symbol "All" -> P.Right ([0 .. count - 1], False)
-  spanSpecification@(Call (Symbol "Span") _) -> do
-    positions <- expandSessionPositionSpan count spanSpecification
-    let resolved = map (resolveSessionPosition count) positions
-    P.Right
-      ( mapMaybeSession id resolved
-      , any (maybe True (const False)) resolved
-      )
-  Call (Symbol "List") selectors -> appendSelectors [] False selectors
+  spanSpecification@(Call (Symbol spanHead) _)
+    | isSessionSystemHead "Span" spanHead -> do
+        positions <- expandSessionPositionSpan count spanSpecification
+        let resolved = map (resolveSessionPosition count) positions
+        P.Right
+          ( mapMaybeSession id resolved
+          , any (maybe True (const False)) resolved
+          )
+  Call (Symbol listHead) selectors
+    | isSessionSystemHead "List" listHead ->
+        appendSelectors [] False selectors
   _ ->
     P.Left
       ( "Unsupported Position specification: "
@@ -4301,13 +6956,14 @@ resolveSessionNumericSelectors count component = case component of
           rest
 
 expandSessionPositionSpan :: Int -> Expr -> Either Text [Integer]
-expandSessionPositionSpan count (Call (Symbol "Span") arguments') =
-  case arguments' of
-    [startExpression, endExpression] ->
-      expand startExpression endExpression (Integer 1)
-    [startExpression, endExpression, stepExpression] ->
-      expand startExpression endExpression stepExpression
-    _ -> P.Left "Span must contain two or three arguments."
+expandSessionPositionSpan count (Call (Symbol spanHead) arguments')
+  | isSessionSystemHead "Span" spanHead =
+      case arguments' of
+        [startExpression, endExpression] ->
+          expand startExpression endExpression (Integer 1)
+        [startExpression, endExpression, stepExpression] ->
+          expand startExpression endExpression stepExpression
+        _ -> P.Left "Span must contain two or three arguments."
  where
   expand startExpression endExpression stepExpression = do
     step <- case stepExpression of
@@ -4332,28 +6988,33 @@ expandSessionPositionSpan count (Call (Symbol "Span") arguments') =
 expandSessionPositionSpan _ _ = P.Left "Span must contain two or three arguments."
 
 isSessionPositionCollection :: Expr -> Bool
-isSessionPositionCollection (Call (Symbol "List") values) =
-  not (null values) && all isExplicitSessionPositionPath values
+isSessionPositionCollection (Call (Symbol listHead) values) =
+  isSessionSystemHead "List" listHead
+    && not (null values)
+    && all isExplicitSessionPositionPath values
 isSessionPositionCollection _ = False
 
 isExplicitSessionPositionPath :: Expr -> Bool
-isExplicitSessionPositionPath (Call (Symbol "List") components) =
-  all isSessionPositionComponent components
+isExplicitSessionPositionPath (Call (Symbol listHead) components) =
+  isSessionSystemHead "List" listHead
+    && all isSessionPositionComponent components
 isExplicitSessionPositionPath _ = False
 
 isSingleSessionPositionSpecification :: Expr -> Bool
 isSingleSessionPositionSpecification Integer {} = True
 isSingleSessionPositionSpecification expression
   | isSessionKeySelector expression = True
-isSingleSessionPositionSpecification (Call (Symbol "List") components) =
-  all isSessionPositionComponent components
+isSingleSessionPositionSpecification (Call (Symbol listHead) components) =
+  isSessionSystemHead "List" listHead
+    && all isSessionPositionComponent components
 isSingleSessionPositionSpecification _ = False
 
 isSessionPositionComponent :: Expr -> Bool
 isSessionPositionComponent expression
   | isSessionSelectorAtom expression = True
-isSessionPositionComponent (Call (Symbol "List") selectors) =
-  all isSessionSelectorAtom selectors
+isSessionPositionComponent (Call (Symbol listHead) selectors) =
+  isSessionSystemHead "List" listHead
+    && all isSessionSelectorAtom selectors
 isSessionPositionComponent _ = False
 
 isSessionSelectorAtom :: Expr -> Bool
@@ -4363,7 +7024,8 @@ isSessionSelectorAtom expression =
 isSessionNumericSelectorAtom :: Expr -> Bool
 isSessionNumericSelectorAtom Integer {} = True
 isSessionNumericSelectorAtom (Symbol "All") = True
-isSessionNumericSelectorAtom (Call (Symbol "Span") _) = True
+isSessionNumericSelectorAtom (Call (Symbol spanHead) _) =
+  isSessionSystemHead "Span" spanHead
 isSessionNumericSelectorAtom _ = False
 
 isSessionKeySelector :: Expr -> Bool
@@ -4371,7 +7033,8 @@ isSessionKeySelector = maybe False (const True) . sessionKeySelectorValue
 
 sessionKeySelectorValue :: Expr -> Maybe Expr
 sessionKeySelectorValue key@String {} = Just key
-sessionKeySelectorValue (Call (Symbol "Key") [key]) = Just key
+sessionKeySelectorValue (Call (Symbol keyHead) [key])
+  | isSessionSystemHead "Key" keyHead = Just key
 sessionKeySelectorValue _ = Nothing
 
 sessionAssociationSelectorKind :: Expr -> Maybe Bool
@@ -4381,7 +7044,8 @@ sessionAssociationSelectorKind expression
 sessionAssociationSelectorKind _ = Nothing
 
 sessionPositionComponents :: Expr -> [Expr]
-sessionPositionComponents (Call (Symbol "List") components) = components
+sessionPositionComponents (Call (Symbol listHead) components)
+  | isSessionSystemHead "List" listHead = components
 sessionPositionComponents expression = [expression]
 
 unsupportedPositionSpecification
@@ -4499,6 +7163,105 @@ splitSessionSameTestOptions operation values
   normalizeSameTest (Just (Symbol "Automatic")) = Nothing
   normalizeSameTest other = other
 
+evaluateSessionEqualWithSameTest
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionEqualWithSameTest depth session values =
+  case splitSessionSameTestOptions "Equal" values of
+    P.Left message -> sessionFailure session message
+    P.Right (dataValues, sameTest) ->
+      let compareAdjacent current (left : right : rest) = do
+            (same, updated) <- sessionValuesSame depth sameTest current left right
+            if same
+              then compareAdjacent updated (right : rest)
+              else Right (Symbol "False", updated)
+          compareAdjacent current _ = Right (Symbol "True", current)
+       in compareAdjacent session dataValues
+
+evaluateSessionSetOperation
+  :: Text
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionSetOperation operation depth session values =
+  case splitSessionSameTestOptions operation values of
+    P.Left message -> sessionFailure session message
+    P.Right (dataValues, sameTest) -> case traverse sessionListValues dataValues of
+      Nothing -> sessionFailure session (operation <> " expects a list or association.")
+      Just lists -> case (operation, lists) of
+        ("Union", _) -> do
+          (unique, updated) <- uniqueSessionValues depth sameTest session (concat lists)
+          Right (evaluatedList unique, updated)
+        ("Intersection", first : remaining) -> do
+          (uniqueFirst, firstSession) <- uniqueSessionValues depth sameTest session first
+          (retained, updated) <- retainIntersection sameTest firstSession uniqueFirst remaining
+          Right (evaluatedList retained, updated)
+        ("Complement", first : remaining) -> do
+          (uniqueFirst, firstSession) <-
+            uniqueSessionValues depth sameTest session (sortBy canonicalCompare first)
+          (retained, updated) <- removeComplement sameTest firstSession uniqueFirst (concat remaining)
+          Right (evaluatedList retained, updated)
+        _ -> sessionFailure session (operation <> " expects at least one list.")
+ where
+  sessionListValues (Call (Symbol listHead) listValues)
+    | isSessionSystemHead "List" listHead = Just listValues
+  sessionListValues _ = Nothing
+  retainIntersection _ current [] _ = Right ([], current)
+  retainIntersection selectedSameTest current (candidate : rest) lists = do
+    (present, updated) <- presentInEvery selectedSameTest current candidate lists
+    (retained, finalSession) <- retainIntersection selectedSameTest updated rest lists
+    Right (if present then candidate : retained else retained, finalSession)
+  presentInEvery _ current _ [] = Right (True, current)
+  presentInEvery selectedSameTest current candidate (listValues : rest) = do
+    (present, updated) <- anySessionValueSame depth selectedSameTest current candidate listValues
+    if present then presentInEvery selectedSameTest updated candidate rest else Right (False, updated)
+  removeComplement _ current [] _ = Right ([], current)
+  removeComplement selectedSameTest current (candidate : rest) excluded = do
+    (present, updated) <- anySessionValueSame depth selectedSameTest current candidate excluded
+    (retained, finalSession) <- removeComplement selectedSameTest updated rest excluded
+    Right (if present then retained else candidate : retained, finalSession)
+
+uniqueSessionValues
+  :: Int
+  -> Maybe Expr
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult [Expr]
+uniqueSessionValues depth sameTest session values = go session [] values
+ where
+  go current retained [] = Right (sortBy canonicalCompare (reverse retained), current)
+  go current retained (candidate : rest) = do
+    (duplicate, updated) <- anySessionValueSame depth sameTest current candidate retained
+    go updated (if duplicate then retained else candidate : retained) rest
+
+anySessionValueSame
+  :: Int
+  -> Maybe Expr
+  -> EvaluationSession
+  -> Expr
+  -> [Expr]
+  -> SessionResult Bool
+anySessionValueSame _ _ session _ [] = Right (False, session)
+anySessionValueSame depth sameTest session candidate (value : rest) = do
+  (same, updated) <- sessionValuesSame depth sameTest session candidate value
+  if same
+    then Right (True, updated)
+    else anySessionValueSame depth sameTest updated candidate rest
+
+sessionValuesSame
+  :: Int
+  -> Maybe Expr
+  -> EvaluationSession
+  -> Expr
+  -> Expr
+  -> SessionResult Bool
+sessionValuesSame _ Nothing session left right = Right (left == right, session)
+sessionValuesSame depth (Just function) session left right =
+  evaluateSessionSameTest depth (Just function) session left right
+
 splitTrailingSessionOptions :: [Expr] -> ([Expr], [Expr])
 splitTrailingSessionOptions values =
   (reverse reversedArguments, reverse reversedOptions)
@@ -4516,6 +7279,120 @@ sessionOptionRuleParts = \case
   Call (Symbol ruleHead) [Symbol name, value]
     | ruleHead `elem` ["Rule", "RuleDelayed"] -> Just (name, value)
   _ -> Nothing
+
+evaluateSessionSort
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionSort reverseMode depth session = \case
+  [subject, specification] -> case sessionOrderedCollection subject of
+    Nothing -> sessionFailure session (operation <> " expects a nonatomic expression.")
+    Just collection -> do
+      (sorted, updated) <-
+        pythonStableSortByStateM
+          compareItems
+          session
+          (sessionCollectionItems collection)
+      Right (rebuildSessionCollection collection sorted, updated)
+   where
+    compareItems current left right = do
+      ordering <- case sameTestFunction specification of
+        Just test -> do
+          (same, updated) <-
+            evaluateSessionSameTest
+              depth
+              (Just test)
+              current
+              (sessionItemValue left)
+              (sessionItemValue right)
+          Right
+            ( if same
+                then EQ
+                else canonicalCompare (sessionItemValue left) (sessionItemValue right)
+            , updated
+            )
+        Nothing ->
+          evaluateSessionOrderingCompare
+            depth
+            specification
+            current
+            (sessionItemValue left)
+            (sessionItemValue right)
+      let (result, updated) = ordering
+      Right (if reverseMode then invertSessionOrdering result else result, updated)
+  _ -> sessionFailure session (operation <> " expects one or two arguments.")
+ where
+  operation = if reverseMode then "ReverseSort" else "Sort"
+  sameTestFunction (Call (Symbol ruleHead) [Symbol optionName, function])
+    | isSessionSystemHead "Rule" ruleHead
+        || isSessionSystemHead "RuleDelayed" ruleHead
+    , isSessionSystemHead "SameTest" optionName = Just function
+  sameTestFunction _ = Nothing
+
+evaluateSessionOrdering
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionOrdering depth session values =
+  case splitSessionSameTestOptions "Ordering" values of
+    P.Left message -> sessionFailure session message
+    P.Right ([subject, count, function], sameTest) -> case sessionOrderedCollection subject of
+      Nothing -> sessionFailure session "Ordering expects a nonatomic expression."
+      Just collection -> do
+        (sorted, updated) <-
+          pythonStableSortByStateM
+            (compareItems sameTest function)
+            session
+            (sessionCollectionItems collection)
+        case sliceSessionOrderingCount (Just count) sorted of
+          P.Left message -> sessionFailure updated message
+          P.Right selected ->
+            Right (evaluatedList (map (Integer . sessionItemIndex) selected), updated)
+    _ ->
+      sessionFailure
+        session
+        "Ordering expects an expression, an optional count, and an optional ordering function."
+ where
+  compareItems sameTest function current left right = do
+    (same, sameSession) <-
+      sessionValuesSame
+        depth
+        sameTest
+        current
+        (sessionItemValue left)
+        (sessionItemValue right)
+    if same
+      then Right (EQ, sameSession)
+      else
+        evaluateSessionOrderingCompare
+          depth
+          function
+          sameSession
+          (sessionItemValue left)
+          (sessionItemValue right)
+
+evaluateSessionOrderedQ
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionOrderedQ depth session = \case
+  [subject, function] -> case sessionOrderedCollection subject of
+    Nothing -> sessionFailure session "OrderedQ expects a nonatomic expression."
+    Just collection ->
+      checkPairs session (map sessionItemValue (sessionCollectionItems collection))
+   where
+    checkPairs current (left : right : remaining) = do
+      (outcome, updated) <-
+        evaluateSessionCallable depth current function [left, right]
+      if outcome == Symbol "True"
+        then checkPairs updated (right : remaining)
+        else Right (Symbol "False", updated)
+    checkPairs current _ = Right (Symbol "True", current)
+  _ -> sessionFailure session "OrderedQ expects one or two arguments."
 
 evaluateSessionSortBy
   :: Bool
@@ -4547,9 +7424,8 @@ evaluateSessionSortBy reverseMode depth session values =
     case sessionOrderedCollection subject of
       Nothing -> sessionFailure session "SortBy expects a nonatomic expression."
       Just collection -> do
-        let (keyFunctions, keySpecIsList) = case functions of
-              Call (Symbol "List") functionList -> (functionList, True)
-              _ -> ([functions], False)
+        let (keyFunctions, keySpecIsList) =
+              sessionOrderingKeyFunctions functions
         (decorated, keySession) <-
           decorateSessionItems
             depth
@@ -4573,6 +7449,242 @@ evaluateSessionSortBy reverseMode depth session values =
               (map decoratedSessionItem sorted)
           , updated
           )
+
+evaluateSessionOrderingBy
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionOrderingBy depth session values =
+  case splitSessionSameTestOptions "OrderingBy" values of
+    P.Left message -> sessionFailure session message
+    P.Right (orderingArguments, sameTest) -> case orderingArguments of
+      [_]
+        | sameTest == Nothing ->
+            Right (Call (Symbol "OrderingBy") values, session)
+      [subject, functions] ->
+        orderSubject subject functions Nothing Nothing sameTest
+      [subject, functions, count] ->
+        orderSubject subject functions (Just count) Nothing sameTest
+      [subject, functions, count, orderingFunction] ->
+        orderSubject
+          subject
+          functions
+          (Just count)
+          (Just orderingFunction)
+          sameTest
+      _ ->
+        sessionFailure
+          session
+          "OrderingBy expects an expression, functions, optional count, optional ordering function, and optional SameTest rule."
+ where
+  orderSubject subject functions count orderingFunction sameTest =
+    case sessionOrderedCollection subject of
+      Nothing ->
+        sessionFailure session "OrderingBy expects a nonatomic expression."
+      Just collection -> do
+        let (keyFunctions, keySpecIsList) =
+              sessionOrderingKeyFunctions functions
+        (decorated, keySession) <-
+          decorateSessionItems
+            depth
+            keyFunctions
+            session
+            (sessionCollectionItems collection)
+        (sorted, sortedSession) <-
+          pythonStableSortByStateM
+            ( compareDecoratedSessionItems
+                False
+                keySpecIsList
+                depth
+                orderingFunction
+                sameTest
+            )
+            keySession
+            decorated
+        case sliceSessionOrderingCount count sorted of
+          P.Left message -> sessionFailure sortedSession message
+          P.Right selected ->
+            Right
+              ( evaluatedList
+                  ( map
+                      ( Integer
+                          . sessionItemIndex
+                          . decoratedSessionItem
+                      )
+                      selected
+                  )
+              , sortedSession
+              )
+
+evaluateSessionExtremeBy
+  :: Bool
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionExtremeBy maximal depth session values =
+  case values of
+    [_] -> Right (Call (Symbol operation) values, session)
+    [subject, functions] ->
+      selectSubject subject functions Nothing Nothing
+    [subject, functions, count] ->
+      selectSubject subject functions (Just count) Nothing
+    [subject, functions, count, orderingFunction] ->
+      selectSubject
+        subject
+        functions
+        (Just count)
+        (Just orderingFunction)
+    _ ->
+      sessionFailure
+        session
+        ( operation
+            <> " expects data, a function specification, optional count, and optional ordering function."
+        )
+ where
+  operation = if maximal then "MaximalBy" else "MinimalBy"
+
+  selectSubject subject functions count orderingFunction =
+    case sessionOrderedCollection subject of
+      Nothing ->
+        sessionFailure
+          session
+          (operation <> " expects a nonatomic expression.")
+      Just collection -> do
+        let (keyFunctions, _) = sessionOrderingKeyFunctions functions
+        (decorated, keySession) <-
+          decorateSessionItems
+            depth
+            keyFunctions
+            session
+            (sessionCollectionItems collection)
+        case decorated of
+          [] ->
+            Right (rebuildSessionCollection collection [], keySession)
+          first : rest -> case count of
+            Nothing -> do
+              (selected, updated) <-
+                selectTiedExtrema
+                  orderingFunction
+                  first
+                  [first]
+                  keySession
+                  rest
+              Right
+                ( rebuildSessionCollection
+                    collection
+                    (map decoratedSessionItem selected)
+                , updated
+                )
+            Just countExpression -> do
+              (sorted, sortedSession) <-
+                pythonStableSortByStateM
+                  ( compareDecoratedSessionItems
+                      maximal
+                      True
+                      depth
+                      orderingFunction
+                      Nothing
+                  )
+                  keySession
+                  decorated
+              case sliceSessionExtremeCount operation countExpression sorted of
+                P.Left message -> sessionFailure sortedSession message
+                P.Right selected ->
+                  Right
+                    ( rebuildSessionCollection
+                        collection
+                        (map decoratedSessionItem selected)
+                    , sortedSession
+                    )
+
+  selectTiedExtrema _ _ retained currentSession [] =
+    Right (retained, currentSession)
+  selectTiedExtrema
+    orderingFunction
+    best
+    retained
+    currentSession
+    (item : rest) = do
+      (ordering, updated) <-
+        compareDecoratedSessionItems
+          False
+          True
+          depth
+          orderingFunction
+          Nothing
+          currentSession
+          item
+          best
+      if ordering == preferredOrdering
+        then
+          selectTiedExtrema
+            orderingFunction
+            item
+            [item]
+            updated
+            rest
+        else
+          selectTiedExtrema
+            orderingFunction
+            best
+            (if ordering == EQ then retained <> [item] else retained)
+            updated
+            rest
+
+  preferredOrdering = if maximal then GT else LT
+
+sessionOrderingKeyFunctions :: Expr -> ([Expr], Bool)
+sessionOrderingKeyFunctions = \case
+  Call (Symbol listHead) functions
+    | isSessionSystemHead "List" listHead -> (functions, True)
+  function -> ([function], False)
+
+sliceSessionOrderingCount
+  :: Maybe Expr
+  -> [value]
+  -> Either Text [value]
+sliceSessionOrderingCount count values = case count of
+  Nothing -> P.Right values
+  Just (Symbol "All") -> P.Right values
+  Just (Integer amount)
+    | amount >= 0 -> P.Right (takeSessionInteger amount values)
+    | negate amount > toInteger (length values) -> P.Right values
+    | otherwise ->
+        P.Right
+          ( drop
+              (length values - fromInteger (negate amount))
+              values
+          )
+  Just _ -> P.Left "OrderingBy expects an integer or All count."
+
+sliceSessionExtremeCount
+  :: Text
+  -> Expr
+  -> [value]
+  -> Either Text [value]
+sliceSessionExtremeCount operation count values = case count of
+  Symbol "All" -> P.Right values
+  Integer amount
+    | amount < 0 ->
+        P.Left (operation <> " expects a non-negative count.")
+    | otherwise -> P.Right (takeSessionInteger amount values)
+  Call (Symbol upToHead) [Integer amount]
+    | isSessionSystemHead "UpTo" upToHead ->
+        P.Right (takeSessionInteger (max 0 amount) values)
+  Call (Symbol upToHead) [_]
+    | isSessionSystemHead "UpTo" upToHead ->
+        P.Left (operation <> " expects UpTo[n] with an integer n.")
+  _ ->
+    P.Left
+      (operation <> " expects an integer, UpTo[n], or All count.")
+
+takeSessionInteger :: Integer -> [value] -> [value]
+takeSessionInteger amount values
+  | amount <= 0 = []
+  | amount >= toInteger (length values) = values
+  | otherwise = take (fromInteger amount) values
 
 decorateSessionItems
   :: Int
@@ -6174,6 +9286,56 @@ evaluateSessionDefinitionValues headName selectDefinitions session = \case
       , downValueBody definition
       ]
 
+sessionHistorySymbolName :: Text -> Maybe Text
+sessionHistorySymbolName name
+  | isSessionSystemHead "In" name = Just "In"
+  | isSessionSystemHead "InString" name = Just "InString"
+  | isSessionSystemHead "Out" name = Just "Out"
+  | otherwise = Nothing
+
+evaluateSessionHistoryDownValues
+  :: Text
+  -> EvaluationSession
+  -> SessionResult Expr
+evaluateSessionHistoryDownValues headName session =
+  Right (evaluatedList (map historyRule historyValues), session)
+ where
+  historyValues = case headName of
+    "In" -> Map.toAscList (sessionInputHistory session)
+    "InString" ->
+      [ (index, String source)
+      | (index, source) <- Map.toAscList (sessionInputStringHistory session)
+      ]
+    "Out" -> Map.toAscList (sessionOutputHistory session)
+    _ -> []
+  historyRule (index, value) =
+    Call
+      (Symbol "RuleDelayed")
+      [ Call (Symbol "HoldPattern") [Call (Symbol headName) [Integer index]]
+      , value
+      ]
+
+evaluateSessionExit
+  :: Expr
+  -> Text
+  -> Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionExit original _ depth session = \case
+  [] -> Right (original, session)
+  [argument] -> do
+    (evaluatedArgument, updated) <- evaluateSessionAt (depth + 1) session argument
+    case evaluatedArgument of
+      Integer _ -> Right (original, updated)
+      _ -> invalid updated
+  _ -> invalid session
+ where
+  invalid current =
+    recoverEvaluationFailure
+      original
+      (sessionFailure current "Exit and Quit expect an optional integer exit code.")
+
 evaluateSessionAttributes
   :: Int
   -> EvaluationSession
@@ -7296,6 +10458,72 @@ evaluateSessionConfirmMatch depth session arguments'
   | otherwise =
       sessionFailure session "ConfirmMatch expects two, three, or four arguments."
 
+evaluateSessionConfirmAssert
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionConfirmAssert depth session arguments'
+  | length arguments' `notElem` [1, 2, 3] =
+      sessionFailure
+        session
+        "ConfirmAssert expects one, two, or three arguments."
+  | testExpression : _ <- arguments' = do
+      (testResult, testedSession) <-
+        evaluateSessionAt (depth + 1) session testExpression
+      if testResult == Symbol "True"
+        then Right (Symbol "Null", testedSession)
+        else do
+          (information, informationSession) <-
+            evaluateConfirmationInformation depth testedSession arguments' 1
+          (tag, taggedSession) <-
+            evaluateConfirmationTag depth informationSession arguments' 2
+          raiseSessionConfirmation
+            depth
+            taggedSession
+            ( sessionConfirmationFailure
+                "ConfirmAssert"
+                testResult
+                information
+                [("Test", testResult)]
+            )
+            tag
+  | otherwise =
+      sessionFailure
+        session
+        "ConfirmAssert expects one, two, or three arguments."
+
+evaluateSessionAssert
+  :: Int
+  -> EvaluationSession
+  -> [Expr]
+  -> SessionResult Expr
+evaluateSessionAssert depth session arguments'
+  | length arguments' `notElem` [1, 2] =
+      sessionFailure session "Assert expects one or two arguments."
+  | not (sessionAssertEnabled session) =
+      Right (Call (Symbol "Assert") arguments', session)
+  | testExpression : _ <- arguments' = do
+      (testResult, testedSession) <-
+        evaluateSessionAt (depth + 1) session testExpression
+      if testResult == Symbol "True"
+        then Right (Symbol "Null", testedSession)
+        else do
+          (tag, taggedSession) <- case drop 1 arguments' of
+            tagExpression : _ ->
+              evaluateSessionAt (depth + 1) testedSession tagExpression
+            [] -> Right (Symbol "Null", testedSession)
+          appendSessionMessageInsertions
+            depth
+            taggedSession
+            ( Call
+                (Symbol "MessageName")
+                [Symbol "Assert", String "asrtfl"]
+            )
+            [testResult, tag]
+  | otherwise =
+      sessionFailure session "Assert expects one or two arguments."
+
 evaluateConfirmationInformation
   :: Int
   -> EvaluationSession
@@ -7378,7 +10606,10 @@ evaluateSessionModule depth session = \case
   [Call (Symbol listHead) [], body]
     | isSessionSystemHead "List" listHead ->
         evaluateTargetedReturn "Module" depth session body
-  originalArguments@[Call (Symbol listHead) bindingExpressions, body]
+  [Call (Symbol listHead) bindingExpressions, body]
+    | isSessionSystemHead "List" listHead
+    , Just duplicate <- duplicateBindingName bindingExpressions ->
+        sessionFailure session ("Module has duplicate binding for '" <> duplicate <> "'.")
     | isSessionSystemHead "List" listHead
     , Just bindings <- parseModuleBindings bindingExpressions -> do
         let nextCounter = sessionModuleCounter session + 1
@@ -7394,7 +10625,9 @@ evaluateSessionModule depth session = \case
         let renamedBody = renameBoundSymbols renameMap body
         evaluateTargetedReturn "Module" depth bodySession renamedBody
     | otherwise ->
-        Right (Call (Symbol "Module") originalArguments, session)
+        sessionFailure session "Module expects valid symbol locals in its first argument."
+  [_, _] ->
+    sessionFailure session "Module expects a List of locals as its first argument."
   arguments' -> Right (Call (Symbol "Module") arguments', session)
 
 evaluateSessionWith
@@ -7406,19 +10639,25 @@ evaluateSessionWith depth session = \case
   [Call (Symbol listHead) [], body]
     | isSessionSystemHead "List" listHead ->
         evaluateSessionAt (depth + 1) session body
-  originalArguments@[Call (Symbol listHead) bindingExpressions, body]
+  [Call (Symbol listHead) bindingExpressions, body]
     | isSessionSystemHead "List" listHead ->
         inspectRuntimeResult
           (collectWithBindings depth session Set.empty Map.empty bindingExpressions)
           $ \case
           P.Left evaluationExit -> Left evaluationExit
           P.Right (Nothing, updated) ->
-            Right (Call (Symbol "With") originalArguments, updated)
+            case duplicateBindingName bindingExpressions of
+              Just duplicate ->
+                sessionFailure updated ("With has duplicate binding for '" <> duplicate <> "'.")
+              Nothing ->
+                sessionFailure updated "With expects valid symbol bindings in its first argument."
           P.Right (Just substitutions, updated) ->
             evaluateSessionAt
               (depth + 1)
               updated
               (substituteNamedSymbols substitutions body)
+  [_, _] ->
+    sessionFailure session "With expects a List of bindings as its first argument."
   arguments' -> Right (Call (Symbol "With") arguments', session)
 
 collectWithBindings
@@ -7471,7 +10710,10 @@ evaluateSessionBlock headName depth session = \case
   [Call (Symbol listHead) [], body]
     | isSessionSystemHead "List" listHead ->
         evaluateTargetedReturn (blockReturnTarget headName) depth session body
-  originalArguments@[Call (Symbol listHead) bindingExpressions, body]
+  [Call (Symbol listHead) bindingExpressions, body]
+    | isSessionSystemHead "List" listHead
+    , Just duplicate <- duplicateBindingName bindingExpressions ->
+        sessionFailure session ("Block has duplicate binding for '" <> duplicate <> "'.")
     | isSessionSystemHead "List" listHead
     , Just bindings <- parseBlockBindings bindingExpressions ->
         let snapshots =
@@ -7488,8 +10730,26 @@ evaluateSessionBlock headName depth session = \case
                 body
          in restoreScopedResult snapshots scopedResult
     | otherwise ->
-        Right (Call (Symbol headName) originalArguments, session)
+        sessionFailure session "Block expects valid symbol locals in its first argument."
+  [_, _] ->
+    sessionFailure session "Block expects a List of locals as its first argument."
   arguments' -> Right (Call (Symbol headName) arguments', session)
+
+duplicateBindingName :: [Expr] -> Maybe Text
+duplicateBindingName = go Set.empty
+ where
+  go _ [] = Nothing
+  go seen (binding : rest) = case localBindingName binding of
+    Just name
+      | Set.member name seen -> Just name
+      | otherwise -> go (Set.insert name seen) rest
+    Nothing -> go seen rest
+  localBindingName = \case
+    Symbol name -> Just name
+    Call (Symbol setHead) [Symbol name, _]
+      | isSessionSystemHead "Set" setHead
+          || isSessionSystemHead "SetDelayed" setHead -> Just name
+    _ -> Nothing
 
 blockReturnTarget :: Text -> Text
 blockReturnTarget "Internal`InheritedBlock" = "InheritedBlock"
@@ -7677,11 +10937,11 @@ evaluateSessionTable depth session arguments' = case arguments' of
   body : iteratorSpecs@(_ : _) ->
     inspectRuntimeResult (tableLoop depth session body iteratorSpecs) $ \case
       P.Left (InvalidIterator updated) ->
-        Right (Call (Symbol "Table") arguments', updated)
+        sessionFailure updated (iteratorFailureMessage "Table" iteratorSpecs)
       P.Left (IterationEvaluationFailure evaluationExit) ->
         Left evaluationExit
       P.Right result -> Right result
-  _ -> Right (Call (Symbol "Table") arguments', session)
+  _ -> sessionFailure session "Table expects a body and at least one iterator specification."
 
 evaluateSessionDo
   :: Int
@@ -7810,7 +11070,8 @@ evaluateSessionAccumulator headName accumulatorHead depth session arguments' =
           inspectRuntimeResult
             (flatIterationLoop True depth session body iteratorSpecs)
             $ \case
-            P.Left (InvalidIterator updated) -> inert updated
+            P.Left (InvalidIterator updated) ->
+              sessionFailure updated (iteratorFailureMessage headName iteratorSpecs)
             P.Left (IterationEvaluationFailure evaluationExit) ->
               Left evaluationExit
             P.Right (terms, updated) ->
@@ -7821,9 +11082,22 @@ evaluateSessionAccumulator headName accumulatorHead depth session arguments' =
                     (Symbol accumulatorHead)
                     (accumulatorArguments accumulatorHead terms)
                 )
-    _ -> inert session
+      | otherwise ->
+          sessionFailure session (headName <> " iterator specification must be a List.")
+    _ ->
+      sessionFailure session (headName <> " expects a body and at least one iterator specification.")
+iteratorFailureMessage :: Text -> [Expr] -> Text
+iteratorFailureMessage headName specifications
+  | any hasZeroStep specifications = "Iterator step must be a nonzero real number."
+  | otherwise = headName <> " received an invalid iterator specification."
  where
-  inert updated = Right (Call (Symbol headName) arguments', updated)
+  hasZeroStep = \case
+    Call (Symbol listHead) [_, _, _, step]
+      | isSessionSystemHead "List" listHead -> exactIteratorZero step
+    _ -> False
+  exactIteratorZero (Integer 0) = True
+  exactIteratorZero (Rational 0 _) = True
+  exactIteratorZero _ = False
 
 flatIterationLoop
   :: Bool
@@ -8117,7 +11391,10 @@ evaluateSessionIf depth session = \case
       Symbol "False" -> case remaining of
         falseBranch : _ -> evaluateSessionAt (depth + 1) updated falseBranch
         [] -> Right (Symbol "Null", updated)
-      _ -> Right (Call (Symbol "If") (evaluatedCondition : trueBranch : remaining), updated)
+      _ -> case remaining of
+        _falseBranch : unknownBranch : _ ->
+          evaluateSessionAt (depth + 1) updated unknownBranch
+        _ -> Right (Call (Symbol "If") (evaluatedCondition : trueBranch : remaining), updated)
   arguments' -> Right (Call (Symbol "If") arguments', session)
 
 evaluateSessionWhich
@@ -8592,7 +11869,38 @@ normalizeSessionSequenceCall expressionHead values =
 stripSessionTransparentUnevaluatedArguments :: Expr -> [Expr] -> [Expr]
 stripSessionTransparentUnevaluatedArguments expressionHead
   | sessionHeadExpressionIsAny
-      ["Composition", "Plus", "RightComposition"]
+      [ "Composition"
+      , "Head"
+      , "Length"
+      , "Part"
+      , "Accuracy"
+      , "BlockMap"
+      , "ExactNumberQ"
+      , "FlattenAt"
+      , "InexactNumberQ"
+      , "MachineIntegerQ"
+      , "MachineNumberQ"
+      , "MapIndexed"
+      , "MapThread"
+      , "MaximalBy"
+      , "MinimalBy"
+      , "NumberQ"
+      , "N"
+      , "OrderingBy"
+      , "Outer"
+      , "Plus"
+      , "Precision"
+      , "RandomSample"
+      , "SetAccuracy"
+      , "SetPrecision"
+      , "RealValuedNumberQ"
+      , "RightComposition"
+      , "Scan"
+      , "Operate"
+      , "Thread"
+      , "Through"
+      , "Tr"
+      ]
       expressionHead =
       map stripSessionDirectUnevaluated
   | otherwise = id
@@ -8910,18 +12218,40 @@ appendSessionMessage :: Expr -> Text -> EvaluationSession -> EvaluationSession
 appendSessionMessage fullName messageText session =
   if sessionMessageIsDisabled fullName attempted
     then attempted
-    else case suppressedDepth of
-      Nothing ->
-        recorded
-          { sessionVisibleMessages =
-              sessionVisibleMessages recorded <> [message]
-          }
-      Just _ -> recorded
+    else recordEnabledSessionMessage fullName messageText attempted
  where
   attempted =
     session
       { sessionMessageAttemptCount = sessionMessageAttemptCount session + 1
       }
+
+appendEnabledSessionMessage
+  :: Expr
+  -> Text
+  -> EvaluationSession
+  -> EvaluationSession
+appendEnabledSessionMessage fullName messageText session =
+  recordEnabledSessionMessage fullName messageText attempted
+ where
+  attempted =
+    session
+      { sessionMessageAttemptCount = sessionMessageAttemptCount session + 1
+      }
+
+recordEnabledSessionMessage
+  :: Expr
+  -> Text
+  -> EvaluationSession
+  -> EvaluationSession
+recordEnabledSessionMessage fullName messageText attempted =
+  case suppressedDepth of
+    Nothing ->
+      recorded
+        { sessionVisibleMessages =
+            sessionVisibleMessages recorded <> [message]
+        }
+    Just _ -> recorded
+ where
   suppressedDepth =
     quietSuppressionDepth fullName (sessionQuietScopes attempted)
   recorded =
@@ -9321,6 +12651,12 @@ currentSpecialSessionSettingValue name session =
     Just (ImmediateValue value) -> value
     Just (DelayedValue value) -> value
     Nothing -> maybe (Symbol name) id (lookup name specialSessionSettingDefaults)
+
+sessionHistoryLengthLimit :: EvaluationSession -> Maybe Integer
+sessionHistoryLengthLimit session =
+  case currentSpecialSessionSettingValue "$HistoryLength" session of
+    Integer value -> Just value
+    _ -> Nothing
 
 appendSpecialSettingLimitMessage
   :: Text

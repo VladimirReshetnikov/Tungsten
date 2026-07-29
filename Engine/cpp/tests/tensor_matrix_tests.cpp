@@ -91,6 +91,11 @@ void contraction_tests() {
 void sparse_product_tests() {
   check_case("Dot[SparseArray[{{1}->a},{3}],SparseArray[{{1}->b},{3}]]",
              "Times[a, b]");
+  check_case("Dot[SparseArray[{{18446744073709551616}->a},"
+             "{18446744073709551616}],"
+             "SparseArray[{{18446744073709551616}->b},"
+             "{18446744073709551616}]]",
+             "Times[a, b]");
   check_case("Dot[SparseArray[{{1,2}->a},{2,3}],"
              "SparseArray[{{2,1}->b},{3,2}]]",
              "SparseArray[List[Rule[List[1, 1], Times[a, b]]], List[2, 2]]");
@@ -114,6 +119,17 @@ void trace_tests() {
   check_case("Tr[{{1,2},{3,4}},Times,1]", "List[3, 8]");
   check_case("Tr[{{{1,2},{3,4}},{{5,6},{7,8}}},Plus,2]", "List[16, 20]");
   check_case("Tr[{{{1,2},{3,4}},{{5,6},{7,8}}},Times,2]", "List[105, 384]");
+  check_case(
+      "Tr[{{a,b},{c}},Cross,1]", "Cross[List[a, b], List[c]]",
+      {"Cross::error: Cross currently supports pairs of 2D or 3D vectors.",
+       "Cross::error: Cross currently supports pairs of 2D or 3D vectors."});
+  check_case("Tr[{{a,b},{c}},Det,1]", "Det[List[a, b], List[c]]",
+             {"Det::error: Det expects exactly one matrix argument.",
+              "Det::error: Det expects exactly one matrix argument."});
+  check_case("Tr[{{a,b},{c}},Inverse,1]",
+             "Inverse[List[a, b], List[c]]",
+             {"Inverse::error: Inverse expects exactly one matrix argument.",
+              "Inverse::error: Inverse expects exactly one matrix argument."});
   check_case("Tr[{{a,b},{c}},Plus,1]", "Plus[List[a, b], List[c]]",
              {"Plus::error: Listable Function arguments have incompatible list "
               "lengths."});

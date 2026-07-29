@@ -38,6 +38,324 @@ CASES = (
     ),
     ("evaluation success", ("expr", "evaluate", "--code", "1 + 2", "--form", "input"), 0),
     (
+        "numeric constructor evaluation and isolation",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Rational[2,4], Rational[4,2], Rational[0,0], Rational[1,0], "
+            "Rational[x,2], Complex[1,0], Complex[1,0.], Complex[1.,2], "
+            "Complex[1,2.], Complex[x,0], System`Rational[2,4], "
+            "Global`Rational[2+2,4], System`Complex[1,2.], "
+            "Global`Complex[1+1,0], Head[Rational[1,2]], "
+            "AtomQ[Rational[1,2]], Length[Rational[1,2]], $MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "numeric predicates and symbolic bridge",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{{NumericQ[0],ExactNumberQ[1/2],InexactNumberQ[1.],"
+            "MachineIntegerQ[2^63-1],MachineIntegerQ[2^63],"
+            "MachineNumberQ[1.+2.I],RealValuedNumberQ[1.+2.I]},"
+            "{NumericQ[Pi],ExactNumberQ[I Pi],RealValuedNumberQ[Sin[1]],"
+            "NumericQ[Sin[x]],NumericQ[Root[#^2-2&,1]],"
+            "RealValuedNumberQ[Root[#^2+1&,1]]},"
+            "{NumericQ[Overflow[]],InexactNumberQ[Underflow[]],"
+            "ExactNumberQ[Unevaluated[Pi]],NumericQ[Unevaluated[Pi]],"
+            "System`TrueQ[True],Global`NumericQ[1+1],$MessageList}}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "special real atoms, contexts, projections, and textual forms",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Head[Overflow[]],AtomQ[Overflow[]],NumberQ[Overflow[]],"
+            "System`Overflow[],Global`Overflow[],Overflow[1],"
+            "Head[Underflow[]],AtomQ[Underflow[]],NumberQ[Underflow[]],"
+            "System`Underflow[],Global`Underflow[],Underflow[1],"
+            "Complex[Overflow[],Underflow[]],"
+            "Arg[Complex[Overflow[],1]],"
+            "ToString[CForm[Overflow[]]],"
+            "ToString[MathMLForm[Underflow[]]],ToBoxes[Overflow[]],"
+            "$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "precision and accuracy metadata, effects, and contexts",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenPrecisionCliI];tungstenPrecisionCliI=0;"
+            "{Precision[1.23``20],Accuracy[1.23`20],"
+            "Precision[Complex[1.,2`20]],"
+            "Accuracy[Complex[1.,2``20]],"
+            "Precision[f[Overflow[],Underflow[]]],"
+            "Accuracy[f[Overflow[],Underflow[]]],"
+            "Precision[(tungstenPrecisionCliI++;1),"
+            "(tungstenPrecisionCliI++;2)],tungstenPrecisionCliI,"
+            "System`Precision[1.],Global`Accuracy[1.],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "numeric precision conversion constants roots state and contexts",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenNumericPrecisionCliI];"
+            "tungstenNumericPrecisionCliI=0;"
+            "{N[Pi,20],N[Gudermannian[1],30],"
+            "N[Root[#^3-2&,1],30],SetPrecision[1/3,20],"
+            "SetAccuracy[1/3,20],"
+            "N[Exp[-1000],20],"
+            "N[Exp[Complex[0,1/10^400]],50],"
+            "Sin[1.2],Coth[0.],"
+            "N[(tungstenNumericPrecisionCliI++;Pi),"
+            "(tungstenNumericPrecisionCliI++;20)],"
+            "tungstenNumericPrecisionCliI,System`N[Pi,20],"
+            "Global`N[Pi,20],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "collect exponent callbacks and ComplexExpand qualification",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenPolynomialCliI,tungstenPolynomialCliK];"
+            "tungstenPolynomialCliI=0;"
+            "tungstenPolynomialCliK[z_]:=(tungstenPolynomialCliI++;"
+            "q[tungstenPolynomialCliI,z]);"
+            "{Collect[a x^2+b x+c,x,tungstenPolynomialCliK],"
+            "Exponent[x^3+x+1,x,List],tungstenPolynomialCliI,"
+            "System`Collect[a x+b,x],Global`Collect[a x+b,x],"
+            "System`Exponent[x^2+x+1,x],"
+            "Global`Exponent[x^2+x+1,x],"
+            "System`ComplexExpand[1+I],"
+            "Global`ComplexExpand[1+I],ComplexExpand[1+I,x],"
+            "$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "exact complex transcendentals and session re-entry",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "Unprotect[Cos];Cos[z_]:=q;"
+            "{Exp[1+I],Sin[1+I],Cos[1+I],Tan[1+I],"
+            "Sinh[1+I],Cosh[1+I],Tanh[1+I],Log[1+I],"
+            "ComplexExpand[Tan[1+I]],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "structural Distribute products and raw replacement heads",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenDistributeH,tungstenDistributeK];"
+            "tungstenDistributeH[x_]:=p[x];"
+            "tungstenDistributeK[x___]:=q[x];"
+            "{Distribute[(a+b)(c+d)],"
+            "Distribute[f[g[a,b],g[c,d]],g,f,h,k],"
+            "Distribute[f[g[],x],g],"
+            "Distribute[f[g[1+1,3]],g,f,Plus,Times],"
+            "Distribute[f[g[a,b],g[c]],g,f,"
+            "tungstenDistributeH,tungstenDistributeK],"
+            "System`Distribute[(a+b)(c+d)],"
+            "Global`Distribute[(a+b)(c+d)],Distribute[],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "stateful Inner callbacks and validation boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenInnerI,tungstenInnerF,tungstenInnerG];"
+            "tungstenInnerI=0;"
+            "tungstenInnerF[x_,y_]:=(tungstenInnerI++;"
+            "p[tungstenInnerI,x,y]);"
+            "tungstenInnerG[x__]:=(tungstenInnerI++;"
+            "q[tungstenInnerI,x]);"
+            "{Inner[Times,{a,b},{c,d},Plus],"
+            "Inner[tungstenInnerF,{a,b},{c,d},tungstenInnerG],"
+            "tungstenInnerI,Inner[f,{}, {},g],"
+            "System`Inner[Times,{a,b},{c,d},Plus],"
+            "Global`Inner[Times,{a,b},{c,d},Plus],"
+            "Inner[f,{a},{b,c},g],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "stateful Outer traversal levels and rebuild boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenOuterI,tungstenOuterF];"
+            "tungstenOuterI=0;"
+            "tungstenOuterF[x__]:=(tungstenOuterI++;"
+            "p[tungstenOuterI,x]);"
+            "{Outer[f,{a,b},{x,y}],"
+            "Outer[tungstenOuterF,{a,b},{x,y}],tungstenOuterI,"
+            "Outer[f,a+b,{c,d},1],"
+            "Outer[f,{{a,b},{c}},{{x},{y,z}},1,2],"
+            "Outer[f,{a,b},1,2],Outer[Nothing,{a,b}],"
+            "Outer[Nothing,System`List[a,b]],"
+            "System`Outer[f,{a},{b}],Global`Outer[f,{a},{b}],"
+            "Outer[f,{a},x],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "stateful Through callbacks associations and rebuild boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenThroughI,tungstenThroughF];"
+            "tungstenThroughI=0;"
+            "tungstenThroughF[x__]:=(tungstenThroughI++;"
+            "p[tungstenThroughI,x]);"
+            "{Through[(f+g)[x,y]],"
+            "Through[Unevaluated[q[tungstenThroughF,tungstenThroughF][a,b]]],"
+            "tungstenThroughI,"
+            "Through[Unevaluated[(Identity+Identity)[1]]],"
+            "Through[Unevaluated[<|a->f,b:>g|>[x,y]]],"
+            "Through[Unevaluated[{(Sequence[#,#]&),f}[x]]],"
+            "Through[(f+g)[x],List],Through[x,1],"
+            "System`Through[Unevaluated[(f+g)[x]]],"
+            "Global`Through[Unevaluated[(f+g)[x]]],"
+            "Through[],Through[f[x],1],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "dense sparse and rank-restricted Tr parity",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenTrI,tungstenTrF,tungstenTrA,tungstenTrB];"
+            "tungstenTrI=0;"
+            "tungstenTrF[x__]:=(tungstenTrI++;p[tungstenTrI,x]);"
+            "tungstenTrA[]:=(tungstenTrI++;{a});"
+            "tungstenTrB[]:=(tungstenTrI++;{b,c});"
+            "{Tr[{{a,b},{c,d}}],"
+            "Tr[{{a,b},{c,d}},tungstenTrF],tungstenTrI,"
+            "Tr[{{{a,b},{c,d}},{{e,f},{g,h}}},tungstenTrF,2],"
+            "tungstenTrI,Tr[SparseArray[{{2}->a},{4}],Plus],"
+            "Tr[SparseArray[{{1,1}->a},{3,3}],Times],"
+            "Tr[SparseArray[{{1,1}->a},{3,3},z],f],"
+            "Tr[Unevaluated[{{1+1,x},{y,3+1}}],HoldComplete],"
+            "System`Tr[Unevaluated[{{1+1,b},{c,3+1}}]],"
+            "Global`Tr[Unevaluated[{{1+1,b},{c,3+1}}]],"
+            "Tr[{{{a}},{{b,c}}},Times,1],"
+            "Tr[Unevaluated[{Sequence[{a},{b,c}]}],Times,1],"
+            "Tr[Unevaluated[{Splice[{System`List[a],System`List[b,c]},System`Times]}],System`Times,1],"
+            "Tr[Unevaluated[{tungstenTrA[],tungstenTrB[]}],Times,1],"
+            "tungstenTrI,Tr[{a,b},Cross,1],Tr[{a,b},Det,1],"
+            "Tr[{a,b},tungstenTrF,0],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "complex projections and listable threading",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{{Re[3],Im[-1/2],ReIm[-1/2],Arg[0],Arg[-1],Conjugate[-1/2]},"
+            "{Re[I],Im[I],ReIm[I],Arg[I],Arg[-I],Conjugate[I]},"
+            "{Re[1/2-3/4I],Im[1/2-3/4I],ReIm[1/2-3/4I],"
+            "Arg[1/2-3/4I],Conjugate[1/2-3/4I]},"
+            "{Re[1.+2.I],Im[1.+2.I],ReIm[1.+2.I],Arg[1.+2.I],"
+            "Conjugate[1.+2.I]},{Arg[Complex[0,2.]],Arg[Complex[-2.,-0.]],"
+            "Arg[Complex[-3/4,2.5]],Conjugate[Complex[1.,0.]],"
+            "Conjugate[Complex[1.,-0.]]},Re[{1,I,1+I}],"
+            "Arg[{{1,-1},{I,-I}}],"
+            "System`Re[1+2I],Global`Re[1+2I],Re[{1,2},{3}],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "structural Thread and qualification boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[f,y];y=0;f[x_?AtomQ]:=(y=y+1;x);"
+            "{Thread[f[{a,b}]],y,Thread[f[h[a,b],c],h],"
+            "Thread[Unevaluated[g[{a,b}]]],"
+            "System`Thread[Unevaluated[g[{a,b}]]],"
+            "Global`Thread[Unevaluated[g[{a,b}]]],"
+            "Thread[g[{a,b},{c}]],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "stateful Operate and nested head boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[y];y=0;"
+            "{Operate[Function[x,y=y+1;q[x]],f[g][a],2],y,"
+            "Operate[p,f[g][h][x],0],Operate[p,f[g][h][x],3],"
+            "Operate[p,f[g][h][x],4],Operate[p,Unevaluated[f[a]],1],"
+            "System`Operate[p,Unevaluated[f[a]]],"
+            "Global`Operate[p,Unevaluated[f[a]]],"
+            "Operate[p,f[a],-1],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "flat one-identity downvalue",
         (
             "expr",
@@ -912,6 +1230,22 @@ CASES = (
         0,
     ),
     (
+        "historical MessageList active-line dispatch and held boundaries",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[i,ml];i=0;ml=System`MessageList;"
+            "{MessageList[(i++;1),(i++;2)],i,System`MessageList[x],"
+            "Global`MessageList[Print[\"global\"]],"
+            "ml[Print[\"alias\"]],"
+            "MessageList[1][Print[\"operator\"]],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
         "message suppression general tags and reactivation",
         (
             "expr",
@@ -1473,6 +1807,60 @@ CASES = (
             '{first, second, malformed, '
             'ConfirmQuiet[Failure["x", <||>]], FailWhen[1, True], '
             'System`Enclose[System`Confirm[$Failed], "Expression"]}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "confirm assert and assertion state effects and messages",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'first=Enclose[ConfirmAssert[True]];'
+            'second=Enclose[ConfirmAssert[False,info],"Test"];'
+            'third=Enclose[ConfirmAssert[(Print["test"];False),'
+            '(Print["info"];info),(Print["tag"];tag)],'
+            '(Print["handler"];"Information"),tag];'
+            'disabled=System`Assert[Print["held"];False];'
+            'On[System`Assert];'
+            'success=Assert[(Print["true-test"];True),'
+            '(Print["skipped-tag"];tag)];'
+            'failure=Check[Assert[(Print["false-test"];False),'
+            '(Print["failure-tag"];tag)],caught];'
+            'quieted=Check[Quiet[Assert[False]],missed];'
+            'Off[Assert::asrtfl];silent=Check[Assert[False],missed];'
+            'On[Assert::asrtfl];'
+            'control=Catch[ConfirmAssert[Throw[x],Print["late"]]];'
+            'malformed={ConfirmAssert[],Assert[]};Off[Assert];'
+            '{first,second,third,disabled,success,failure,quieted,silent,'
+            'control,malformed,Global`ConfirmAssert[1+1,2+2],'
+            'Global`Assert[1+1;False],$MessageList}',
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "message pre-print hooks transform insertions and skip disabled messages",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            'i=0;j=0;$MessagePrePrint=Function[x,'
+            '(i++;If[i==1,($MessagePrePrint=FullForm;HoldForm[x]),x])];'
+            'Off[g::tag];Message[g::tag,(j=1;a)];'
+            'Message[f::tag,{a},{b}];'
+            '$MessagePrePrint=Function[x,(Off[h::tag];HoldForm[x])];'
+            'Message[h::tag,c];Message[h::tag,d];'
+            '$MessagePrePrint=OutputForm;'
+            'Message[output::tag,1+2 I,a[b]];'
+            '$MessagePrePrint=CForm;'
+            'Message[cform::tag,1+2 I,a[b]];'
+            'asserted=(On[Assert];$MessagePrePrint=HoldForm;'
+            'Check[Assert[False,1+1],caught]);'
+            '{i,j,asserted,$MessagePrePrint,$MessageList}',
             "--form",
             "input",
         ),
@@ -2045,6 +2433,519 @@ CASES = (
             "SequenceCount[{1,2,3}, {x_} /; (i=i+1; EvenQ[x])], "
             "SequenceFold[f,{x0,x1},{a,b,c}], "
             "SequenceFoldList[f,{x0,x1},{a,b,c,d,e},4], i}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "functional iteration and stateful callbacks",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "i=0; j=0; {Construct[# + 1 &, 2], ComposeList[{f,g},x], "
+            "Nest[f,x,2], NestList[f,x,2], "
+            "NestWhile[#+1&,0,#<3&], NestWhileList[#+1&,0,#<3&], "
+            "FixedPoint[# /. a -> b &,a], FixedPointList[# /. a -> b &,a], "
+            "Fold[Plus,{1,2,3}], FoldList[Plus,{1,2,3}], "
+            "FoldWhile[Plus,0,{1,2,3,4},#<4&], "
+            "FoldWhileList[Plus,0,{1,2,3,4},#<4&,1,-1], "
+            "FoldPairList[(i++;{#1+#2,#1-#2})&,10,{1,2,3},(j++;Last[#])&], "
+            "FoldPair[(i++;{#1+#2,#1-#2})&,10,{1,2}], "
+            "Nest[(i++; #+1)&,0,3], "
+            "k=0; l=0; FoldWhileList[(k++;#1+#2)&,0,{1,2,3,4},(l++;#<4)&,1,1], "
+            "i, j, k, l}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "exact polynomial and rational algebra",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Expand[(x+1)^3], Coefficient[2x^2 y+3x y+y,x], "
+            "CoefficientList[x^2+3x+2,x], Together[1/x+1/y], "
+            "Cancel[(x^2-1)/(x-1)], Apart[(x+1)/(x^2-1)], "
+            "Factor[x^2-1], FactorList[2x^2-2], "
+            "PolynomialGCD[x^2-1,x^2-x], PolynomialLCM[x-1,x+1], "
+            "PolynomialQuotient[x^3-1,x-1,x], "
+            "PolynomialRemainder[x^3-1,x-1,x], "
+            "Variables[(x+y)^2+3z], PolynomialQ[1/x,x]}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "comap collections operators and callback state",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "c=0; f[x___]:=(c++;HoldComplete[x]); "
+            "{Comap[{Nothing,f},x], Comap[{f,g}][y], "
+            "ComapApply[{f,g},h[a,b]], ComapApply[{f}][h[d,e]], "
+            "Comap[foo[f,g],z], Comap[<|a->f,b:>g|>,q], "
+            "Comap[u,q], ComapApply[{f,g},atom], "
+            "System`Comap[{f,g}][s], Global`Comap[{f,g}][s], c}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "map all and map apply traversal parity",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "c=0; f[x___]:=(c++;HoldComplete[x]); "
+            "{MapAll[f,g[a,h[b,z]]], MapAll[q,g[a,b],Heads->True], "
+            "MapApply[f,{g[a,b],x,h[z]}], "
+            "MapApply[q,g[a,h[b,d]],{1}], MapApply[q,g[a,h[b,d]],{2}], "
+            "MapAll[q][g[x]], MapApply[q][{g[x,y]}], "
+            "System`MapAll[q][g[x]], Global`MapAll[q][g[x]], c}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "map indexed paths levels operators and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenMapIndexedI,tungstenMapIndexedF];"
+            "tungstenMapIndexedI=0;"
+            "tungstenMapIndexedF[x_,p_]:=(tungstenMapIndexedI++;"
+            "q[tungstenMapIndexedI,x,p]);"
+            "{MapIndexed[tungstenMapIndexedF,h[a,g[b,c]],Infinity],"
+            "tungstenMapIndexedI,"
+            "MapIndexed[Function[{value,path},path],"
+            "<|a->x,b:>g[y]|>,Infinity],"
+            "MapIndexed[q][f[a,g[b]]],System`MapIndexed[q][f[a]],"
+            "Global`MapIndexed[q][f[a]],System`MapIndexed[q,f[a]],"
+            "MapIndexed[q,a,Infinity],MapIndexed[q,f[a],{0}],"
+            "MapIndexed[Nothing&,{a,b}],MapIndexed[q][],"
+            "MapIndexed[q][a,b],MapIndexed[],MapIndexed[q,x,z],"
+            "$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "map thread depths state normalization and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenMapThreadI,tungstenMapThreadF];"
+            "tungstenMapThreadI=0;"
+            "tungstenMapThreadF[x__]:=(tungstenMapThreadI++;"
+            "q[tungstenMapThreadI,x]);"
+            "{MapThread[f,{{a,b},{c,d}}],"
+            "MapThread[f,{{{a,b},{c,d}},{{e,f},{g,h}}},2],"
+            "MapThread[f,{a,b},0],MapThread[f,{},0],"
+            "MapThread[tungstenMapThreadF,"
+            "{{{a},{b,c}},{{d},{e}}},2],tungstenMapThreadI,"
+            "MapThread[Function[{x,y},Nothing],{{a,b},{c,d}}],"
+            "MapThread[Function[{x,y},"
+            "Splice[{p[x,y],q[x,y]},List]],{{a,b},{c,d}}],"
+            "MapThread[Function[{x,y},HoldComplete[x,y]],"
+            "Unevaluated[{{1+1},{2+2}}]],"
+            "System`MapThread[f,Unevaluated[{{1+1},{2+2}}]],"
+            "Global`MapThread[f,Unevaluated[{{1+1},{2+2}}]],"
+            "(tungstenMapThreadI=0;"
+            "Catch[MapThread[(tungstenMapThreadI++;"
+            "If[tungstenMapThreadI==2,Throw[t],"
+            "q[tungstenMapThreadI,##]])&,{{a,b,c},{d,e,f}}]]),"
+            "tungstenMapThreadI,MapThread[],MapThread[f,x],"
+            "MapThread[f,{{a}},z],MapThread[f,{{a}},-1],"
+            "MapThread[f,{{a},b},2],MapThread[f,{{a,b},{c}},1],"
+            "$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "block map windows associations recovery and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenBlockMapI,tungstenBlockMapF,"
+            "tungstenBlockMapSeq,tungstenBlockMapSp];"
+            "tungstenBlockMapI=0;"
+            "tungstenBlockMapF[x_]:=(tungstenBlockMapI++;"
+            "If[tungstenBlockMapI==2,Part[x,99],"
+            "q[tungstenBlockMapI,x]]);"
+            "tungstenBlockMapSeq[x_]:=Sequence[p[x],q[x]];"
+            "tungstenBlockMapSp[x_]:=Splice[{p[x],q[x]},List];"
+            "{BlockMap[f,{a,b,c,d,e},2],"
+            "BlockMap[f,{a,b,c,d,e},2,1],"
+            "BlockMap[f,{a,b,c,d,e,f},2,3],"
+            "BlockMap[f,h[a,b,c,d,e],2],"
+            "BlockMap[HoldComplete,<|a->1,b:>2,c->3,d:>4|>,2,1],"
+            "BlockMap[Function[x,Nothing],{a,b,c,d},2],"
+            "BlockMap[tungstenBlockMapSeq,{a,b,c,d},2],"
+            "BlockMap[tungstenBlockMapSp,{a,b,c,d},2],"
+            "BlockMap[tungstenBlockMapF,{a,b,c,d,e,f},2],"
+            "tungstenBlockMapI,(tungstenBlockMapI=0;"
+            "Catch[BlockMap[(tungstenBlockMapI++;"
+            "If[tungstenBlockMapI==2,Throw[t],"
+            "q[tungstenBlockMapI,#]])&,{a,b,c,d,e,f},2]]),"
+            "tungstenBlockMapI,"
+            "BlockMap[HoldComplete,"
+            "Unevaluated[h[1+1,2+2,3+3,4+4]],2],"
+            "System`BlockMap[HoldComplete,"
+            "Unevaluated[h[1+1,2+2,3+3,4+4]],2],"
+            "Global`BlockMap[HoldComplete,"
+            "Unevaluated[h[1+1,2+2,3+3,4+4]],2],"
+            "BlockMap[],BlockMap[f,x],BlockMap[f,{a},z],"
+            "BlockMap[f,{a},1,z],BlockMap[f,{a},0],"
+            "BlockMap[f,{a},1,-2],BlockMap[f,a,1],"
+            "BlockMap[f,SparseArray[{{1}->a},{2}],1],"
+            "$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "subset map replacement recovery qualification and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenSubsetMapI,tungstenSubsetMapF,"
+            "tungstenSubsetMapGood,tungstenSubsetMapBad,"
+            "tungstenSubsetMapAlias,tungstenSubsetMapBareAlias];"
+            "tungstenSubsetMapI=0;"
+            "tungstenSubsetMapF[x_]:=(tungstenSubsetMapI++;"
+            "Part[f[x],9]);"
+            "tungstenSubsetMapGood[x_]:=(tungstenSubsetMapI++;"
+            "Part[f[x],9];{p});"
+            "tungstenSubsetMapBad[x_]:=(tungstenSubsetMapI++;{p,q});"
+            "tungstenSubsetMapAlias=System`SubsetMap;"
+            "tungstenSubsetMapBareAlias=SubsetMap;"
+            "{SubsetMap[Reverse,{a,b,c,d,e},{1,3,5}],"
+            "SubsetMap[Reverse,{a,b,c,d,e},{{1},{3},{5}}],"
+            "SubsetMap[Reverse,{a,b,c,d,e},{-1,-3}],"
+            "SubsetMap[Function[x,{p,q}],{a,b},{1,1}],"
+            "SubsetMap[Function[x,{}],{a,b},{}],"
+            "SubsetMap[Reverse,System`List[a,b,c],System`List[1,3]],"
+            "(tungstenSubsetMapI=0;"
+            "SubsetMap[tungstenSubsetMapGood,{a,b},{1}]),"
+            "tungstenSubsetMapI,(tungstenSubsetMapI=0;"
+            "SubsetMap[tungstenSubsetMapF,{a,b},{1}]),"
+            "tungstenSubsetMapI,(tungstenSubsetMapI=0;"
+            "SubsetMap[tungstenSubsetMapBad,{a,b},{1}]),"
+            "tungstenSubsetMapI,(tungstenSubsetMapI=0;"
+            "SubsetMap[tungstenSubsetMapGood,{a,b},{3,{1,2}}]),"
+            "tungstenSubsetMapI,(tungstenSubsetMapI=0;"
+            "Catch[SubsetMap[(tungstenSubsetMapI++;Throw[t])&,"
+            "{a,b},{1}]]),tungstenSubsetMapI,"
+            "System`SubsetMap[Reverse,{a,b},{1,2}],"
+            "Global`SubsetMap[Reverse,{a,b},{1,2}],"
+            "tungstenSubsetMapAlias[Reverse,{a,b},{1,2}],"
+            "tungstenSubsetMapBareAlias[Reverse,{a,b},{1,2}],"
+            "(tungstenSubsetMapI=0;"
+            "SubsetMap[(tungstenSubsetMapI++;f),"
+            "(tungstenSubsetMapI++;{a}),"
+            "(tungstenSubsetMapI++;{1}),"
+            "(tungstenSubsetMapI++;z)]),tungstenSubsetMapI,"
+            "(tungstenSubsetMapI=0;"
+            "SubsetMap[f,Unevaluated[(tungstenSubsetMapI++;{a,b})],"
+            "{1}]),tungstenSubsetMapI,"
+            "SubsetMap[],SubsetMap[f,a,{1}],SubsetMap[f,{a},x],"
+            "SubsetMap[f,{a},{{1,2}}],SubsetMap[f,{a},{0}],"
+            "SubsetMap[f,{a},{2}],SubsetMap[First,{a},{1}],"
+            "SubsetMap[Function[x,{p,q}],{a},{1}],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "flatten at traversal recovery qualification and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenFlattenAtI,tungstenFlattenAtSystemAlias,"
+            "tungstenFlattenAtBareAlias];"
+            "tungstenFlattenAtI=0;"
+            "tungstenFlattenAtSystemAlias=System`FlattenAt;"
+            "tungstenFlattenAtBareAlias=FlattenAt;"
+            "{FlattenAt[{x,{a,b},y},2],"
+            "FlattenAt[f[g[a,h[b,c]],d],{1,2}],"
+            "FlattenAt[f[g[a,b],h[c,d],k[e,f]],{{1},{1},{3}}],"
+            "FlattenAt[f[g[a,b],h[c,d],k[e,f]],{{{1,3}}}],"
+            "FlattenAt[f[g[a,b],h[c,d],k[e,f]],{{1;;3;;2}}],"
+            "FlattenAt[f[g[a,b],h[c,d],k[e,f]],{{All}}],"
+            "FlattenAt[f[g[h[a,b],c],k[d,e]],{{1,1},{1}}],"
+            "FlattenAt[f[g[a,b]],{{{}}}],"
+            "FlattenAt[SparseArray[{{2}->g[a,b]},{3}],2],"
+            "FlattenAt[<|a->g[x,y],b:>h[p,q]|>,{{1},{2}}],"
+            "FlattenAt[f[g[a,b],h[c,d],k[e,f]],"
+            "System`List[System`List[System`Span[1,3,2]]]],"
+            "FlattenAt[Unevaluated[HoldComplete[f[Sequence[a,b]]]],1],"
+            "FlattenAt[Unevaluated[System`HoldComplete["
+            "f[Sequence[a,b]]]],1],"
+            "FlattenAt[Unevaluated[List["
+            "f[Nothing,Sequence[a,b]]]],1],"
+            "FlattenAt[Unevaluated[System`List["
+            "f[Nothing,Sequence[a,b]]]],1],"
+            "(tungstenFlattenAtI=0;FlattenAt["
+            "(tungstenFlattenAtI++;f[g[x,y]]),"
+            "(tungstenFlattenAtI++;1),(tungstenFlattenAtI++;z)]),"
+            "tungstenFlattenAtI,"
+            "(tungstenFlattenAtI=0;FlattenAt[Unevaluated["
+            "(tungstenFlattenAtI++;f[g[1+1,2+2]])],Unevaluated["
+            "(tungstenFlattenAtI++;1)]]),tungstenFlattenAtI,"
+            "(tungstenFlattenAtI=0;FlattenAt[Evaluate[Unevaluated["
+            "(tungstenFlattenAtI++;f[g[x,y]])]],1]),"
+            "tungstenFlattenAtI,"
+            "System`FlattenAt[Unevaluated["
+            "(tungstenFlattenAtI++;f[g[x,y]])],Unevaluated["
+            "(tungstenFlattenAtI++;1)]],tungstenFlattenAtI,"
+            "Global`FlattenAt[Unevaluated["
+            "(tungstenFlattenAtI++;f[g[x,y]])],Unevaluated["
+            "(tungstenFlattenAtI++;1)]],tungstenFlattenAtI,"
+            "tungstenFlattenAtSystemAlias[f[g[x,y]],1],"
+            "tungstenFlattenAtBareAlias[f[g[x,y]],1],"
+            "FlattenAt[1][f[g[x,y]]],"
+            "FlattenAt[Part[f[g[a,b]],9],1],"
+            "(tungstenFlattenAtI=0;Catch[FlattenAt["
+            "(tungstenFlattenAtI++;Throw[t]),"
+            "(tungstenFlattenAtI++;1)]]),tungstenFlattenAtI,"
+            "(tungstenFlattenAtI=0;CheckAbort[FlattenAt["
+            "(tungstenFlattenAtI++;Abort[]),"
+            "(tungstenFlattenAtI++;1)],caught]),tungstenFlattenAtI,"
+            "FlattenAt[],FlattenAt[f[g[a,b]],All],"
+            "FlattenAt[f[g[a,b]],{}],FlattenAt[f[g[a,b]],{0}],"
+            "FlattenAt[f[a],1],FlattenAt[f[g[a,b]],{{Span[1]}}],"
+            "FlattenAt[f[g[a,b]],{{1;;1;;x}}],"
+            "FlattenAt[f[g[a,b]],{{1;;1;;0}}],"
+            "FlattenAt[<|a->g[x,y]|>,{{{1,Key[a]}}}],"
+            "FlattenAt[<|a->g[x,y]|>,Key[a]],$MessageList,"
+            "(Unprotect[FlattenAt];ClearAll[FlattenAt];"
+            "FlattenAt[q__]:=HoldComplete[q];"
+            "FlattenAt[f[g[a,b]],1])}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "scan traversal levels recovery operators and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenScanI,tungstenScanCallback,"
+            "tungstenScanSystemAlias,tungstenScanBareAlias];"
+            "tungstenScanI=0;"
+            "tungstenScanCallback[x_]:=(tungstenScanI++;"
+            "Part[f[x],99]);"
+            "tungstenScanSystemAlias=System`Scan;"
+            "tungstenScanBareAlias=Scan;"
+            "{Reap[Scan[Sow,g[a,h[b,c]]]][[2,1]],"
+            "Reap[Scan[Sow,g[a,h[b,c]],{0,Infinity}]][[2,1]],"
+            "Reap[Scan[Sow,g[a,h[b,c]],{-1}]][[2,1]],"
+            "Reap[Scan[Sow,g[a,h[b,c]],-2]][[2,1]],"
+            "Reap[Scan[Sow,g[a,h[b]],{0,Infinity},"
+            "Heads->True]][[2,1]],"
+            "Reap[Scan[Sow,g[a,h[b]],{0,Infinity},"
+            "Heads:>False]][[2,1]],"
+            "Reap[Scan[Sow,f[g][h][x],{0,Infinity},"
+            "Heads->True]][[2,1]],"
+            "Reap[Scan[Sow,<|a->x,b:>h[y]|>,{0,Infinity},"
+            "Heads->True]][[2,1]],"
+            "Scan[tungstenScanCallback,g[a,b],{0,Infinity}],"
+            "tungstenScanI,Scan[Function[x,Nothing],{a,b}],"
+            "Scan[Function[x,Sequence[p,q]],{a,b}],"
+            "Scan[Function[x,Splice[{p,q}]],{a,b}],"
+            "(tungstenScanI=0;Catch[Scan[(tungstenScanI++;"
+            "Throw[t])&,{a,b}]]),tungstenScanI,"
+            "(tungstenScanI=0;CheckAbort["
+            "Scan[(tungstenScanI++;Abort[])&,{a,b}],caught]),"
+            "tungstenScanI,"
+            "Reap[Scan[Function[x,Sow[HoldComplete[x]],HoldAll],"
+            "Unevaluated[g[1+1]]]][[2,1]],"
+            "Reap[Scan[Function[x,Sow[HoldComplete[x]],HoldAll],"
+            "Evaluate[Unevaluated[g[1+1]]]]][[2,1]],"
+            "Reap[Scan[Sow][g[a,c]]][[2,1]],"
+            "Reap[System`Scan[Sow][g[a,c]]][[2,1]],"
+            "Reap[System`Scan[Sow,{0,Infinity}][g[a,c]]][[2,1]],"
+            "Global`Scan[Sow][g[a,c]],"
+            "Scan[f,{0,Infinity}][g[a,c]],"
+            "Reap[tungstenScanSystemAlias[Sow][g[a,c]]][[2,1]],"
+            "Reap[tungstenScanBareAlias[Sow][g[a,c]]][[2,1]],"
+            "System`Scan[HoldComplete,Unevaluated[g[1+1]]],"
+            "Global`Scan[HoldComplete,Unevaluated[g[1+1]]],"
+            "Scan[f],Scan[f][a,b],Scan[],Scan[f,a,b,c,d],"
+            "Scan[f,g[a],x],System`Scan[f][a,b],"
+            "System`Scan[f,{0,Infinity}][a,b],"
+            "Scan[f,g[a],1,Heads->x],"
+            "(tungstenScanI=0;Scan[(tungstenScanI++;f),"
+            "(tungstenScanI++;g[a]),(tungstenScanI++;1),"
+            "(tungstenScanI++;2),(tungstenScanI++;z)]),"
+            "tungstenScanI,$MessageList,"
+            "(Unprotect[Scan];ClearAll[Scan];"
+            "Scan[x__]:=HoldComplete[x];Scan[f,{a,b}])}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "OrderingBy MinimalBy and MaximalBy ordering recovery and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "ClearAll[tungstenByI,tungstenByJ,tungstenByKey,"
+            "tungstenByCompare,tungstenByLog,tungstenByK1,"
+            "tungstenByK2,tungstenByOrderingAlias,"
+            "tungstenByMinimalAlias];"
+            "tungstenByI=0;tungstenByJ=0;tungstenByLog={};"
+            "tungstenByKey[x_]:=(tungstenByI++;Part[f[x],99];x);"
+            "tungstenByCompare[a_,b_]:=(tungstenByJ++;Less[a,b]);"
+            "tungstenByK1[x_]:=(AppendTo[tungstenByLog,"
+            "HoldComplete[k1,x]];Last[x]);"
+            "tungstenByK2[x_]:=(AppendTo[tungstenByLog,"
+            "HoldComplete[k2,x]];First[x]);"
+            "tungstenByOrderingAlias=OrderingBy;"
+            "tungstenByMinimalAlias=System`MinimalBy;"
+            "{OrderingBy[{{a,2},{b,1},{c,3}},Last],"
+            "OrderingBy[{{c,2},{a,2},{b,1}},Last],"
+            "OrderingBy[{{c,2},{a,2},{b,1}},{Last}],"
+            "OrderingBy[{d,c,b,a},Identity,-2],"
+            "OrderingBy[{d,c,b,a},Identity,0],"
+            "OrderingBy[{3,1,2},Identity,All,Greater],"
+            "OrderingBy[f[c,a,b],Identity],"
+            "OrderingBy[{{c,2},{a,2},{b,1}},"
+            "{tungstenByK1,tungstenByK2}],tungstenByLog,"
+            "OrderingBy[{{c,2},{a,2},{b,1}},Last,All,Less,"
+            "SameTest->(True&)],"
+            "OrderingBy[{{c,2},{a,2},{b,1}},{Last},All,Less,"
+            "SameTest->(False&)],"
+            "MinimalBy[{{a,1},{b,2},{c,1}},Last],"
+            "MinimalBy[{3,1,2,1},Identity,2],"
+            "MaximalBy[{3,1,3,2},Identity,3],"
+            "MaximalBy[{3,1,2},Identity,UpTo[2]],"
+            "MinimalBy[<|a->2,b:>1,c->1|>,Identity],"
+            "MaximalBy[h[1,3,2],Identity,2],"
+            "MinimalBy[System`List[3,1,2],System`List[Identity]],"
+            "MinimalBy[f[],Identity,bad],"
+            "MaximalBy[<||>,Identity,-1],"
+            "OrderingBy[Last][{{a,2},{b,1}}],"
+            "System`OrderingBy[Last][{{a,2},{b,1}}],"
+            "Global`OrderingBy[Last][{{a,2},{b,1}}],"
+            "tungstenByOrderingAlias[Last][{{a,2},{b,1}}],"
+            "tungstenByMinimalAlias[Identity][{3,1,2}],"
+            "System`OrderingBy[Unevaluated[g[1+1]],Last],"
+            "Global`OrderingBy[Unevaluated[g[1+1]],Last],"
+            "OrderingBy[{3,1,2},tungstenByKey,bad,"
+            "tungstenByCompare],tungstenByI,tungstenByJ,"
+            "OrderingBy[],OrderingBy[a,Identity],"
+            "OrderingBy[{1},Identity,All,Less,Foo->bar],"
+            "OrderingBy[Identity][a,b],MinimalBy[],"
+            "MinimalBy[a,Identity],MinimalBy[{1},Identity,-1],"
+            "MinimalBy[{1},Identity,UpTo[x]],"
+            "MinimalBy[{1},Identity,UpTo[]],"
+            "MinimalBy[Identity][a,b],MaximalBy[],"
+            "MaximalBy[a,Identity],MaximalBy[{1},Identity,-1],"
+            "$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "monomial ordering modular coefficients and additive factoring",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{MonomialList[x y+x^2+3,{x,y}],"
+            "MonomialList[x^2+x y+y^2+x+y+1,{x,y},"
+            "DegreeLexicographic],"
+            "MonomialList[x^2+x y+y^2+x+y+1,"
+            "NegativeLexicographic],"
+            "MonomialList[x y+x z+y+z,x],"
+            "MonomialList[x y+x z+y+z,{}],"
+            "MonomialList[x+y,{}],MonomialList[0],"
+            "MonomialList[0,x],MonomialList[x^2+I x+1,x],"
+            "System`MonomialList[x^2+x,x],"
+            "Global`MonomialList[x^2+x,x],"
+            "PolynomialMod[x^2+2x+3,5],"
+            "PolynomialMod[-x^2-2x-3,5],"
+            "PolynomialMod[x/2+2/3,5],"
+            "PolynomialMod[x y+7x+12,5],"
+            "PolynomialMod[1/5+x,5],PolynomialMod[x+I,5],"
+            "PolynomialMod[3,1],System`PolynomialMod[x+7,5],"
+            "Global`PolynomialMod[x+7,5],2x+x y+2,$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "decomposition Groebner reduction and subresultants",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Decompose[x^4+2x^2+1,x],"
+            "PolynomialReduce[x^2+1,{x+1},x],"
+            "GroebnerBasis[{x y-1,y^2-1},{x,y}],"
+            "GroebnerBasis[{a x+y,x-y},{x,y}],"
+            "Subresultants[x^3-2x+1,x^2+1,x],"
+            "Subresultants[2-2x^2,2-3x^2,x],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "exact algebraic roots intervals sums radicals and solve",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{Root[2#^3-4&,2],"
+            "RootReduce[1/Root[#^3-2&,1]],"
+            "MinimalPolynomial[Root[#^3-2&,1]^2,x],"
+            "CountRoots[(x-1)^2(x+1),{x,-2,2}],"
+            "IsolatingInterval[Root[#^2-2&,1]],"
+            "RootSum[#^2-2&,(#^2&)],"
+            "ToRadicals[Root[#^3-2&,1]],"
+            "Solve[{x+y==3,x-y==1},{x,y}],$MessageList}",
+            "--form",
+            "input",
+        ),
+        0,
+    ),
+    (
+        "runtime random zero-draw boundaries and diagnostics",
+        (
+            "expr",
+            "evaluate",
+            "--code",
+            "{RandomSample[{},All],RandomSample[f[],0],"
+            "RandomPermutation[0],RandomPermutation[1],"
+            "RandomSample[a],RandomPermutation[-1],"
+            "Global`RandomSample[{},All],"
+            "Global`RandomPermutation[0],$MessageList}",
             "--form",
             "input",
         ),

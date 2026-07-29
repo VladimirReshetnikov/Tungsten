@@ -701,6 +701,10 @@ def sparse_property_cases() -> list[str]:
 
     array = "SparseArray[{{2}->a,{1}->b},{3},z]"
     empty = "SparseArray[{}, {0,1000000000},z]"
+    wide = (
+        "SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}]"
+    )
     return [
         f'{array}["ImplicitValue"]',
         f'{array}["ExplicitLength"]',
@@ -715,6 +719,10 @@ def sparse_property_cases() -> list[str]:
         'SparseArray[{{2}->a,{2}->b},{3}]["ExplicitValues"]',
         'SparseArray[{{2}->0,{1}->a},{3}]["ExplicitLength"]',
         'SparseArray[{{2,2}->a,{1,3}->b},{2,3}]["ExplicitPositions"]',
+        f'{wide}["ExplicitLength"]',
+        f'{wide}["ExplicitValues"]',
+        f'{wide}["ExplicitPositions"]',
+        f'{wide}["Density"]',
         (
             'SparseArray[{{2}->a},{3},z][Print["property"];'
             '"ExplicitLength"]'
@@ -772,6 +780,14 @@ def sparse_arithmetic_cases() -> list[str]:
         "SparseArray[{{4294967296}->a},{4294967296}]",
         "SparseArray[{{4294967296,4294967296}->a},"
         "{4294967296,4294967296},z]",
+        "SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}]",
+        "SparseArray[{{18446744073709551616}->a,"
+        "{18446744073709551616}->b},{18446744073709551616}]",
+        "SparseArray[{{18446744073709551616}->z,{1}->a},"
+        "{18446744073709551616},z]",
+        "SparseArray[{{18446744073709551617}->a},"
+        "{18446744073709551616}]",
         "SparseArray[SparseArray[{{1}->a},{3}]]",
         "SparseArray[SparseArray[{{1}->a},{3}],3]",
         "SparseArray[SparseArray[{{1}->a},{3}],{2}]",
@@ -826,6 +842,14 @@ def sparse_arithmetic_cases() -> list[str]:
         "SparseArray[{{4294967296,4294967296}->b},"
         "{4294967296,4294967296},q]]",
         "ArrayRules[0 SparseArray[{{1}->a},{4294967296},z]]",
+        "ArrayRules[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}]]",
+        "ArrayRules[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}]+1]",
+        "ArrayRules[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616},z]+"
+        "SparseArray[{{18446744073709551616}->b},"
+        "{18446744073709551616},q]]",
     ))
     return _unique(cases)
 
@@ -858,6 +882,12 @@ def sparse_structural_cases() -> list[str]:
         "Part[SparseArray[{{1}->a},{1000000000}],1000000000]",
         "Part[SparseArray[{{1,1}->a},{1000000000,1000000000}],"
         "1000000000,1000000000]",
+        "Part[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}],18446744073709551616]",
+        "Part[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}],-1]",
+        "Part[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}],18446744073709551617]",
         f"Insert[{vector},x,0]",
         f"Insert[{vector},x,1]",
         f"Insert[{vector},x,2]",
@@ -868,12 +898,16 @@ def sparse_structural_cases() -> list[str]:
         f"Insert[{vector},x,{{2}}]",
         f"Insert[{matrix},{{p,q,r}},2]",
         "Insert[SparseArray[{{1}->a},{1000000000}],x,-1]",
+        "Insert[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}],z,18446744073709551616]",
         f"Flatten[{tensor}]",
         f"Flatten[{tensor},0]",
         f"Flatten[{tensor},1]",
         f"Flatten[{tensor},2]",
         f"Flatten[{tensor},Infinity]",
         "Flatten[SparseArray[{{1,1}->a},{1000000000,1000000000}]]",
+        "Flatten[SparseArray[{{18446744073709551616,2}->a},"
+        "{18446744073709551616,2}]]",
         f"ArrayReshape[{vector},3]",
         f"ArrayReshape[{vector},{{2,3}}]",
         f"ArrayReshape[{vector},{{2,3}},0]",
@@ -884,6 +918,8 @@ def sparse_structural_cases() -> list[str]:
         f"ArrayReshape[{tensor},{{4,7}},x]",
         "ArrayReshape[SparseArray[{{1000000000}->a},{1000000000}],"
         "{1000000,1000}]",
+        "ArrayReshape[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}],{2,9223372036854775808}]",
         "ArrayReshape[SparseArray[{}, {0,1000000000},z],{1000000000},z]",
         f"ArrayPad[{vector},2]",
         f"ArrayPad[{vector},{{1,3}}]",
@@ -892,6 +928,8 @@ def sparse_structural_cases() -> list[str]:
         f"ArrayPad[{matrix},{{1,2}}]",
         f"ArrayPad[{matrix},{{{{1,0}},{{2,3}}}},0]",
         "ArrayPad[SparseArray[{{1000000000}->a},{1000000000}],{2,3}]",
+        "ArrayPad[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}],1]",
         f"Transpose[{vector}]",
         f"Transpose[{vector},{{1}}]",
         f"Transpose[{matrix}]",
@@ -900,12 +938,18 @@ def sparse_structural_cases() -> list[str]:
         f"Transpose[{tensor},{{3,1,2}}]",
         "Transpose[SparseArray[{{1,1000000000}->a},"
         "{1000000000,1000000000}]]",
+        "Transpose[SparseArray[{{18446744073709551616,2}->a},"
+        "{18446744073709551616,2}]]",
         "ArrayFlatten[{{SparseArray[{{1,1}->a},{2,2}],"
         "SparseArray[{{2,1}->b},{2,1}]}}]",
         "ArrayFlatten[{{SparseArray[{{1,1}->a},{2,2}],{{b},{c}}}}]",
         "ArrayFlatten[{{SparseArray[{{1,1}->a},{2,2},z]}}]",
         "ArrayFlatten[{{SparseArray[{{1,1}->a},{1000000000,1}],"
         "SparseArray[{{1000000000,1}->b},{1000000000,1}]}}]",
+        "ArrayFlatten[{{SparseArray[{{18446744073709551616,1}->a},"
+        "{18446744073709551616,1}],"
+        "SparseArray[{{18446744073709551616,1}->b},"
+        "{18446744073709551616,1}]}}]",
         f"Extract[{vector},{{4}}]",
         f"Extract[{vector},{{{{4}},{{1}},{{2}}}}]",
         f"Extract[{matrix},{{All,2}}]",
@@ -1130,6 +1174,12 @@ def tensor_matrix_cases() -> list[str]:
             (
                 "Dot[SparseArray[{}, {1000000000}],"
                 "SparseArray[{}, {1000000000}]]"
+            ),
+            (
+                "Dot[SparseArray[{{18446744073709551616}->a},"
+                "{18446744073709551616}],"
+                "SparseArray[{{18446744073709551616}->b},"
+                "{18446744073709551616}]]"
             ),
             (
                 "Dot[SparseArray[{{1,2}->a},{2,3}],{x,y,z}]"

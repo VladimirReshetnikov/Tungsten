@@ -29,7 +29,7 @@ import Control.Concurrent (forkIO, modifyMVar, newEmptyMVar, newMVar, putMVar, t
 import Control.Exception (IOException, try)
 import Control.Monad (forM, replicateM, replicateM_)
 import qualified Data.ByteString as BS
-import Data.Bits (xor)
+import Data.Bits ((.&.), shiftR, xor)
 import Data.List (sort, sortOn)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -40,7 +40,7 @@ import qualified Data.Text.Encoding.Error as TEE
 import qualified Data.Text.IO as TextIO
 import Data.Time.Clock (UTCTime, diffUTCTime, getCurrentTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
-import Data.Word (Word64)
+import Data.Word (Word32)
 import System.Directory
   ( doesDirectoryExist
   , doesFileExist
@@ -55,12 +55,13 @@ import System.FilePath
   , takeExtension
   )
 import Text.Read (readMaybe)
-import Tungsten.Expression (Expr, arguments, fullForm)
+import Tungsten.Expression (Expr (..), arguments, fullForm, inputForm)
 import Tungsten.Discovery (WolframInstallation)
 import Tungsten.Json
 import Tungsten.Kernel
 import Tungsten.Notebook
 import Tungsten.Parser
+import qualified Tungsten.TextualForms as TextualForms
 import Tungsten.WolframString (parseWolframStringLiteral, wlString)
 
 data CorpusFile = CorpusFile
@@ -714,6 +715,7 @@ renderMarkdownReport summary results =
         <> objectBullets "outcomes" "- None"
         <> ["", "## Tungsten Failure Types", ""]
         <> objectBullets "tungsten_failure_types" "- None"
+        <> ["", "## Timings", ""]
         <> ["", "## First Wolfram-Accepted Tungsten Gaps", ""]
         <> resultBullets "tungsten_gap" parserCorpusTungsten
         <> ["", "## First Tungsten-Accepted Wolfram Rejections", ""]
@@ -832,7 +834,8 @@ parseExpression sourceForm source = case T.toLower (T.strip sourceForm) of
   "inputform" -> mapParseError (parseInputForm source)
   "full" -> mapParseError (parseFullForm source)
   "fullform" -> mapParseError (parseFullForm source)
-  "standard" -> Left "StandardForm parsing is not implemented by the Haskell parser"
+  "standard" -> TextualForms.parseStandardFormSource source
+  "standardform" -> TextualForms.parseStandardFormSource source
   other -> Left ("unsupported parser corpus source form: " <> other)
  where
   mapParseError = either (Left . parseErrorMessage) Right
@@ -843,7 +846,7 @@ expressionSummary sourceForm previewCharacters expression =
     [ ("depth", jsonInteger (fromIntegral (expressionDepth expression)))
     , ("form", JsonString sourceForm)
     , ("full_form_preview", JsonString (truncateText previewCharacters (fullForm expression)))
-    , ("input_form_preview", JsonString (truncateText previewCharacters (fullForm expression)))
+    , ("input_form_preview", JsonString (truncateText previewCharacters (inputForm expression)))
     , ("length", jsonInteger (fromIntegral (length (arguments expression))))
     ]
 
@@ -856,6 +859,21 @@ notebookSummary document =
     ]
 
 expressionDepth :: Expr -> Int
+expressionDepth Root {} = 1
+expressionDepth (SparseArray dimensions _ _) = length dimensions + 1
+expressionDepth (Call (Symbol associationHead) entries)
+  | associationHead `elem` ["Association", "System`Association"]
+  , Just values <- traverse associationValue entries =
+      case values of
+        [] -> 2
+        _ -> 1 + maximum (map expressionDepth values)
+ where
+  associationValue (Call (Symbol ruleHead) [_, value])
+    | ruleHead
+        `elem` ["Rule", "RuleDelayed", "System`Rule", "System`RuleDelayed"] =
+        Just value
+  associationValue _ = Nothing
+expressionDepth (Call _ []) = 2
 expressionDepth expression = case arguments expression of
   [] -> 1
   values -> 1 + maximum (map expressionDepth values)
@@ -940,12 +958,123 @@ walkFiles path = do
   pure (concat nested)
 
 deterministicShuffle :: Int -> [CorpusFile] -> [CorpusFile]
-deterministicShuffle seed = sortOn (shuffleKey seed . corpusFileRelativePath)
-
-shuffleKey :: Int -> Text -> Word64
-shuffleKey seed = T.foldl' step (fromIntegral seed `xor` 14695981039346656037)
+deterministicShuffle seed values = fst (go (length values - 1) values (seedPythonRandom seed))
  where
-  step value character = (value `xor` fromIntegral (fromEnum character)) * 1099511628211
+  go index shuffled generator
+    | index <= 0 = (shuffled, generator)
+    | otherwise =
+        let (swapIndex, nextGenerator) = pythonRandBelow (index + 1) generator
+         in go (index - 1) (swapAt index swapIndex shuffled) nextGenerator
+
+data PythonRandom = PythonRandom ![Word32] !Int
+
+seedPythonRandom :: Int -> PythonRandom
+seedPythonRandom seed = PythonRandom initialized 624
+ where
+  magnitude = abs (toInteger seed)
+  key = integerWords magnitude
+  base = initializeGenerator 1 [19650218]
+  afterKey = initializeWithKey (max 624 (length key)) 1 0 base key
+  afterMix = initializeWithoutKey 623 2 afterKey
+  initialized = replaceListAt 0 0x80000000 afterMix
+
+initializeGenerator :: Int -> [Word32] -> [Word32]
+initializeGenerator index values
+  | index >= 624 = values
+  | otherwise =
+      let previous = last values
+          next = 1812433253 * (previous `xor` (previous `shiftR` 30)) + fromIntegral index
+       in initializeGenerator (index + 1) (values <> [next])
+
+integerWords :: Integer -> [Word32]
+integerWords 0 = [0]
+integerWords value = fromIntegral value : integerWordsRest (value `shiftR` 32)
+ where
+  integerWordsRest 0 = []
+  integerWordsRest remaining = fromIntegral remaining : integerWordsRest (remaining `shiftR` 32)
+
+initializeWithKey :: Int -> Int -> Int -> [Word32] -> [Word32] -> [Word32]
+initializeWithKey 0 _ _ values _ = values
+initializeWithKey remaining index keyIndex values key =
+  initializeWithKey (remaining - 1) nextIndex nextKeyIndex wrapped key
+ where
+  previous = values !! (index - 1)
+  mixed =
+    (values !! index `xor` ((previous `xor` (previous `shiftR` 30)) * 1664525))
+      + (key !! keyIndex)
+      + fromIntegral keyIndex
+  updated = replaceListAt index mixed values
+  advancedIndex = index + 1
+  (nextIndex, wrapped)
+    | advancedIndex >= 624 = (1, replaceListAt 0 (updated !! 623) updated)
+    | otherwise = (advancedIndex, updated)
+  nextKeyIndex = (keyIndex + 1) `mod` length key
+
+initializeWithoutKey :: Int -> Int -> [Word32] -> [Word32]
+initializeWithoutKey 0 _ values = values
+initializeWithoutKey remaining index values =
+  initializeWithoutKey (remaining - 1) nextIndex wrapped
+ where
+  previous = values !! (index - 1)
+  mixed =
+    (values !! index `xor` ((previous `xor` (previous `shiftR` 30)) * 1566083941))
+      - fromIntegral index
+  updated = replaceListAt index mixed values
+  advancedIndex = index + 1
+  (nextIndex, wrapped)
+    | advancedIndex >= 624 = (1, replaceListAt 0 (updated !! 623) updated)
+    | otherwise = (advancedIndex, updated)
+
+pythonRandBelow :: Int -> PythonRandom -> (Int, PythonRandom)
+pythonRandBelow upper generator = draw generator
+ where
+  bits = integerBitLength upper
+  draw current =
+    let (candidate, next) = pythonGetRandBits bits current
+     in if candidate < upper then (candidate, next) else draw next
+
+pythonGetRandBits :: Int -> PythonRandom -> (Int, PythonRandom)
+pythonGetRandBits bits generator =
+  let (value, next) = pythonRandomWord generator
+   in (fromIntegral (value `shiftR` (32 - bits)), next)
+
+pythonRandomWord :: PythonRandom -> (Word32, PythonRandom)
+pythonRandomWord (PythonRandom values index)
+  | index >= 624 = pythonRandomWord (PythonRandom (twistPythonRandom values) 0)
+  | otherwise = (temper (values !! index), PythonRandom values (index + 1))
+ where
+  temper initial =
+    let first = initial `xor` (initial `shiftR` 11)
+        second = first `xor` ((first * 128) .&. 0x9d2c5680)
+        third = second `xor` ((second * 32768) .&. 0xefc60000)
+     in third `xor` (third `shiftR` 18)
+
+twistPythonRandom :: [Word32] -> [Word32]
+twistPythonRandom initialValues = foldl twistAtIndex initialValues [0 .. 623]
+ where
+  twistAtIndex stateValues index =
+    let nextIndex = (index + 1) `mod` 624
+        offsetIndex = if index < 227 then index + 397 else index - 227
+        combined = (stateValues !! index .&. 0x80000000) + (stateValues !! nextIndex .&. 0x7fffffff)
+        magic = if odd combined then 0x9908b0df else 0
+        twisted = stateValues !! offsetIndex `xor` (combined `shiftR` 1) `xor` magic
+     in replaceListAt index twisted stateValues
+
+integerBitLength :: Int -> Int
+integerBitLength value = go value 0
+ where
+  go 0 count = count
+  go remaining count = go (remaining `div` 2) (count + 1)
+
+swapAt :: Int -> Int -> [value] -> [value]
+swapAt firstIndex secondIndex values
+  | firstIndex == secondIndex = values
+  | otherwise =
+      replaceListAt secondIndex (values !! firstIndex)
+        (replaceListAt firstIndex (values !! secondIndex) values)
+
+replaceListAt :: Int -> value -> [value] -> [value]
+replaceListAt index value values = take index values <> [value] <> drop (index + 1) values
 
 counterPayload :: (value -> Text) -> [value] -> JsonValue
 counterPayload projection values =

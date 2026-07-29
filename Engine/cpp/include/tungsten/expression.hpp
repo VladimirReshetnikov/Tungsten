@@ -57,7 +57,11 @@ public:
     [[nodiscard]] std::size_t root_index() const;
     [[nodiscard]] long root_method() const;
     [[nodiscard]] const std::vector<std::uint8_t>& bytes() const;
+    // Returns machine-sized dimensions for compatibility with existing native
+    // clients.  Sparse arrays whose dimensions exceed size_t expose their
+    // complete shape through sparse_dimensions() and make this accessor throw.
     [[nodiscard]] const std::vector<std::size_t>& dimensions() const;
+    [[nodiscard]] const std::vector<mpz_class>& sparse_dimensions() const noexcept;
     [[nodiscard]] const std::vector<SparseEntry>& sparse_entries() const;
     [[nodiscard]] Expr fill_value() const;
 
@@ -84,15 +88,35 @@ private:
     friend Expr byte_array(std::vector<std::uint8_t> values);
     friend Expr root(std::vector<mpz_class> coefficients, std::size_t index, long method);
     friend Expr sparse_array(
-        std::vector<std::size_t> dimensions,
+        std::vector<mpz_class> dimensions,
         std::vector<SparseEntry> entries,
         Expr fill_value);
     friend Expr call(Expr head, std::vector<Expr> args);
 };
 
 struct SparseEntry {
-    std::vector<std::size_t> indices;
+    std::vector<mpz_class> indices;
     Expr value;
+
+    SparseEntry(std::vector<mpz_class> exact_indices, Expr entry_value)
+        : indices(std::move(exact_indices)), value(std::move(entry_value)) {}
+
+    template<typename Integral,
+        std::enable_if_t<std::is_integral_v<std::remove_cv_t<Integral>>, int> = 0>
+    SparseEntry(std::vector<Integral> native_indices, Expr entry_value)
+        : value(std::move(entry_value)) {
+        indices.reserve(native_indices.size());
+        for (const auto index : native_indices) {
+            using Value = std::remove_cv_t<Integral>;
+            if constexpr (std::is_signed_v<Value>) {
+                indices.emplace_back(
+                    std::to_string(static_cast<long long>(index)), 10);
+            } else {
+                indices.emplace_back(
+                    std::to_string(static_cast<unsigned long long>(index)), 10);
+            }
+        }
+    }
 
     friend bool operator==(const SparseEntry& left, const SparseEntry& right) noexcept {
         return left.indices == right.indices && left.value == right.value;
@@ -135,9 +159,23 @@ Expr string(std::string value);
 Expr byte_array(std::vector<std::uint8_t> values);
 Expr root(std::vector<mpz_class> coefficients, std::size_t index, long method = 0);
 Expr sparse_array(
-    std::vector<std::size_t> dimensions,
+    std::vector<mpz_class> dimensions,
     std::vector<SparseEntry> entries,
     Expr fill_value = integer(0L));
+
+template<typename Integral,
+    std::enable_if_t<std::is_integral_v<std::remove_cv_t<Integral>>, int> = 0>
+Expr sparse_array(
+    std::vector<Integral> dimensions,
+    std::vector<SparseEntry> entries,
+    Expr fill_value = integer(0L)) {
+    std::vector<mpz_class> exact_dimensions;
+    exact_dimensions.reserve(dimensions.size());
+    for (const auto dimension : dimensions)
+        exact_dimensions.push_back(integer(dimension).integer_value());
+    return sparse_array(
+        std::move(exact_dimensions), std::move(entries), std::move(fill_value));
+}
 Expr call(Expr head, std::vector<Expr> args = {});
 Expr call(const std::string& head, std::vector<Expr> args = {});
 Expr list(std::vector<Expr> items = {});

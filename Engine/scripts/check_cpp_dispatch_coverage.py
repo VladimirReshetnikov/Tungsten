@@ -43,10 +43,6 @@ DISPATCH_FUNCTIONS = {
 
 SESSION_DISPATCH_HEADS = {
     "Exit",
-    "In",
-    "InString",
-    "MessageList",
-    "Out",
     "Quit",
 }
 

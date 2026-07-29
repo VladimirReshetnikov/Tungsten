@@ -110,6 +110,26 @@ valueCases =
     , "{JacobiSymbol[1,2],BernoulliB[-1],PrimitiveRoot[1],RamanujanTau[0],FactorInteger[5,2,GaussianIntegers->True]}"
     , "List[JacobiSymbol[1, 2], BernoulliB[-1], PrimitiveRoot[1], RamanujanTau[0], FactorInteger[5, 2, Rule[GaussianIntegers, True]]]"
     )
+  , ( "complex expansion of exact projections"
+    , "{ComplexExpand[Re[1+2I]],ComplexExpand[Im[1+2I]],ComplexExpand[Conjugate[1+2I]],ComplexExpand[Abs[1+2I]],ComplexExpand[Arg[1+I]]}"
+    , "List[1, 2, Complex[1, -2], Power[5, Rational[1, 2]], Times[Rational[1, 4], Pi]]"
+    )
+  , ( "complex expansion of elementary functions"
+    , "{ComplexExpand[Exp[1+2I]],ComplexExpand[Sin[1+2I]],ComplexExpand[Cos[1+2I]],ComplexExpand[Tan[1+2I]],ComplexExpand[Log[1+2I]],ComplexExpand[Sqrt[1+2I]]}"
+    , "List[Times[E, Plus[Cos[2], Times[Complex[0, 1], Sin[2]]]], Plus[Times[Complex[0, 1], Cos[1], Sinh[2]], Times[Cosh[2], Sin[1]]], Plus[Times[Complex[0, -1], Sin[1], Sinh[2]], Times[Cos[1], Cosh[2]]], Times[Plus[Sin[2], Times[Complex[0, 1], Sinh[4]]], Power[Plus[Cos[2], Cosh[4]], -1]], Plus[Log[Power[5, Rational[1, 2]]], Times[Complex[0, 1], ArcTan[2]]], Plus[Power[Times[Rational[1, 2], Plus[1, Power[5, Rational[1, 2]]]], Rational[1, 2]], Times[Complex[0, 1], Power[Times[Rational[1, 2], Plus[-1, Power[5, Rational[1, 2]]]], Rational[1, 2]]]]]"
+    )
+  , ( "complex expansion normalizes signed elementary components"
+    , "{ComplexExpand[Exp[1-I]],ComplexExpand[Sin[1-I]]}"
+    , "List[Times[E, Plus[Cos[1], Times[Complex[0, -1], Sin[1]]]], Plus[Times[Complex[0, -1], Cos[1], Sinh[1]], Times[Cosh[1], Sin[1]]]]"
+    )
+  , ( "complex expansion inverse branch and inert boundary"
+    , "{ComplexExpand[ArcSin[2]],ComplexExpand[Re[ArcSin[2]]],ComplexExpand[Im[ArcSin[2]]],ComplexExpand[{Re[1+I],Im[1+I],Abs[1+I],Arg[1+I]}],ComplexExpand[x+I],ComplexExpand[Power[E,Complex[1,2]]],ComplexExpand[E^(I Pi)]}"
+    , "List[Plus[Times[Complex[0, -1], Log[Plus[2, Power[3, Rational[1, 2]]]]], Times[Rational[1, 2], Pi]], Times[Rational[1, 2], Pi], Times[-1, Log[Plus[2, Power[3, Rational[1, 2]]]]], List[1, 1, Power[2, Rational[1, 2]], Times[Rational[1, 4], Pi]], ComplexExpand[Plus[Complex[0, 1], x]], ComplexExpand[Power[E, Complex[1, 2]]], Power[E, Times[Complex[0, 1], Pi]]]"
+    )
+  , ( "complex expansion branch conventions"
+    , "{ComplexExpand[ArcSin[-2]],ComplexExpand[ArcCos[2]],ComplexExpand[ArcTanh[2]],ComplexExpand[Log[2+I]],ComplexExpand[Log[-2+I]],ComplexExpand[Log[2-I]],ComplexExpand[Log[-2-I]],ComplexExpand[System`Tan[2]]}"
+    , "List[Plus[Times[Rational[-1, 2], Pi], Times[Complex[0, -1], Log[Plus[2, Times[-1, Power[3, Rational[1, 2]]]]]]], Times[Complex[0, 1], Log[Plus[2, Power[3, Rational[1, 2]]]]], Plus[Times[Complex[0, Rational[-1, 2]], Pi], Times[Rational[1, 2], Log[3]]], Plus[Log[Power[5, Rational[1, 2]]], Times[Complex[0, 1], ArcTan[Rational[1, 2]]]], Plus[Log[Power[5, Rational[1, 2]]], Times[Complex[0, 1], Plus[Pi, Times[-1, ArcTan[Rational[1, 2]]]]]], Plus[Log[Power[5, Rational[1, 2]]], Times[Complex[0, -1], ArcTan[Rational[1, 2]]]], Plus[Log[Power[5, Rational[1, 2]]], Times[Complex[0, 1], Plus[ArcTan[Rational[1, 2]], Times[-1, Pi]]]], Times[Power[Cos[2], -1], Sin[2]]]"
+    )
   ]
 
 errorCases :: [(Text, Text, Text)]

@@ -1,6 +1,7 @@
 #include "tungsten/parser.hpp"
 
 #include "tungsten/detail/ascii.hpp"
+#include "tungsten/detail/unicode.hpp"
 #include "tungsten/wolfram_strings.hpp"
 
 #include <algorithm>
@@ -162,17 +163,66 @@ int base_digit(char value) {
     return -1;
 }
 
+struct DecimalDigit {
+    std::size_t length;
+    std::optional<unsigned> value;
+};
+
+std::optional<DecimalDigit> decimal_digit_at(
+    const std::string& text, std::size_t offset) {
+    if (offset >= text.size()) return std::nullopt;
+    const auto decoded = detail::decode_utf8_code_point(text, offset);
+    if (!decoded.valid || !detail::unicode_is_digit(decoded.value))
+        return std::nullopt;
+    return DecimalDigit{
+        decoded.length, detail::unicode_decimal_value(decoded.value)};
+}
+
+std::size_t scan_decimal_digits(
+    const std::string& text, std::size_t offset) {
+    while (const auto digit = decimal_digit_at(text, offset))
+        offset += digit->length;
+    return offset;
+}
+
+std::string normalized_decimal_digits(
+    const std::string& text, std::size_t start, std::size_t end,
+    const std::string& diagnostic) {
+    std::string normalized;
+    normalized.reserve(end - start);
+    for (auto offset = start; offset < end;) {
+        const auto digit = decimal_digit_at(text, offset);
+        if (!digit || !digit->value) syntax(diagnostic);
+        normalized.push_back(static_cast<char>('0' + *digit->value));
+        offset += digit->length;
+    }
+    return normalized;
+}
+
+bool consists_of_decimal_digits(std::string_view text) {
+    if (text.empty()) return false;
+    for (std::size_t offset = 0; offset < text.size();) {
+        const auto decoded = detail::decode_utf8_code_point(text, offset);
+        if (!decoded.valid || !detail::unicode_decimal_value(decoded.value))
+            return false;
+        offset += decoded.length;
+    }
+    return true;
+}
+
 std::pair<Token, std::size_t> scan_number(const std::string& text, std::size_t start) {
-    std::size_t index = start;
-    while (index < text.size()
-        && detail::ascii_is_digit(static_cast<unsigned char>(text[index]))) ++index;
+    std::size_t index = scan_decimal_digits(text, start);
     if (index > start && starts_with(text, index, "^^")) {
         int base = 0;
-        for (auto cursor = start; cursor < index; ++cursor) {
-            const auto digit = text[cursor] - '0';
+        for (auto cursor = start; cursor < index;) {
+            const auto scanned = decimal_digit_at(text, cursor);
+            if (!scanned || !scanned->value)
+                syntax("Wolfram base-number literals require a base between 2 and 36.");
+            const auto digit = static_cast<int>(*scanned->value);
             if (base > (36 - digit) / 10)
                 syntax("Wolfram base-number literals require a base between 2 and 36.");
             base = base * 10 + digit;
+            cursor += scanned->length;
         }
         if (base < 2 || base > 36) syntax("Wolfram base-number literals require a base between 2 and 36.");
         const auto mantissa = index + 2;
@@ -195,12 +245,10 @@ std::pair<Token, std::size_t> scan_number(const std::string& text, std::size_t s
             const bool accuracy = index < text.size() && text[index] == '`';
             if (accuracy) ++index;
             const auto mark = index;
-            while (index < text.size()
-                && detail::ascii_is_digit(static_cast<unsigned char>(text[index]))) ++index;
+            index = scan_decimal_digits(text, index);
             if (index < text.size() && text[index] == '.' && !starts_with(text, index, "..")) {
                 ++index;
-                while (index < text.size()
-                    && detail::ascii_is_digit(static_cast<unsigned char>(text[index]))) ++index;
+                index = scan_decimal_digits(text, index);
             }
             if (accuracy && mark == index) syntax("Malformed Wolfram accuracy mark.");
         }
@@ -209,8 +257,7 @@ std::pair<Token, std::size_t> scan_number(const std::string& text, std::size_t s
             magnitude = true; index += 2;
             if (index < text.size() && (text[index] == '+' || text[index] == '-')) ++index;
             const auto exponent = index;
-            while (index < text.size()
-                && detail::ascii_is_digit(static_cast<unsigned char>(text[index]))) ++index;
+            index = scan_decimal_digits(text, index);
             if (exponent == index) syntax("Malformed Wolfram numeric exponent.");
             if (index < text.size() && text[index] == '.' && !starts_with(text, index, ".."))
                 syntax("Malformed Wolfram numeric exponent.");
@@ -218,7 +265,8 @@ std::pair<Token, std::size_t> scan_number(const std::string& text, std::size_t s
         const auto raw = text.substr(start, index - start);
         if (!dot && !precision && !magnitude) {
             mpz_class value;
-            if (mpz_set_str(value.get_mpz_t(), text.substr(mantissa, index - mantissa).c_str(), base) != 0)
+            if (mpz_set_str(value.get_mpz_t(),
+                    text.substr(mantissa, index - mantissa).c_str(), base) != 0)
                 syntax("Malformed Wolfram base-number literal.");
             return {{TokenKind::Integer, raw, start, index, value.get_str()}, index};
         }
@@ -228,10 +276,9 @@ std::pair<Token, std::size_t> scan_number(const std::string& text, std::size_t s
     bool digits = index > start;
     if (index < text.size() && text[index] == '.' && !starts_with(text, index, "..")) {
         dot = true; ++index;
-        while (index < text.size()
-            && detail::ascii_is_digit(static_cast<unsigned char>(text[index]))) {
+        while (const auto digit = decimal_digit_at(text, index)) {
             digits = true;
-            ++index;
+            index += digit->length;
         }
     }
     bool precision = false;
@@ -240,12 +287,10 @@ std::pair<Token, std::size_t> scan_number(const std::string& text, std::size_t s
         bool accuracy = false;
         if (index < text.size() && text[index] == '`') { accuracy = true; ++index; }
         const auto mark = index;
-        while (index < text.size()
-            && detail::ascii_is_digit(static_cast<unsigned char>(text[index]))) ++index;
+        index = scan_decimal_digits(text, index);
         if (index < text.size() && text[index] == '.' && !starts_with(text, index, "..")) {
             ++index;
-            while (index < text.size()
-                && detail::ascii_is_digit(static_cast<unsigned char>(text[index]))) ++index;
+            index = scan_decimal_digits(text, index);
         }
         if (accuracy && mark == index) syntax("Malformed Wolfram accuracy mark.");
     }
@@ -254,8 +299,7 @@ std::pair<Token, std::size_t> scan_number(const std::string& text, std::size_t s
         magnitude = true; index += 2;
         if (index < text.size() && (text[index] == '+' || text[index] == '-')) ++index;
         const auto exponent = index;
-        while (index < text.size()
-            && detail::ascii_is_digit(static_cast<unsigned char>(text[index]))) ++index;
+        index = scan_decimal_digits(text, index);
         if (exponent == index) syntax("Malformed Wolfram numeric exponent.");
         if (index < text.size() && text[index] == '.' && !starts_with(text, index, ".."))
             syntax("Malformed Wolfram numeric exponent.");
@@ -263,7 +307,11 @@ std::pair<Token, std::size_t> scan_number(const std::string& text, std::size_t s
     const auto raw = text.substr(start, index - start);
     if (!digits || raw == ".") syntax("Malformed Wolfram number near " + raw + ".");
     const auto kind = dot || precision || magnitude ? TokenKind::Real : TokenKind::Integer;
-    return {{kind, raw, start, index, raw}, index};
+    const auto value = kind == TokenKind::Integer
+        ? normalized_decimal_digits(text, start, index,
+            "Malformed Wolfram integer literal.")
+        : raw;
+    return {{kind, raw, start, index, value}, index};
 }
 
 bool ascii_symbol_start(char value) {
@@ -372,8 +420,8 @@ std::vector<Token> tokenize(const std::string& text) {
         if (const auto scanned = scan_escaped_token(text, index)) {
             tokens.push_back(scanned->first); index = scanned->second; continue;
         }
-        if (detail::ascii_is_digit(byte) || (text[index] == '.' && index + 1 < text.size()
-                && detail::ascii_is_digit(static_cast<unsigned char>(text[index + 1])))) {
+        if (detail::ascii_is_digit(byte) || (text[index] == '.'
+                && decimal_digit_at(text, index + 1))) {
             auto [token, end] = scan_number(text, index); tokens.push_back(std::move(token)); index = end; continue;
         }
         if (text[index] == '%') {
@@ -381,12 +429,11 @@ std::vector<Token> tokenize(const std::string& text) {
             while (index < text.size() && text[index] == '%') ++index;
             const auto count = index - start;
             std::string value;
-            if (count == 1 && index < text.size()
-                && detail::ascii_is_digit(static_cast<unsigned char>(text[index]))) {
+            if (count == 1 && decimal_digit_at(text, index)) {
                 const auto digits = index;
-                while (index < text.size()
-                    && detail::ascii_is_digit(static_cast<unsigned char>(text[index]))) ++index;
-                value = text.substr(digits, index - digits);
+                index = scan_decimal_digits(text, index);
+                value = normalized_decimal_digits(text, digits, index,
+                    "Malformed Wolfram output-history index.");
             } else if (count > 1) value = "-" + std::to_string(count);
             tokens.push_back({TokenKind::Percent, text.substr(start, index - start), start, index, value}); continue;
         }
@@ -677,17 +724,17 @@ private:
         const auto head = sequence_slot ? "SlotSequence" : "Slot";
         if (peek().kind == TokenKind::Integer) return call(head, {integer(mpz_class(consume().value, 10))});
         if (peek().kind == TokenKind::Real && peek().text.size() > 1 && peek().text.back() == '.'
-            && std::all_of(peek().text.begin(), peek().text.end() - 1,
-                [](char value) {
-                    return detail::ascii_is_digit(static_cast<unsigned char>(value));
-                })) {
+            && consists_of_decimal_digits(std::string_view(
+                peek().text.data(), peek().text.size() - 1))) {
             const auto digits = peek().text.substr(0, peek().text.size() - 1);
             auto& token = tokens_[index_];
             token.kind = TokenKind::Operator;
             token.text = ".";
             token.value = ".";
             token.start = token.end - 1;
-            return call(head, {integer(mpz_class(digits, 10))});
+            return call(head, {integer(mpz_class(normalized_decimal_digits(
+                digits, 0, digits.size(),
+                "Malformed Wolfram slot index."), 10))});
         }
         if (!sequence_slot && (peek().kind == TokenKind::Symbol || peek().kind == TokenKind::String)
             && tokens_[index_ - 1].end == peek().start) return call(head, {string(consume().value)});

@@ -47,9 +47,10 @@ checkArrayEvaluator = do
         "MatrixQ accepts compact rank-two sparse arrays"
         (Call (Symbol "MatrixQ") [SparseArray [0, 4] [] (Integer 0)])
         "True"
-    , checkDirectError
-        "dense matrix reducers reject SparseArray inputs explicitly"
+    , checkDirect
+        "Det evaluates compact SparseArray inputs"
         (Call (Symbol "Det") [SparseArray [2, 2] [] (Integer 0)])
+        "0"
     ]
   pure (and (valueResults <> errorResults <> exactErrorResults <> sparseResults))
 
@@ -166,6 +167,7 @@ valueCases =
   , ("Cross exact 2D", "Cross[{1,2},{3,4}]", "-2")
   , ("Cross symbolic canonical signs", "Cross[{a,b,c},{d,e,f}]", "List[Plus[Times[-1, c, e], Times[b, f]], Plus[Times[-1, a, f], Times[c, d]], Plus[Times[-1, b, d], Times[a, e]]]")
   , ("Cross cancels equal symbolic products", "Cross[{a,a},{a,a}]", "0")
+  , ("Tr preserves sparse vector matrix and fill semantics", "{Tr[SparseArray[{{2}->a},{4}],Plus],Tr[SparseArray[{{2}->a},{4}],Times],Tr[SparseArray[{{2}->a},{4}],f],Tr[SparseArray[{{1,1}->a},{3,3}],Times],Tr[SparseArray[{{1,1}->a},{3,3},z],f],Tr[SparseArray[{}, {1000000000,1000000000}]]}", "List[a, 0, f[0, a, 0, 0], a, f[a, z, z], 0]")
   , ("Det exact", "Det[{{1,2},{3,4}}]", "-2")
   , ("Det empty identity", "Det[{}]", "1")
   , ("Det symbolic canonical sign", "Det[{{a,b},{c,d}}]", "Plus[Times[-1, b, c], Times[a, d]]")
@@ -275,11 +277,6 @@ checkDirect label expression expected = case evaluate expression of
     | fullForm result == expected -> pure True
     | otherwise ->
         failCheck label ("expected " <> expected <> ", got " <> fullForm result)
-
-checkDirectError :: Text -> Expr -> IO Bool
-checkDirectError label expression = case evaluate expression of
-  Left _ -> pure True
-  Right result -> failCheck label ("expected an evaluation error, got " <> fullForm result)
 
 failCheck :: Text -> Text -> IO Bool
 failCheck label detail = do

@@ -3,7 +3,7 @@ name:               tungsten-engine
 version:            0.1.0.0
 synopsis:           Haskell port of the Tungsten Wolfram expression engine
 description:
-  An incremental Haskell port of Tungsten Engine with immutable Wolfram
+  An independently buildable Haskell port of Tungsten Engine with immutable Wolfram
   expressions, FullForm and InputForm parsing, deterministic and session
   evaluation, structural notebooks, Wolfram installation discovery and kernel
   execution, a REPL, a JSON-first command line, and a JSON-lines protocol.
@@ -15,6 +15,10 @@ build-type:         Simple
 extra-source-files:
   README.md
   docs/haskell-port.md
+  haskell/cbits/bzip2-1.0.8/LICENSE
+  haskell/cbits/bzip2-1.0.8/README.tungsten.md
+  haskell/cbits/bzip2-1.0.8/bzlib.h
+  haskell/cbits/bzip2-1.0.8/bzlib_private.h
   src/tungsten/data/system_symbols_wolfram_15_0.json
   src/tungsten/data/wolfram_named_characters_15_0.json
 tested-with:        GHC == 9.12.4
@@ -32,6 +36,7 @@ library
   import:          common-settings
   hs-source-dirs:  haskell/src
   exposed-modules:
+    Tungsten.AlgebraicRoots
     Tungsten.Assistant
     Tungsten.Cli
     Tungsten.Discovery
@@ -48,7 +53,9 @@ library
     Tungsten.Notebook
     Tungsten.Parser
     Tungsten.ParserCorpus
+    Tungsten.PolynomialAlgebra
     Tungsten.PythonSort
+    Tungsten.Random
     Tungsten.Repl
     Tungsten.Session
     Tungsten.SystemSymbols
@@ -63,16 +70,31 @@ library
     containers >= 0.7  && < 0.8,
     directory  >= 1.3  && < 1.4,
     filepath   >= 1.5  && < 1.6,
+    numbers    >= 3000.2 && < 3000.3,
     parsec     >= 3.1  && < 3.2,
     process    >= 1.6  && < 1.7,
+    random     >= 1.2  && < 1.4,
     regex-tdfa >= 1.3  && < 1.4,
     text       >= 2.1  && < 2.2,
     time       >= 1.12 && < 1.15,
     template-haskell >= 2.23 && < 2.24,
-    transformers >= 0.6 && < 0.7
+    transformers >= 0.6 && < 0.7,
+    zlib       >= 0.7  && < 0.8
   other-modules:
+    Tungsten.BZip2
     Tungsten.NamedCharacterTH
+    Tungsten.NumericPrecision
     Tungsten.SystemSymbolTH
+  include-dirs:
+    haskell/cbits/bzip2-1.0.8
+  c-sources:
+    haskell/cbits/bzip2-1.0.8/blocksort.c
+    haskell/cbits/bzip2-1.0.8/huffman.c
+    haskell/cbits/bzip2-1.0.8/crctable.c
+    haskell/cbits/bzip2-1.0.8/randtable.c
+    haskell/cbits/bzip2-1.0.8/compress.c
+    haskell/cbits/bzip2-1.0.8/decompress.c
+    haskell/cbits/bzip2-1.0.8/bzlib.c
 
 executable tungsten-hs
   import:          common-settings
@@ -89,12 +111,17 @@ test-suite tungsten-engine-test
   hs-source-dirs:  haskell/test
   main-is:         Main.hs
   other-modules:
+    Tungsten.AlgebraicRootsTests
     Tungsten.ArrayTests
     Tungsten.CollectionExtensionsTests
     Tungsten.DistributionTests
+    Tungsten.FunctionalIterationTests
     Tungsten.IntervalTests
     Tungsten.StatisticsTests
     Tungsten.NumericAlgebraTests
+    Tungsten.NumericPrecisionTests
+    Tungsten.PolynomialAlgebraTests
+    Tungsten.RandomTests
     Tungsten.TextualFormsTests
     Tungsten.StringSequencePatternTests
   build-depends:

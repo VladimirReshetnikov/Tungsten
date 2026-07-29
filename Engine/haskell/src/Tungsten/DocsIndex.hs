@@ -53,6 +53,7 @@ import System.Process
   , readProcessWithExitCode
   , waitForProcess
   )
+import Text.Read (readMaybe)
 import Tungsten.Discovery
 import Tungsten.Json
 import Tungsten.WolframString
@@ -61,7 +62,8 @@ newtype DocumentationError = DocumentationError {documentationErrorMessage :: Te
   deriving (Eq, Show)
 
 data DocumentationRecord = DocumentationRecord
-  { documentationTitle :: !Text
+  { documentationId :: !(Maybe Integer)
+  , documentationTitle :: !Text
   , documentationPaclet :: !Text
   , documentationKind :: !Text
   , documentationCategory :: !Text
@@ -209,7 +211,8 @@ documentationRecordFromPath notebookPath = do
       pure
         ( Right
             DocumentationRecord
-              { documentationTitle = title
+              { documentationId = Nothing
+              , documentationTitle = title
               , documentationPaclet = paclet
               , documentationKind = kind
               , documentationCategory = category
@@ -311,7 +314,7 @@ readSqlite target identifier = do
           | otherwise ->
               "title = " <> sqlText identifier <> " COLLATE NOCASE OR paclet = " <> sqlText identifier <> " COLLATE NOCASE"
       statement =
-        "SELECT title, paclet, kind, category, path, preview, text FROM documents WHERE "
+        "SELECT id, title, paclet, kind, category, path, preview, text FROM documents WHERE "
           <> condition
           <> " LIMIT 1;"
   rows <- sqliteJsonQuery target statement
@@ -343,13 +346,23 @@ decodeRecord :: JsonValue -> Either DocumentationError DocumentationRecord
 decodeRecord value = do
   fields <- objectFields value
   DocumentationRecord
-    <$> textField "title" fields
+    <$> optionalIntegerField "id" fields
+    <*> textField "title" fields
     <*> textField "paclet" fields
     <*> textField "kind" fields
     <*> textField "category" fields
     <*> (T.unpack <$> textField "path" fields)
     <*> textField "preview" fields
     <*> textField "text" fields
+
+optionalIntegerField :: Text -> Map.Map Text JsonValue -> Either DocumentationError (Maybe Integer)
+optionalIntegerField key fields = case Map.lookup key fields of
+  Nothing -> Right Nothing
+  Just JsonNull -> Right Nothing
+  Just (JsonNumber value) ->
+    maybe (Left (DocumentationError ("invalid integer field: " <> key))) (Right . Just)
+      (readMaybe (T.unpack value))
+  Just _ -> Left (DocumentationError ("invalid integer field: " <> key))
 
 decodeHit :: JsonValue -> Either DocumentationError DocumentationHit
 decodeHit value = do

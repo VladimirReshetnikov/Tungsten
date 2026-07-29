@@ -9,6 +9,7 @@
 #include <map>
 #include <numeric>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -71,6 +72,106 @@ int main() {
     check(sparse.fill_value() == integer(-1L), "sparse fill value");
     check_equal(sparse.to_full_form(),
         "SparseArray[List[Rule[List[1, 2], 9]], List[3, 4], -1]", "sparse full form");
+
+    const auto wide_sparse = sparse_array(
+        {mpz_class("18446744073709551616", 10)}, {}, integer(0L));
+    check(wide_sparse.kind() == ExprKind::SparseArray,
+        "wide sparse expression kind");
+    check(wide_sparse.is_atom(), "wide sparse atom model");
+    check(wide_sparse.sparse_dimensions()
+            == std::vector<mpz_class>{
+                mpz_class("18446744073709551616", 10)},
+        "wide sparse exact dimensions");
+    check_equal(wide_sparse.to_json(),
+        "{\"type\":\"sparse_array\",\"dimensions\":[18446744073709551616],"
+        "\"fill_value\":{\"type\":\"integer\",\"value\":0},\"entries\":[],"
+        "\"explicit_length\":0}",
+        "wide sparse JSON keeps arbitrary-precision dimensions");
+    bool wide_native_dimensions_rejected = false;
+    try {
+        static_cast<void>(wide_sparse.dimensions());
+    } catch (const std::overflow_error&) {
+        wide_native_dimensions_rejected = true;
+    }
+    check(wide_native_dimensions_rejected,
+        "wide sparse machine-dimension accessor rejects narrowing");
+
+    const mpz_class wide_coordinate("18446744073709551616", 10);
+    const auto wide_entry_sparse = sparse_array(
+        std::vector<mpz_class>{wide_coordinate},
+        {SparseEntry(
+            std::vector<mpz_class>{wide_coordinate}, integer(9L))});
+    check(wide_entry_sparse.sparse_entries().size() == 1
+            && wide_entry_sparse.sparse_entries().front().indices
+                == std::vector<mpz_class>{wide_coordinate},
+        "wide sparse entry keeps arbitrary-precision coordinates");
+    check_equal(wide_entry_sparse.to_full_form(),
+        "SparseArray[List[Rule[List[18446744073709551616], 9]], "
+        "List[18446744073709551616]]",
+        "wide sparse entry full form keeps arbitrary-precision coordinates");
+    check_equal(wide_entry_sparse.to_json(),
+        "{\"type\":\"sparse_array\",\"dimensions\":[18446744073709551616],"
+        "\"fill_value\":{\"type\":\"integer\",\"value\":0},\"entries\":[{"
+        "\"indices\":[18446744073709551616],\"value\":{\"type\":\"integer\","
+        "\"value\":9}}],\"explicit_length\":1}",
+        "wide sparse entry JSON keeps arbitrary-precision coordinates");
+
+    const SparseEntry native_sparse_entry(
+        std::vector<std::size_t>{1, 2}, integer(7L));
+    check(native_sparse_entry.indices
+            == std::vector<mpz_class>{mpz_class(1), mpz_class(2)},
+        "native sparse coordinate adapter preserves integral callers");
+
+    const auto normalized_sparse = sparse_array(
+        std::vector<mpz_class>{mpz_class(3)},
+        {SparseEntry(std::vector<std::size_t>{2}, integer(2L)),
+            SparseEntry(std::vector<std::size_t>{1}, integer(3L)),
+            SparseEntry(std::vector<std::size_t>{1}, integer(4L)),
+            SparseEntry(std::vector<std::size_t>{3}, integer(0L))});
+    check_equal(normalized_sparse.to_full_form(),
+        "SparseArray[List[Rule[List[1], 3], Rule[List[2], 2]], List[3]]",
+        "direct sparse construction sorts, deduplicates, and removes fill entries");
+
+    bool sparse_entry_rank_rejected = false;
+    try {
+        static_cast<void>(sparse_array(
+            std::vector<mpz_class>{wide_coordinate},
+            {SparseEntry(
+                std::vector<mpz_class>{wide_coordinate, mpz_class(1)},
+                integer(1L))}));
+    } catch (const std::invalid_argument&) {
+        sparse_entry_rank_rejected = true;
+    }
+    check(sparse_entry_rank_rejected,
+        "direct sparse construction rejects coordinate rank mismatch");
+
+    bool sparse_entry_range_rejected = false;
+    try {
+        const mpz_class outside_coordinate = wide_coordinate + 1;
+        static_cast<void>(sparse_array(
+            std::vector<mpz_class>{wide_coordinate},
+            {SparseEntry(
+                std::vector<mpz_class>{outside_coordinate}, integer(1L))}));
+    } catch (const std::invalid_argument&) {
+        sparse_entry_range_rejected = true;
+    }
+    check(sparse_entry_range_rejected,
+        "direct sparse construction validates arbitrary-precision coordinates");
+
+    const auto wide_trailing_dimension = sparse_array(
+        {mpz_class(2), mpz_class("18446744073709551616", 10)}, {},
+        integer(0L));
+    check(wide_trailing_dimension.length() == 2,
+        "sparse native length ignores non-native trailing axes");
+    bool negative_sparse_dimension_rejected = false;
+    try {
+        static_cast<void>(sparse_array(
+            {mpz_class(-1)}, {}, integer(0L)));
+    } catch (const std::invalid_argument&) {
+        negative_sparse_dimension_rejected = true;
+    }
+    check(negative_sparse_dimension_rejected,
+        "direct exact sparse construction rejects negative dimensions");
 
     check_equal(wl_string("a\\b\n\"c"), "\"a\\\\b\\n\\\"c\"", "Wolfram string encoder");
     check_equal(parse_wl_string_literal("\"\\[Alpha]\\:03b2\\141\""), u8"\u03b1\u03b2a",
@@ -428,16 +529,23 @@ int main() {
     const std::vector<std::pair<std::string, std::string>> exact_integer_cases{
         {"Binomial[-3, 2]", "6"},
         {"Binomial[3, -2]", "0"},
+        {"Binomial[100002, 100001]", "100002"},
+        {"Binomial[100002, 100000]", "5000150001"},
+        {"Binomial[100003, 100001]", "5000250003"},
         {"Multinomial[2, 3, 4]", "1260"},
+        {"Multinomial[100001]", "1"},
         {"JacobiSymbol[1001, 9907]", "-1"},
         {"KroneckerSymbol[-1, 2]", "1"},
         {"Fibonacci[-6]", "-8"},
         {"LucasL[-6]", "18"},
         {"BernoulliB[1]", "Rational[-1, 2]"},
         {"BernoulliB[10]", "Rational[5, 66]"},
+        {"BernoulliB[1000001]", "0"},
         {"EulerE[6]", "-61"},
+        {"EulerE[1000001]", "0"},
         {"HarmonicNumber[5]", "Rational[137, 60]"},
         {"HarmonicNumber[5, 2]", "Rational[5269, 3600]"},
+        {"HarmonicNumber[0, 1000]", "0"},
         {"ContinuedFraction[415/93]", "List[4, 2, 6, 7]"},
         {"ContinuedFraction[415/93, 2]", "List[4, 2]"},
         {"ContinuedFraction[-415/93]", "List[-4, -2, -6, -7]"},
@@ -454,21 +562,49 @@ int main() {
         {"CarmichaelLambda[12]", "2"},
         {"LiouvilleLambda[18]", "-1"},
         {"JordanTotient[2, 10]", "72"},
+        {"JordanTotient[0, 1000000001]", "0"},
         {"RamanujanTau[5]", "4830"},
         {"DivisorSigma[2, 6]", "50"},
         {"DivisorSigma[-1, 6]", "2"},
+        {"DivisorSigma[1000, 1]", "1"},
         {"ModularInverse[3, 7]", "5"},
         {"PowerMod[2, -1, 4]", "PowerMod[2, -1, 4]"},
         {"IntegerReverse[1234]", "4321"},
         {"IntegerReverse[-1234]", "4321"},
         {"IntegerReverse[16, 2]", "1"},
+        {"IntegerReverse[0]", "0"},
+        {"IntegerReverse[123456789012345678901234567890]",
+            "98765432109876543210987654321"},
+        {"IntegerReverse[-123456789012345678901234567890]",
+            "98765432109876543210987654321"},
+        {"IntegerReverse[24197857203266734864793317670504947440, 16]",
+            "21173125052858393283395314067335103265"},
+        {"IntegerReverse[-24197857203266734864793317670504947440, 16]",
+            "21173125052858393283395314067335103265"},
+        {"IntegerReverse[12, x]", "IntegerReverse[12, x]"},
+        {"IntegerReverse[12, 4097]", "IntegerReverse[12, 4097]"},
         {"DigitCount[1122]", "List[2, 2, 0, 0, 0, 0, 0, 0, 0, 0]"},
         {"DigitCount[16, 2]", "List[1, 4]"},
         {"DigitCount[16, 2, 0]", "4"},
+        {"DigitCount[0]", "List[0, 0, 0, 0, 0, 0, 0, 0, 0, 1]"},
+        {"DigitCount[0, 2, 0]", "1"},
+        {"DigitCount[123456789012345678901234567890]",
+            "List[3, 3, 3, 3, 3, 3, 3, 3, 3, 3]"},
+        {"DigitCount[-123456789012345678901234567890]",
+            "List[3, 3, 3, 3, 3, 3, 3, 3, 3, 3]"},
+        {"DigitCount[340282366920938463463374607431768211456, 2]", "List[1, 128]"},
+        {"DigitCount[-340282366920938463463374607431768211456, 2, 0]", "128"},
+        {"DigitCount[24197857203266734864793317670504947440, 16]",
+            "List[2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]"},
+        {"DigitCount[12, x]", "DigitCount[12, x]"},
+        {"DigitCount[12, 10, x]", "DigitCount[12, 10, x]"},
+        {"DigitCount[12, 4097, 1]", "DigitCount[12, 4097, 1]"},
         {"BitNot[0]", "-1"},
         {"BitClear[15, 2]", "11"},
+        {"BitClear[0, 10000001]", "0"},
         {"BitSet[8, 1]", "10"},
         {"BitGet[-2, 1]", "1"},
+        {"BitGet[0, 10000001]", "0"},
         {"BitLength[-8]", "3"},
         {"BitLength[0]", "0"},
         {"FactorInteger[5, GaussianIntegers -> True]",

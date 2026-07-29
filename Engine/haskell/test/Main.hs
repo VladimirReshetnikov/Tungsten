@@ -35,12 +35,17 @@ import System.IO (hClose, hSetEncoding, openTempFile, utf8)
 import System.FilePath ((</>))
 import Text.Read (readMaybe)
 import Tungsten.Cli
+import qualified Tungsten.AlgebraicRootsTests as AlgebraicRootsTests
 import qualified Tungsten.ArrayTests as ArrayTests
 import qualified Tungsten.CollectionExtensionsTests as CollectionExtensionsTests
 import qualified Tungsten.NumericAlgebraTests as NumericAlgebraTests
+import qualified Tungsten.NumericPrecisionTests as NumericPrecisionTests
+import qualified Tungsten.PolynomialAlgebraTests as PolynomialAlgebraTests
+import qualified Tungsten.RandomTests as RandomTests
 import Tungsten.Assistant
 import Tungsten.DocsIndex
 import qualified Tungsten.DistributionTests as DistributionTests
+import qualified Tungsten.FunctionalIterationTests as FunctionalIterationTests
 import Tungsten.Expression
 import Tungsten.Evaluate
 import Tungsten.Discovery
@@ -85,12 +90,17 @@ tests =
   , checkInputFormParserErrors
   , checkEvaluator
   , checkEvaluatorErrors
+  , AlgebraicRootsTests.checkAlgebraicRootsEvaluator
   , ArrayTests.checkArrayEvaluator
   , CollectionExtensionsTests.checkCollectionExtensions
   , DistributionTests.checkDistributionEvaluator
+  , FunctionalIterationTests.checkFunctionalIterationEvaluator
   , IntervalTests.checkIntervalEvaluator
   , StatisticsTests.checkStatisticsEvaluator
   , NumericAlgebraTests.checkNumericAlgebraEvaluator
+  , NumericPrecisionTests.checkNumericPrecisionEvaluator
+  , PolynomialAlgebraTests.checkPolynomialAlgebraEvaluator
+  , RandomTests.checkRandomPlanning
   , TextualFormsTests.checkTextualFormsEvaluator
   , StringSequencePatternTests.checkStringSequencePatterns
   , checkCliArguments
@@ -100,7 +110,9 @@ tests =
   , checkNotebookPatchJson
   , checkEvaluationSession
   , checkSessionTimingRuntime
+  , checkSessionRandomRuntime
   , checkRepl
+  , checkHistoricalMessageList
   , checkDiscovery
   , checkDocumentationIndex
   , checkParserCorpus
@@ -403,6 +415,28 @@ checkNamedCharacters = do
           | (name, codepoint) <- catalogEntries
           , parseFullForm ("\"\\[" <> name <> "]\"") == Right (String (Text.singleton (chr codepoint)))
           ]
+      infixExpected headName =
+        Call (Symbol headName) [Symbol "a", Symbol "b"]
+      escapedInfixParseCount =
+        length
+          [ ()
+          | headName <- namedInfixOperatorNames
+          , parseInputForm ("a \\[" <> headName <> "] b") == Right (infixExpected headName)
+          ]
+      directInfixParseCount =
+        length
+          [ ()
+          | headName <- namedInfixOperatorNames
+          , Just character <- [namedCharacter headName]
+          , parseInputForm ("a " <> Text.singleton character <> " b") == Right (infixExpected headName)
+          ]
+      infixInputRoundTripCount =
+        length
+          [ ()
+          | headName <- namedInfixOperatorNames
+          , let expression = infixExpected headName
+          , parseInputForm (inputForm expression) == Right expression
+          ]
       inputCases =
         [ ("named identifier", "\\[Alpha]", Symbol "α")
         , ("named identifier alias", "\\[Pi]", Symbol "Pi")
@@ -416,6 +450,8 @@ checkNamedCharacters = do
         , ("direct And operator", "a ∧ b", Call (Symbol "And") [Symbol "a", Symbol "b"])
         , ("named rule operator", "a \\[Rule] b", Call (Symbol "Rule") [Symbol "a", Symbol "b"])
         , ("named invisible multiplication", "2 \\[InvisibleTimes] x", Call (Symbol "Times") [Integer 2, Symbol "x"])
+        , ("escaped named infix", "a \\[CirclePlus] b", Call (Symbol "CirclePlus") [Symbol "a", Symbol "b"])
+        , ("direct named infix", "a ⊕ b", Call (Symbol "CirclePlus") [Symbol "a", Symbol "b"])
         , ( "named association delimiters"
           , "\\[LeftAssociation]a -> 1\\[RightAssociation]"
           , Call (Symbol "Association") [Call (Symbol "Rule") [Symbol "a", Integer 1]]
@@ -439,6 +475,10 @@ checkNamedCharacters = do
     , assertEqual "Wolfram Function codepoint" (Just (chr 0xf4a1)) (namedCharacter "Function")
     , assertEqual "Wolfram ImaginaryI codepoint" (Just (chr 0xf74e)) (namedCharacter "ImaginaryI")
     , assertEqual "render symbols with canonical named escapes" "\\[Alpha]" (fullForm (Symbol "α"))
+    , assertEqual "complete named infix catalog size" 202 (length namedInfixOperatorNames)
+    , assertEqual "parse every escaped named infix operator" 202 escapedInfixParseCount
+    , assertEqual "parse every direct named infix operator" 202 directInfixParseCount
+    , assertEqual "round trip every named infix operator in InputForm" 202 infixInputRoundTripCount
     ]
   pure (and (inputChecks <> rejectedChecks <> structuralChecks))
 
@@ -474,7 +514,7 @@ checkInlineBoxes = do
       checks =
         [ assertEqual
             "extract BoxData and string inline boxes"
-            [ ["GraphicsBox[List[CircleBox[]]]"]
+            [ ["GraphicsBox[{CircleBox[]}]"]
             , ["StyleBox[\"Hello\", FontWeight->Bold]"]
             ]
             extracted
@@ -489,7 +529,7 @@ checkInlineBoxes = do
             (inlineBoxRecordHead =<< firstBox (inlineBoxCompositionBoxes composition))
         , assertEqual
             "select notebook box by ExpressionUUID"
-            (Right ["GraphicsBox[List[CircleBox[]]]"])
+            (Right ["GraphicsBox[{CircleBox[]}]"])
             (map inlineBoxRecordExpression . inlineBoxSelectionSelectedBoxes <$> byUuid)
         , assertEqual
             "select all notebook boxes by CellID"
@@ -528,8 +568,9 @@ checkFullFormParser = do
         , ("trailing-point precision real", "0.7000`30.", Real "0.7000`30.")
         , ("trailing-point zero-precision real", "0.7`0.", Real "0.7`0.")
         , ("trailing-point accuracy real", "0.7``0.", Real "0.7``0.")
-        , ("normalized rational", "Rational[-6, -8]", Rational 3 4)
-        , ("complex atom", "Complex[Rational[1, 2], -3]", Complex (Rational 1 2) (Integer (-3)))
+        , ("explicit rational constructor", "Rational[-6, -8]", Call (Symbol "Rational") [Integer (-6), Integer (-8)])
+        , ("zero-denominator rational syntax", "Rational[0, 0]", Call (Symbol "Rational") [Integer 0, Integer 0])
+        , ("explicit complex constructor", "Complex[Rational[1, 2], -3]", Call (Symbol "Complex") [Call (Symbol "Rational") [Integer 1, Integer 2], Integer (-3)])
         , ("escaped string", "\"line\\n snowman \\:2603 face \\|01f600\"", String "line\n snowman ☃ face 😀")
         , ("parenthesized head", "(f)[x]", Call (Symbol "f") [Symbol "x"])
         , ("comment-only input", "(* comment *)", Symbol "Null")
@@ -542,7 +583,7 @@ checkFullFormParser = do
 checkFullFormParserErrors :: IO Bool
 checkFullFormParserErrors = do
   first <- assertLeft "reject trailing FullForm input" (parseFullForm "f[x] trailing")
-  second <- assertLeft "reject invalid rational" (parseFullForm "Rational[1, 0]")
+  second <- assertLeft "reject incomplete rational call" (parseFullForm "Rational[1, 0")
   third <- assertLeft "reject malformed real exponent" (parseFullForm "1.2*^3.5")
   fourth <- assertLeft "reject unterminated comment" (parseFullForm "f[1] (* open")
   pure (and [first, second, third, fourth])
@@ -552,14 +593,44 @@ checkInputFormParser = do
   let cases =
         [ ("implicit multiplication and power", "1 + 2 x^3", "Plus[1, Times[2, Power[x, 3]]]")
         , ("numeric adjacency", "2x", "Times[2, x]")
-        , ("exact division", "1/6 + 1/3", "Plus[Rational[1, 6], Rational[1, 3]]")
+        , ("explicit rational constructors remain calls", "{Rational[2,4], Rational[4,2], Rational[0,0]}", "List[Rational[2, 4], Rational[4, 2], Rational[0, 0]]")
+        , ("explicit complex constructors remain calls", "{Complex[1,0], Complex[1.,0.], System`Complex[1,2.]}", "List[Complex[1, 0], Complex[1., 0.], System`Complex[1, 2.]]")
+        , ("structural exact division", "1/2 + 1/3", "Plus[Times[1, Power[2, -1]], Times[1, Power[3, -1]]]")
+        , ("grouped exact division product", "(2/3)(9/4)", "Times[Times[2, Power[3, -1]], Times[9, Power[4, -1]]]")
+        , ("structural exact division power", "(1/2)^-2", "Power[Times[1, Power[2, -1]], -2]")
         , ("right associative power", "a^b^c", "Power[a, Power[b, c]]")
         , ("unary minus precedence", "-x^2", "Times[-1, Power[x, 2]]")
+        , ("dot vectors", "{a,b}.{c,d}", "Dot[List[a, b], List[c, d]]")
+        , ("dot pure function", "Hold[#1.#2 &]", "Hold[Function[Dot[Slot[1], Slot[2]]]]")
+        , ("dot sparse constructors", "SparseArray[{}, {2,2}].SparseArray[{}, {2,2}]", "Dot[SparseArray[List[], List[2, 2]], SparseArray[List[], List[2, 2]]]")
+        , ("flat dot chain", "a.b.c", "Dot[a, b, c]")
+        , ("explicit dot call", "Dot[a,b]", "Dot[a, b]")
+        , ("dot grouping and explicit calls", "{(a.b).c, a.(b.c), Dot[a,b].c, a.Dot[b,c]}", "List[Dot[Dot[a, b], c], Dot[a, Dot[b, c]], Dot[Dot[a, b], c], Dot[a, Dot[b, c]]]")
+        , ("dot arithmetic precedence", "{-a.b, a*b.c, a.b*c, a^b.c, a.b^c, a^-b.c}", "List[Times[-1, Dot[a, b]], Times[a, Dot[b, c]], Times[Dot[a, b], c], Dot[Power[a, b], c], Dot[a, Power[b, c]], Power[a, Times[-1, Dot[b, c]]]]")
+        , ("dot decimal adjacency", "{a.5, a .5, a . 5}", "List[Times[a, .5], Times[a, .5], Dot[a, 5]]")
+        , ("escaped named infix chain", "a \\[CirclePlus] b \\[CirclePlus] c", "CirclePlus[a, b, c]")
+        , ("direct named infix chain", "a ⊕ b ⊕ c", "CirclePlus[a, b, c]")
+        , ("named infix grouping boundary", "(a \\[CirclePlus] b) \\[CirclePlus] c", "CirclePlus[CirclePlus[a, b], c]")
+        , ("named infix precedence hierarchy", "a + b \\[CirclePlus] c * d \\[CircleTimes] e \\[Diamond] f.g", "Plus[a, CirclePlus[b, Times[c, CircleTimes[d, Diamond[e, Dot[f, g]]]]]]")
+        , ("default named infix precedence", "a + b \\[Precedes] c + d", "Precedes[Plus[a, b], Plus[c, d]]")
+        , ("mixed named infix associativity", "a \\[Precedes] b \\[Succeeds] c", "Succeeds[Precedes[a, b], c]")
+        , ("named and builtin comparison associativity", "a < b \\[Precedes] c == d", "Inequality[a, Less, Precedes[b, c], Equal, d]")
         , ("lists and calls", "f[{a, b}, g[x]]", "f[List[a, b], g[x]]")
         , ("uniform comparison", "a < b < c", "Less[a, b, c]")
         , ("mixed comparison", "a < b <= c", "Inequality[a, Less, b, LessEqual, c]")
         , ("Boolean operators", "a && b || c", "Or[And[a, b], c]")
         , ("rule", "a -> b + 1", "Rule[a, Plus[b, 1]]")
+        , ("postfix function remains outside a preceding rule", "a -> b &", "Function[Rule[a, b]]")
+        , ("postfix function remains outside a preceding delayed rule", "lhs :> rhs &", "Function[RuleDelayed[lhs, rhs]]")
+        , ("postfix function can precede a delayed rule", "p & :> value", "RuleDelayed[Function[p], value]")
+        , ("postfix function remains inside assignment rhs", "a = b &", "Set[a, Function[b]]")
+        , ("postfix function remains inside delayed assignment rhs", "f := # &", "SetDelayed[f, Function[Slot[1]]]")
+        , ("named function parameters", "{x, y} |-> x + y", "Function[List[x, y], Plus[x, y]]")
+        , ("postfix predicate before Select property rule", "Select[f[1,a,2,3], #>1 & -> \"Index\"]", "Select[f[1, a, 2, 3], Rule[Function[Greater[Slot[1], 1]], \"Index\"]]")
+        , ("postfix predicate before Select property list rule", "Select[{1,a,2,3}, #>1 & -> {\"Element\",\"Index\"}]", "Select[List[1, a, 2, 3], Rule[Function[Greater[Slot[1], 1]], List[\"Element\", \"Index\"]]]")
+        , ("postfix predicate before SelectFirst property rule", "SelectFirst[{1,a}, #>1 & -> {\"Element\",\"Index\"}, q]", "SelectFirst[List[1, a], Rule[Function[Greater[Slot[1], 1]], List[\"Element\", \"Index\"]], q]")
+        , ("postfix MatchQ predicate before association Select property rule", "Select[<|a->1,b->x,c->2|>, MatchQ[#,_Integer] & -> \"Index\"]", "Select[Association[Rule[a, 1], Rule[b, x], Rule[c, 2]], Rule[Function[MatchQ[Slot[1], Blank[Integer]]], \"Index\"]]")
+        , ("postfix MatchQ predicate before association Discard property rule", "Discard[<|a->1,b->x,c->2|>, MatchQ[#,_Integer] & -> \"Index\"]", "Discard[Association[Rule[a, 1], Rule[b, x], Rule[c, 2]], Rule[Function[MatchQ[Slot[1], Blank[Integer]]], \"Index\"]]")
         , ("replacement", "f[a] /. a -> b", "ReplaceAll[f[a], Rule[a, b]]")
         , ("condition", "x_ /; x > 0", "Condition[Pattern[x, Blank[]], Greater[x, 0]]")
         , ("typed patterns", "f[x_Integer, y_]", "f[Pattern[x, Blank[Integer]], Pattern[y, Blank[]]]")
@@ -568,6 +639,10 @@ checkInputFormParser = do
         , ("slots and pure function", "#1 + #name &", "Function[Plus[Slot[1], Slot[\"name\"]]]")
         , ("slot sequence", "f[##2] &", "Function[f[SlotSequence[2]]]")
         , ("prefix and postfix application", "f @ x // g", "g[f[x]]")
+        , ("map apply operator", "f @@@ xs", "MapApply[f, xs]")
+        , ("map all operator", "f //@ xs", "MapAll[f, xs]")
+        , ("right associative map apply", "a @@@ b @@@ c", "MapApply[a, MapApply[b, c]]")
+        , ("right associative map all", "a //@ b //@ c", "MapAll[a, MapAll[b, c]]")
         , ("part", "expr[[1, 2]]", "Part[expr, 1, 2]")
         , ("span assignment rhs", "x = 1 ;; 3", "Set[x, Span[1, 3]]")
         , ("span assignment lhs", "a ;; b = 3", "Set[Span[a, b], 3]")
@@ -581,6 +656,13 @@ checkInputFormParser = do
         , ("tagged target nested unset", "f /: g[x =.] = rhs", "TagSet[f, g[Unset[x]], rhs]")
         , ("nested tagged prefix", "f /: g /: lhs = rhs", "TagSet[TagSetPrefix[f, g], lhs, rhs]")
         , ("factorials", "n! + n!!", "Plus[Factorial[n], Factorial2[n]]")
+        , ("postfix derivative primes", "Hold[fn'[x] + fn''[x]]", "Hold[Plus[Derivative[1][fn][x], Derivative[2][fn][x]]]")
+        , ("postfix derivative precedence", "Hold[f'[x]']", "Hold[Derivative[1][Derivative[1][f][x]]]")
+        , ("Get filename", "Hold[<< foo]", "Hold[Get[\"foo\"]]")
+        , ("Get path token", "Hold[<< pkg/path-name.wl]", "Hold[Get[\"pkg/path-name.wl\"]]")
+        , ("Get filename whitespace", "Hold[<<foo bar]", "Hold[Times[Get[\"foo\"], bar]]")
+        , ("Get line continuation", "Hold[<<\\\n  pkg/path-name.wl]", "Hold[Get[\"pkg/path-name.wl\"]]")
+        , ("Get plain newline boundary", "Hold[<<\nfoo.wl]", "Hold[Dot[Get[\"foo\"], wl]]")
         , ("association", "<|a -> 1, b :> 2|>", "Association[Rule[a, 1], RuleDelayed[b, 2]]")
         , ("pattern test", "x_?IntegerQ", "PatternTest[Pattern[x, Blank[]], IntegerQ]")
         , ("left-associated pattern tests", "x_?f?g", "PatternTest[PatternTest[Pattern[x, Blank[]], f], g]")
@@ -617,15 +699,58 @@ checkEvaluator :: IO Bool
 checkEvaluator = do
   let inputCases =
         [ ("integer arithmetic", "1 + 2*3", "7")
-        , ("exact rational arithmetic", "1/6 + 1/3", "Rational[1, 2]")
+        , ("explicit rational constructor normalization", "{Rational[2,4],Rational[4,2],Rational[-2,-4],Rational[2,-4],Rational[0,5],Rational[0,0],Rational[1,0],Rational[-1,0]}", "List[Rational[1, 2], 2, Rational[1, 2], Rational[-1, 2], 0, Indeterminate, ComplexInfinity, ComplexInfinity]")
+        , ("inert rational constructor domains", "{Rational[],Rational[1],Rational[1,2,3],Rational[x,2],Rational[1.,2],Rational[1,2.],Rational[Rational[1,2],3]}", "List[Rational[], Rational[1], Rational[1, 2, 3], Rational[x, 2], Rational[1., 2], Rational[1, 2.], Rational[Rational[1, 2], 3]]")
+        , ("explicit complex constructor normalization", "{Complex[1,2],Complex[1,0],Complex[0.,0],Complex[0,0.],Complex[1.,2],Complex[1,2.],Complex[1.,2.],Complex[1`30,2],Complex[1,2`30],Complex[1,0`20],Complex[Rational[1,2],Rational[-2,4]]}", "List[Complex[1, 2], 1, 0., Complex[0., 0.], Complex[1., 2.], Complex[1., 2.], Complex[1., 2.], Complex[1`30, 2], Complex[1, 2`30], Complex[1, 0`20], Complex[Rational[1, 2], Rational[-1, 2]]]")
+        , ("inert complex constructor domains", "{Complex[],Complex[1],Complex[1,2,3],Complex[x,0],Complex[1,x],Complex[1,I],Complex[Rational[1,0],0]}", "List[Complex[], Complex[1], Complex[1, 2, 3], Complex[x, 0], Complex[1, x], Complex[1, Complex[0, 1]], Complex[ComplexInfinity, 0]]")
+        , ("numeric constructor sequence splicing", "{Rational[Sequence[2,4]],Rational[1,Sequence[]],Complex[Sequence[1,2]],Complex[1,Sequence[]]}", "List[Rational[1, 2], Rational[1], Complex[1, 2], Complex[1]]")
+        , ("qualified numeric constructors and structural atoms", "{System`Rational[2,4],Global`Rational[2+2,4],System`Complex[1,2.],Global`Complex[1+1,0],Head[Rational[1,2]],AtomQ[Rational[1,2]],Length[Rational[1,2]]}", "List[Rational[1, 2], Global`Rational[4, 4], Complex[1., 2.], Global`Complex[2, 0], Rational, True, 0]")
+        , ("numeric constructor structural outcomes", "{Head[Complex[1,2]],AtomQ[Complex[1,2]],Length[Complex[1,2]],Head[Rational[x,2]],AtomQ[Rational[x,2]],Length[Rational[x,2]],Head[Complex[x,2]],AtomQ[Complex[x,2]],Length[Complex[x,2]],Head[Global`Rational[1,2]],AtomQ[Global`Rational[1,2]],Length[Global`Rational[1,2]]}", "List[Complex, True, 0, Rational, False, 2, Complex, False, 2, Global`Rational, False, 2]")
+        , ("held explicit numeric constructor syntax", "{HoldComplete[Rational[2,4],Complex[1,0]],Hold[Rational[2,4],Complex[1,0]]}", "List[HoldComplete[Rational[2, 4], Complex[1, 0]], Hold[Rational[2, 4], Complex[1, 0]]]")
+        , ("special real constructor isolation and evaluation control", "{Overflow[],System`Overflow[],Global`Overflow[],Overflow[1],Underflow[],System`Underflow[],Global`Underflow[],Underflow[1],Overflow[Sequence[]],Overflow[Sequence[1]],HoldComplete[Overflow[],Underflow[]],NumericQ[Unevaluated[Overflow[]]]}", "List[Overflow[], Overflow[], Global`Overflow[], Overflow[1], Underflow[], Underflow[], Global`Underflow[], Underflow[1], Overflow[], Overflow[1], HoldComplete[Overflow[], Underflow[]], False]")
+        , ("special real structural atoms", "{Head[Overflow[]],AtomQ[Overflow[]],NumberQ[Overflow[]],Head[Underflow[]],AtomQ[Underflow[]],NumberQ[Underflow[]],Length[Overflow[]],Length[Underflow[]]}", "List[Real, True, True, Real, True, True, 0, 0]")
+        , ("precision and accuracy metadata formulas", "{Precision[1],Precision[1.],Precision[1.23`20],Precision[1.23``20],Precision[Overflow[]],Precision[f[1.,2`20]],Accuracy[1],Accuracy[1.],Accuracy[0.],Accuracy[1000.],Accuracy[1.23`20],Accuracy[1.23``20],Accuracy[Overflow[]],Accuracy[Underflow[]],Accuracy[f[1.,2`20]]}", "List[Infinity, MachinePrecision, 20., 20.089905111439396, 0., MachinePrecision, Infinity, 15.954589770191003, 323.60724533877976, 12.954589770191003, 19.910094888560604, 20., -Infinity, Infinity, 15.954589770191003]")
+        , ("precision and accuracy arity sequence and qualification", "{Precision[],Precision[1,2],Precision[Sequence[1]],Precision[Sequence[]],Precision[Unevaluated[1.]],Accuracy[],Accuracy[1,2],Accuracy[Sequence[1]],Accuracy[Sequence[]],Accuracy[Unevaluated[1.]],System`Precision[1.],Global`Precision[1.],System`Accuracy[1.],Global`Accuracy[1.]}", "List[Precision[], Precision[1, 2], Infinity, Precision[], MachinePrecision, Accuracy[], Accuracy[1, 2], Infinity, Accuracy[], 15.954589770191003, MachinePrecision, Global`Precision[1.], 15.954589770191003, Global`Accuracy[1.]]")
+        , ("precision and accuracy recursive atomic boundaries", "{Precision[f[1`30,g[2``20]]],Accuracy[f[1`30,g[2``20]]],Precision[f[Overflow[],Underflow[]]],Accuracy[f[Overflow[],Underflow[]]],Precision[SparseArray[{{1}->1.},{2}]],Accuracy[SparseArray[{{1}->1.},{2}]],Precision[Root[#^2-2&,1]],Accuracy[Root[#^2-2&,1]],Precision[f[]],Accuracy[f[]],Precision[f[1.,Overflow[]]],Accuracy[f[1.,Overflow[]]]}", "List[20.30102999566398, 20., 0., -Infinity, Infinity, Infinity, Infinity, Infinity, Infinity, Infinity, MachinePrecision, -Infinity]")
+        , ("precision and accuracy complex coercion", "{Complex[1.,2`20],Complex[1.,2``20],Precision[Complex[1.,2`20]],Accuracy[Complex[1.,2`20]],Precision[Complex[1.,2``20]],Accuracy[Complex[1.,2``20]],Precision[Complex[1`20,2``20]],Accuracy[Complex[1`20,2``20]],Precision[Complex[Overflow[],1.]],Accuracy[Complex[Overflow[],1.]]}", "List[Complex[1., 2.], Complex[1., 2``20], MachinePrecision, 15.653559774527022, MachinePrecision, 15.954589770191003, 20., 20., MachinePrecision, -Infinity]")
+        , ("precision and accuracy decimal log extremes", "{Accuracy[1.*^-400],Precision[1.23``20*^-400],Precision[1.23``20*^400]}", "List[415.954589770191, -379.9100948885606, Overflow[]]")
+        , ("structural Distribute products and boundaries", "{Distribute[(a+b)(c+d)],Distribute[f[g[a,b],g[c,d]],g,f,h,k],Distribute[f[g[],x],g],Distribute[x],Distribute[f[g[a,b]],g,q],Distribute[f[g[1+1,3]],g,f,Plus,Times],System`Distribute[(a+b)(c+d)],Global`Distribute[(a+b)(c+d)]}", "List[Plus[Times[a, c], Times[a, d], Times[b, c], Times[b, d]], k[h[a, c], h[a, d], h[b, c], h[b, d]], g[], x, f[g[a, b]], Times[Plus[2], Plus[3]], System`Distribute[Times[Plus[a, b], Plus[c, d]]], Global`Distribute[Times[Plus[a, b], Plus[c, d]]]]")
+        , ("Inner pair callbacks and structural boundaries", "{Inner[Times,{a,b},{c,d},Plus],Inner[f,h[a,b],q[c,d],g],Inner[f,{}, {},g],Inner[Function[{x,y},HoldComplete[x+y]],{1,2},{3,4},List],Inner[f,Sequence[{a},{b}],g],System`Inner[Times,{a,b},{c,d},Plus],Global`Inner[Times,{a,b},{c,d},Plus]}", "List[Plus[Times[a, c], Times[b, d]], g[f[a, c], f[b, d]], g[], List[HoldComplete[Plus[1, 3]], HoldComplete[Plus[2, 4]]], g[f[a, b]], System`Inner[Times, List[a, b], List[c, d], Plus], Global`Inner[Times, List[a, b], List[c, d], Plus]]")
+        , ("Outer Cartesian products levels and raw containers", "{Outer[f,{a,b},{x,y}],Outer[f,a+b,{c,d},1],Outer[f,{{a,b},{c}},{{x},{y,z}},1,2],Outer[f,{a,b},{x,y},0,1],Outer[f,h[a,b],q[x,y],-1],Outer[f,{a,b},1,2],Outer[f,h[a][b,c],{x}]}", "List[List[List[f[a, x], f[a, y]], List[f[b, x], f[b, y]]], Plus[List[f[a, c], f[a, d]], List[f[b, c], f[b, d]]], List[List[List[f[List[a, b], x]], List[f[List[a, b], y], f[List[a, b], z]]], List[List[f[List[c], x]], List[f[List[c], y], f[List[c], z]]]], List[f[List[a, b], x], f[List[a, b], y]], h[q[f[a, x], f[a, y]], q[f[b, x], f[b, y]]], List[f[a], f[b]], h[a][List[f[b, x]], List[f[c, x]]]]")
+        , ("Outer rebuild normalization and qualification boundaries", "{Outer[Nothing,{a,b}],Outer[Nothing,System`List[a,b]],Outer[f,Unevaluated[{a,b}],{x}],System`Outer[f,{a},{b}],Global`Outer[f,{a},{b}]}", "List[List[], System`List[Nothing, Nothing], List[List[f[a, x]], List[f[b, x]]], System`Outer[f, List[a], List[b]], Global`Outer[f, List[a], List[b]]]")
+        , ("Through distributes compound call heads without final reentry", "{Through[(f+g)[x,y]],Through[p[f,g][x,y]],Through[(f+g)[x,y],List],Through[x],Through[f[x]],Through[x,1],Through[p[][x]],Through[p[f,g][]],Through[Unevaluated[(Identity+Identity)[1]]],System`Through[Unevaluated[(f+g)[x]]],Global`Through[Unevaluated[(f+g)[x]]]}", "List[Plus[f[x, y], g[x, y]], p[f[x, y], g[x, y]], Plus[f, g][x, y], x, f[x], x, p[], p[f[], g[]], Plus[1, 1], System`Through[Plus[f, g][x]], Global`Through[Unevaluated[Plus[f, g][x]]]]")
+        , ("Through normalizes symbol and compound containers distinctly", "{Through[Unevaluated[{(Sequence[#,#]&),f}[x]]],Through[Unevaluated[{(Nothing&),f}[x]]],Through[Unevaluated[{(Splice[{a,b}]&),f}[x]]],Through[Unevaluated[p[(Nothing&),f][x]]],Through[Unevaluated[p[(Splice[{a,b},p]&),f][x]]],Through[Unevaluated[System`List[(Nothing&),f][x]]],Through[Unevaluated[r[s][(Sequence[#,#]&),f][x]]]}", "List[List[x, x, f[x]], List[f[x]], List[a, b, f[x]], p[Nothing, f[x]], p[a, b, f[x]], System`List[Nothing, f[x]], r[s][Sequence[x, x], f[x]]]")
+        , ("Through maps association values and respects restrictions", "{Through[Unevaluated[<|a->f,b:>g|>[x,y]]],Through[Unevaluated[<|a->f,b:>g|>[x]],List]}", "List[Association[Rule[a, f[x, y]], RuleDelayed[b, g[x, y]]], Association[Rule[a, f], RuleDelayed[b, g]][x]]")
+        , ("Tr dense arrays selective evaluation and qualification", "{Tr[{a,b,c}],Tr[{{a,b},{c,d}}],Tr[{{a,b,c},{d,e,f}}],Tr[{}],Tr[{{}}],Tr[{{a,b},{c,d}},f],Tr[Unevaluated[{{1+1,Print[\"off\"]},{Print[\"off2\"],3+1}}]],Tr[Unevaluated[{{1+1,Print[\"off\"]},{Print[\"off2\"],3+1}}],HoldComplete],System`Tr[Unevaluated[{{1+1,b},{c,3+1}}]],Global`Tr[Unevaluated[{{1+1,b},{c,3+1}}]]}", "List[Plus[a, b, c], Plus[a, d], Plus[a, e], 0, 0, f[a, d], 6, HoldComplete[Plus[1, 1], Plus[3, 1]], System`Tr[List[List[Plus[1, 1], b], List[c, Plus[3, 1]]]], Global`Tr[Unevaluated[List[List[Plus[1, 1], b], List[c, Plus[3, 1]]]]]]")
+        , ("Tr rank-restricted recursive contractions", "{Tr[{},f,1],Tr[{{}},f,1],Tr[{a,b,c},f,1],Tr[{{a,b},{c,d}},f,1],Tr[{{a,b},{c,d}},f,2],Tr[{{{a,b},{c,d}},{{e,f},{g,h}}},q,1],Tr[{{{a,b},{c,d}},{{e,f},{g,h}}},q,2],Tr[{{{a,b},{c,d}},{{e,f},{g,h}}},q,3]}", "List[f[], List[], f[a, b, c], List[f[a, c], f[b, d]], f[f[a, b], f[c, d]], List[q[List[a, b], List[e, f]], q[List[c, d], List[g, h]]], List[q[q[a, c], q[e, g]], q[q[b, d], q[f, h]]], q[q[q[a, b], q[c, d]], q[q[e, f], q[g, h]]]]")
+        , ("Tr normalizes generated column values and ragged fallback", "{Tr[{{a,b},{c,d}},Nothing,1],Tr[{{a,b},{c,d}},Function[Null,Sequence[##]],1],Tr[{{a,b},{c,d}},Function[Null,Splice[{##}]],1],Tr[{{a,b},{c}},f,1]}", "List[List[], List[a, c, b, d], List[a, c, b, d], f[List[a, b], List[c]]]")
+        , ("numeric predicate real tower", "{{NumericQ[0],ExactNumberQ[0],InexactNumberQ[0],MachineIntegerQ[0],MachineNumberQ[0],RealValuedNumberQ[0]},{NumericQ[1/2],ExactNumberQ[1/2],InexactNumberQ[1/2],MachineIntegerQ[1/2],MachineNumberQ[1/2],RealValuedNumberQ[1/2]},{NumericQ[1.],ExactNumberQ[1.],InexactNumberQ[1.],MachineIntegerQ[1.],MachineNumberQ[1.],RealValuedNumberQ[1.]},{NumericQ[1`20],ExactNumberQ[1`20],InexactNumberQ[1`20],MachineIntegerQ[1`20],MachineNumberQ[1`20],RealValuedNumberQ[1`20]}}", "List[List[True, True, False, True, False, True], List[True, True, False, False, False, True], List[True, False, True, False, True, True], List[True, False, True, False, False, True]]")
+        , ("numeric predicate complex tower", "{{NumericQ[1+2I],ExactNumberQ[1+2I],InexactNumberQ[1+2I],MachineIntegerQ[1+2I],MachineNumberQ[1+2I],RealValuedNumberQ[1+2I]},{NumericQ[1.+2.I],ExactNumberQ[1.+2.I],InexactNumberQ[1.+2.I],MachineIntegerQ[1.+2.I],MachineNumberQ[1.+2.I],RealValuedNumberQ[1.+2.I]}}", "List[List[True, True, False, False, False, False], List[True, False, True, False, True, False]]")
+        , ("numeric predicate symbolic bridge", "{{NumericQ[Pi],ExactNumberQ[Pi],InexactNumberQ[Pi],RealValuedNumberQ[Pi]},{NumericQ[Sin[1]],ExactNumberQ[Sin[1]],InexactNumberQ[Sin[1]],RealValuedNumberQ[Sin[1]]},{NumericQ[Sqrt[2]],ExactNumberQ[Sqrt[2]],InexactNumberQ[Sqrt[2]],RealValuedNumberQ[Sqrt[2]]},{NumericQ[I Pi],ExactNumberQ[I Pi],InexactNumberQ[I Pi],RealValuedNumberQ[I Pi]},{NumericQ[Exp[I]],ExactNumberQ[Exp[I]],InexactNumberQ[Exp[I]],RealValuedNumberQ[Exp[I]]},NumericQ[Sin[x]],{NumericQ[Root[#^2-2&,1]],ExactNumberQ[Root[#^2-2&,1]],InexactNumberQ[Root[#^2-2&,1]],RealValuedNumberQ[Root[#^2-2&,1]]},{NumericQ[Root[#^2+1&,1]],ExactNumberQ[Root[#^2+1&,1]],RealValuedNumberQ[Root[#^2+1&,1]]}}", "List[List[True, True, False, True], List[True, True, False, True], List[True, True, False, True], List[True, True, False, False], List[True, True, False, False], False, List[True, True, False, True], List[True, True, False]]")
+        , ("numeric predicate special and machine boundaries", "{{NumericQ[Infinity],NumericQ[-Infinity],NumericQ[ComplexInfinity],NumericQ[Indeterminate]},{NumericQ[Overflow[]],ExactNumberQ[Overflow[]],InexactNumberQ[Overflow[]],MachineNumberQ[Overflow[]],RealValuedNumberQ[Overflow[]]},{NumericQ[Underflow[]],ExactNumberQ[Underflow[]],InexactNumberQ[Underflow[]],MachineNumberQ[Underflow[]],RealValuedNumberQ[Underflow[]]},{MachineIntegerQ[-2^63],MachineIntegerQ[2^63-1],MachineIntegerQ[-2^63-1],MachineIntegerQ[2^63]}}", "List[List[False, False, False, False], List[True, False, True, False, True], List[True, False, True, False, True], List[True, True, False, False]]")
+        , ("numeric predicate arity sequence and unevaluated", "{NumericQ[],NumericQ[1,2],NumericQ[Sequence[1]],NumericQ[Sequence[]],ExactNumberQ[Unevaluated[Pi]],NumberQ[Unevaluated[Pi]],NumericQ[Unevaluated[Pi]],InexactNumberQ[Unevaluated[1.]],MachineIntegerQ[Unevaluated[1]],MachineNumberQ[Unevaluated[1.]],RealValuedNumberQ[Unevaluated[Pi]],TrueQ[Unevaluated[True]]}", "List[NumericQ[], NumericQ[1, 2], True, NumericQ[], True, True, False, True, True, True, True, False]")
+        , ("numeric predicate qualification truth and NumberQ bridge", "{System`NumericQ[Pi],Global`NumericQ[1+1],System`ExactNumberQ[I Pi],Global`ExactNumberQ[1+1],System`TrueQ[True],Global`TrueQ[True],TrueQ[True],TrueQ[False],TrueQ[1==1],NumberQ[Pi],NumberQ[I Pi],NumberQ[Root[#^2-2&,1]]}", "List[True, Global`NumericQ[2], True, Global`ExactNumberQ[2], True, Global`TrueQ[True], True, False, True, True, True, True]")
+        , ("complex projections over exact scalars", "{{Re[3],Im[-1/2],ReIm[-1/2],Arg[0],Arg[-1],Conjugate[-1/2]},{Re[I],Im[I],ReIm[I],Arg[I],Arg[-I],Conjugate[I]},{Re[1/2-3/4I],Im[1/2-3/4I],ReIm[1/2-3/4I],Arg[1/2-3/4I],Conjugate[1/2-3/4I]}}", "List[List[3, 0, List[Rational[-1, 2], 0], 0, Pi, Rational[-1, 2]], List[0, 1, List[0, 1], Times[Rational[1, 2], Pi], Times[Rational[-1, 2], Pi], Complex[0, -1]], List[Rational[1, 2], Rational[-3, 4], List[Rational[1, 2], Rational[-3, 4]], ArcTan[Rational[1, 2], Rational[-3, 4]], Complex[Rational[1, 2], Rational[3, 4]]]]")
+        , ("complex projections over machine values and exact quadrants", "{{Re[1.+2.I],Im[1.+2.I],ReIm[1.+2.I],Arg[1.+2.I],Conjugate[1.+2.I]},{Arg[1+I],Arg[-1+I],Arg[-1-I],Arg[1-I],Arg[2],Arg[-2]}}", "List[List[1., 2., List[1., 2.], 1.1071487177940904, Complex[1., -2.]], List[Times[Rational[1, 4], Pi], Times[Rational[3, 4], Pi], Times[Rational[-3, 4], Pi], Times[Rational[-1, 4], Pi], 0, Pi]]")
+        , ("machine complex axes signed zero and C atan2 parity", "{Arg[Complex[0,2.]],Arg[Complex[-2.,-0.]],Arg[Complex[-3/4,2.5]],Conjugate[Complex[1.,0.]],Conjugate[Complex[1.,-0.]]}", "List[Times[Rational[1, 2], Pi], Pi, 1.8622531212727638, Complex[1., 0.], Complex[1., 0.]]")
+        , ("complex projection symbolic boundaries", "{{Re[Pi],Im[Pi],ReIm[Pi],Arg[Pi],Conjugate[Pi]},{Re[Pi+I],Im[Pi+I],ReIm[Pi+I],Arg[Pi+I],Conjugate[Pi+I]},{Re[x+I],Im[x+I],ReIm[x+I],Arg[x+I],Conjugate[x+I]}}", "List[List[Re[Pi], Im[Pi], List[Pi, 0], 0, Conjugate[Pi]], List[Re[Plus[Complex[0, 1], Pi]], Im[Plus[Complex[0, 1], Pi]], List[Pi, 1], ArcTan[Pi, 1], Conjugate[Plus[Complex[0, 1], Pi]]], List[Re[Plus[Complex[0, 1], x]], Im[Plus[Complex[0, 1], x]], ReIm[Plus[Complex[0, 1], x]], Arg[Plus[Complex[0, 1], x]], Conjugate[Plus[Complex[0, 1], x]]]]")
+        , ("complex projections thread over nested lists", "{Re[{1,I,1+I}],Im[{{I},2}],ReIm[{1,I}],Arg[{1,-1,I}],Conjugate[{1,I,1+I}],Re[{1,2},{3,4}]}", "List[List[1, 0, 1], List[List[1], 0], List[List[1, 0], List[0, 1]], List[0, Pi, Times[Rational[1, 2], Pi]], List[1, Complex[0, -1], Complex[1, -1]], List[Re[1, 3], Re[2, 4]]]")
+        , ("complex projection arity sequence and qualification", "{Re[],Re[1,2],Re[Sequence[1]],Re[Sequence[]],System`Re[1+2I],Global`Re[1+2I],System`Arg[-I],Global`Arg[-I]}", "List[Re[], Re[1, 2], 1, Re[], 1, Global`Re[Complex[1, 2]], Times[Rational[-1, 2], Pi], Global`Arg[Complex[0, -1]]]")
+        , ("explicit complex arithmetic normalizes before projection", "{Re[(1+I)+(2+3I)],Im[(1+I)(2+3I)],Conjugate[(1+I)^3],ReIm[(1-I)^4],Arg[(1+I)^2]}", "List[3, 5, Complex[-2, -2], List[-4, 0], Times[Rational[1, 2], Pi]]")
+        , ("complex projections preserve special real atoms", "{Complex[Overflow[],1],Complex[1,Underflow[]],Re[Complex[Overflow[],1]],Im[Complex[1,Underflow[]]],ReIm[Complex[Overflow[],Underflow[]]],Arg[Complex[Overflow[],1]],Conjugate[Complex[1,Underflow[]]]}", "List[Complex[Overflow[], 1], Complex[1, Underflow[]], Overflow[], Underflow[], List[Overflow[], Underflow[]], ArcTan[Overflow[], 1], Complex[1, Times[-1, Underflow[]]]]")
+        , ("exact rational sum", "1/2 + 1/3", "Rational[5, 6]")
+        , ("exact rational product", "(2/3)(9/4)", "Rational[3, 2]")
+        , ("exact rational reciprocal power", "(1/2)^-2", "4")
         , ("scalar floor and ceiling", "{Floor[3.7], Floor[-3.7], Ceiling[3.2], Ceiling[-3.2], Floor[7, 3], Floor[7, -3], Ceiling[7, 3]}", "List[3, -4, 4, -3, 6, 9, 9]")
         , ("exact rational rounding", "{Floor[7/2], Ceiling[7/2], Floor[7/2, 2/3], Ceiling[7/2, 2/3], Round[7/2, 2/3]}", "List[3, 4, Rational[10, 3], 4, Rational[10, 3]]")
+        , ("mixed inexact rounding multiples", "{Floor[-2.5,.2], Ceiling[-2.5,.2], Round[2.5,.2], Floor[-3,-.5]}", "List[-2.6, -2.4000000000000004, 2.4000000000000004, -3.]")
         , ("banker rounding", "{Round[3.5], Round[2.5], Round[7/2], Round[5/2], Round[5, 2], Round[7, 3], Round[-2.5], Round[-3.5]}", "List[4, 2, 4, 2, 4, 6, -2, -4]")
         , ("integer and exact fractional parts", "{IntegerPart[3.7], IntegerPart[-3.7], IntegerPart[5/3], IntegerPart[-5/3], FractionalPart[5/3], FractionalPart[-5/3]}", "List[3, -3, 1, -1, Rational[2, 3], Rational[-2, 3]]")
         , ("machine fractional parts", "{FractionalPart[3.7], FractionalPart[1.2], FractionalPart[-3.7], FractionalPart[2.0], FractionalPart[-0.0], FractionalPart[.5], FractionalPart[1.*^-5]}", "List[0.7000000000000002, 0.19999999999999996, -0.7000000000000002, 0., -0., 0.5, 1*^-05]")
         , ("marked fractional parts", "{FractionalPart[3.7000`30], FractionalPart[1.2``20], FractionalPart[1.2`20*^3], FractionalPart[12.34`20*^-1], FractionalPart[-0.0`30]}", "List[0.7000`30., 0.2`0., 0.0`20., 0.234`20., -0.0`30.]")
         , ("rounding edge behavior", "{Round[2.5000000000000001], Floor[1, 0], Ceiling[7, -3], Round[5, -2], Floor[x], Floor[1, x]}", "List[3, Indeterminate, 6, 4, Floor[x], Floor[1, x]]")
         , ("componentwise complex rounding", "{IntegerPart[-3.7 + 4.2 I], FractionalPart[-3.7 + 4.2 I], Round[Complex[-3.5, 2.5]], IntegerPart[I]}", "List[Complex[-3, 4], Complex[-0.7000000000000002, 0.20000000000000018], Complex[-4, 2], Complex[0, 1]]")
+        , ("numeric and symbolic absolute value and sign", "{Abs[-2.5], Abs[3+4 I], Abs[1+I], Abs[-x], Abs[x^2], Sign[-.2], Sign[3+4 I], Sign[1+I]}", "List[2.5, 5, Power[2, Rational[1, 2]], Abs[x], Power[Abs[x], 2], -1, Complex[Rational[3, 5], Rational[4, 5]], Times[Complex[1, 1], Power[2, Rational[-1, 2]]]]")
         , ("complex rounding normalization", "{IntegerPart[1.2 + 0.2 I], FractionalPart[1/2 + 0.2 I], FractionalPart[Complex[1/2, 1/5]]}", "List[1, Complex[0.5, 0.2], Complex[Rational[1, 2], Rational[1, 5]]]")
         , ("exact square roots and radicals", "{Sqrt[16], Sqrt[2], Sqrt[1/4], Sqrt[-4], Sqrt[12], 54^(1/3), 8^(2/3)}", "List[4, Power[2, Rational[1, 2]], Rational[1, 2], Times[2, I], Times[2, Power[3, Rational[1, 2]]], Times[3, Power[2, Rational[1, 3]]], 4]")
         , ("rational power extraction", "{2^(2/3), 2^(4/3), (8/27)^(2/3), 12^(-1/2), (4/9)^(-1/2), 0^(1/2), 0^(-1/2)}", "List[Power[4, Rational[1, 3]], Times[2, Power[2, Rational[1, 3]]], Rational[4, 9], Times[Rational[1, 2], Power[3, Rational[-1, 2]]], Rational[3, 2], 0, ComplexInfinity]")
@@ -657,6 +782,7 @@ checkEvaluator = do
         , ("total", "Total[{1, 2, 3, 4}]", "10")
         , ("accumulate", "Accumulate[{1, 2, 3, 4}]", "List[1, 3, 6, 10]")
         , ("list structure", "{First[{a, b}], Last[{a, b}], Rest[{a, b}], Most[{a, b}]} ", "List[a, b, List[b], List[a]]")
+        , ("list defaults leveled reverse and span riffle", "{First[{},z], Last[a,z], Reverse[{{a,b},{c,d}},{1,2}], Riffle[{a,b,c},x,{1,-1,2}], Append[{a},Nothing]}", "List[z, z, List[List[d, c], List[b, a]], List[x, a, x, b, x, c, x], List[a]]")
         , ("part", "{{a, b}, {c, d}}[[2, 1]]", "c")
         , ("part selector lists preserve heads", "{Part[f[a,b,c],{1,3}], Part[<|a->1,b->2,c->3|>,{2,1}]}", "List[f[a, c], Association[Rule[b, 2], Rule[a, 1]]]")
         , ("part nested all span and recursive selectors", "{Part[f[a,b],{{1},2}], Part[f[a,b,c],All], Part[f[a,b,c,d],2;;4;;2], Part[f[g[a,b],h[c,d]],All,2], Part[<|a->1,b->2,c->3|>,Span[1,2]]}", "List[f[a, b], f[a, b, c], f[b, d], f[b, d], Association[Rule[a, 1], Rule[b, 2]]]")
@@ -674,9 +800,13 @@ checkEvaluator = do
         , ("take positive", "Take[f[a, b, c, d], 2]", "f[a, b]")
         , ("take negative", "Take[f[a, b, c, d], -2]", "f[c, d]")
         , ("take range", "Take[f[a, b, c, d, e], {2, 5, 2}]", "f[b, d]")
+        , ("take descending range", "Take[f[a, b, c], {-1, -3, -1}]", "f[c, b, a]")
+        , ("take empty out-of-direction range", "Take[f[a, b, c], {1, -4}]", "f[]")
+        , ("take span", "Take[f[a, b, c, d], 4 ;; 1 ;; -2]", "f[d, b]")
         , ("drop range", "Drop[f[a, b, c, d, e], {2, 5, 2}]", "f[a, c, e]")
         , ("multi-axis take", "Take[{{1, 2, 3}, {4, 5, 6}}, 2, 2]", "List[List[1, 2], List[4, 5]]")
         , ("multi-axis drop", "Drop[{{1, 2, 3}, {4, 5, 6}}, 1, 1]", "List[List[5, 6]]")
+        , ("take family normalizes selected unevaluated sequences", "{Take[Unevaluated[f[Sequence[a,b]]],All], TakeDrop[Unevaluated[f[Sequence[a,b]]],All], TakeList[Unevaluated[Sequence[a,b]],{All}]}", "List[f[a, b], List[f[a, b], f[]], List[a, b]]")
         , ("append preserving head", "Append[f[a], b]", "f[a, b]")
         , ("prepend preserving head", "Prepend[f[a], b]", "f[b, a]")
         , ("join preserving head", "Join[f[a], f[b, c]]", "f[a, b, c]")
@@ -960,6 +1090,18 @@ checkEvaluatorErrors = do
     assertLeft
       "reject invalid Activate arity"
       (parseInputForm "Activate[]" >>= mapLeftEvaluation . evaluate)
+  fourteenth <-
+    assertLeft
+      "reject incompatible pure Listable argument lengths"
+      (parseInputForm "Re[{1,2},{3}]" >>= mapLeftEvaluation . evaluate)
+  fifteenth <-
+    assertLeft
+      "reject unequal Thread argument lengths"
+      (parseInputForm "Thread[f[{a,b},{c}]]" >>= mapLeftEvaluation . evaluate)
+  sixteenth <-
+    assertLeft
+      "reject negative Operate levels"
+      (parseInputForm "Operate[p,f[a],-1]" >>= mapLeftEvaluation . evaluate)
   pure
     ( and
         [ first
@@ -975,6 +1117,9 @@ checkEvaluatorErrors = do
         , eleventh
         , twelfth
         , thirteenth
+        , fourteenth
+        , fifteenth
+        , sixteenth
         ]
     )
  where
@@ -983,7 +1128,15 @@ checkEvaluatorErrors = do
 checkCliArguments :: IO Bool
 checkCliArguments = do
   let checks =
-        [ assertEqual "CLI defaults to protocol" (Right ProtocolCommand) (parseCliArguments [])
+        [ assertEqual "CLI defaults to REPL" (Right (ReplCommand True)) (parseCliArguments [])
+        , assertEqual
+            "CLI stateless evaluator batch"
+            (Right (EvaluatorBatchCommand False))
+            (parseCliArguments ["eval-batch"])
+        , assertEqual
+            "CLI stateful evaluator batch"
+            (Right (EvaluatorBatchCommand True))
+            (parseCliArguments ["eval-batch", "--stateful"])
         , assertEqual
             "CLI inline parse"
             (Right (ExpressionCliCommand ParseCommand (InlineSource "1+2") "input"))
@@ -1205,6 +1358,24 @@ checkEvaluationSession :: IO Bool
 checkEvaluationSession = do
   let cases =
         [ ("immediate assignment", "x = 1 + 2; x^3", "27")
+        , ("precision and accuracy evaluate arguments once", "i=0; {Precision[(i++;1.)],Accuracy[(i++;1000.)],Precision[(i++;1),(i++;2)],i,$MessageList}", "List[MachinePrecision, 12.954589770191003, Precision[1, 2], 4, List[]]")
+        , ("Collect callback order follows descending lexicographic polynomial terms", "ClearAll[log,k];log={};SetAttributes[k,HoldAllComplete];k[z_]:=(AppendTo[log,HoldComplete[z]];q[z]);{Collect[a x^3+b x^2+c x+d,x,k],log,(log={};Collect[a x^2+b x y+c y^2+d x+e y+f,{x,y},k]),log,(log={};Collect[0,x,k]),log,(log={};Collect[x+y,{},k]),log,$MessageList}", "List[Plus[Times[x, q[c]], Times[Power[x, 2], q[b]], Times[Power[x, 3], q[a]], q[d]], List[HoldComplete[a], HoldComplete[b], HoldComplete[c], HoldComplete[d]], Plus[Times[x, Plus[Times[y, q[b]], q[d]]], Times[y, q[e]], Times[Power[x, 2], q[a]], Times[Power[y, 2], q[c]], q[f]], List[HoldComplete[a], HoldComplete[b], HoldComplete[d], HoldComplete[c], HoldComplete[e], HoldComplete[f]], q[0], List[HoldComplete[0]], q[Plus[x, y]], List[HoldComplete[Plus[x, y]]], List[]]")
+        , ("Exponent aggregates sorted distinct powers before each callback", "ClearAll[log,h];log={};SetAttributes[h,HoldAllComplete];h[z___]:=(AppendTo[log,HoldComplete[z]];q[z]);{Exponent[x^3 y^2+x y+y^4+1,x,h],log,(log={};Exponent[x^3 y^2+x y+y^4+1,{x,y,x y},h]),log,(log={};Exponent[0,{x,y},h]),log,(log={};Exponent[x+y,{},h]),log,$MessageList}", "List[q[0, 1, 3], List[HoldComplete[0, 1, 3]], List[q[0, 1, 3], q[0, 1, 2, 4], q[0, 1, 2]], List[HoldComplete[0, 1, 3], HoldComplete[0, 1, 2, 4], HoldComplete[0, 1, 2]], List[q[-Infinity], q[-Infinity]], List[HoldComplete[-Infinity], HoldComplete[-Infinity]], List[], List[], List[]]")
+        , ("Collect and Exponent retain recoverable callback diagnostics", "ClearAll[i,k,h];i=0;k[z_]:=(i++;Part[f[z],99];q[i,z]);first={Collect[a x^2+b x+c,x,k],i,$MessageList};i=0;h[z___]:=(i++;Part[f[z],99];q[i,z]);second={Exponent[x^3 y^2+x y+y^4+1,{x,y,x y},h],i,$MessageList};{first,second}", "List[List[Plus[Times[x, q[2, b]], Times[Power[x, 2], q[1, a]], q[3, c]], 3, List[HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]]]], List[List[q[1, 0, 1, 3], q[2, 0, 1, 2, 4], q[3, 0, 1, 2]], 3, List[HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]]]]]")
+        , ("Collect and Exponent propagate callback control after prior effects", "ClearAll[i];i=0;{Catch[Collect[a x^3+b x^2+c x+d,x,(i++;If[i==2,Throw[t],q[i,#]])&]],i,(i=0;Catch[Exponent[x^3 y^2+x y+y^4+1,{x,y,x y},(i++;If[i==2,Throw[u],q[i,##]])&]]),i,$MessageList}", "List[t, 2, u, 2, List[]]")
+        , ("Collect and Exponent evaluate ordinary arguments left to right", "ClearAll[i,log,k,h];i=0;log={};k[z_]:=(AppendTo[log,p[i,z]];i++;q[z]);h[z___]:=(AppendTo[log,r[i,z]];i++;s[z]);{Collect[(i++;a x^2+b x+c),(i++;x),(i++;k)],i,log,(i=0;log={};Exponent[(i++;x^3+x+1),(i++;x),(i++;h)]),i,log,$MessageList}", "List[Plus[Times[x, q[b]], Times[Power[x, 2], q[a]], q[c]], 6, List[p[3, a], p[4, b], p[5, c]], s[0, 1, 3], 4, List[r[3, 0, 1, 3]], List[]]")
+        , ("Collect and Exponent qualification aliases and absent operators", "ClearAll[c,e,gc,ge];c=Collect;e=Exponent;gc=Global`Collect;ge=Global`Exponent;{Collect[a x+b,x],System`Collect[a x+b,x],Global`Collect[a x+b,x],c[a x+b,x],gc[a x+b,x],Exponent[x^2+x+1,x],System`Exponent[x^2+x+1,x],Global`Exponent[x^2+x+1,x],e[x^2+x+1,x],ge[x^2+x+1,x],Collect[x],Collect[x][y],System`Collect[x][y],Global`Collect[x][y],Exponent[x],Exponent[x][y],System`Exponent[x][y],Global`Exponent[x][y],Collect[x+y,Global`List[x,y]],System`Collect[x+y,Global`List[x,y]],Exponent[{x^2,x^3+1},x],Exponent[x^2,{x,y}],$MessageList}", "List[Plus[b, Times[a, x]], Plus[b, Times[a, x]], Global`Collect[Plus[b, Times[a, x]], x], Plus[b, Times[a, x]], Global`Collect[Plus[b, Times[a, x]], x], 2, 2, Global`Exponent[Plus[1, x, Power[x, 2]], x], 2, Global`Exponent[Plus[1, x, Power[x, 2]], x], Collect[x], Collect[x][y], System`Collect[x][y], Global`Collect[x][y], Exponent[x], Exponent[x][y], System`Exponent[x][y], Global`Exponent[x][y], Plus[x, y], Plus[x, y], List[2, 3], List[2, 0], List[]]")
+        , ("Distribute returns replacement-headed products without reentry", "ClearAll[h,k];h[x_]:=p[x];k[x___]:=q[x];Distribute[f[g[a,b],g[c]],g,f,h,k]", "k[h[a, c], h[b, c]]")
+        , ("Inner threads pair and combiner callback state", "Clear[i,ff,gg];i=0;ff[x_,y_]:=(i++;p[i,x,y]);gg[x__]:=(i++;q[i,x]);{Inner[ff,{a,b},{c,d},gg],i,$MessageList}", "List[q[3, p[1, a, c], p[2, b, d]], 3, List[]]")
+        , ("Outer threads Cartesian callbacks left to right", "ClearAll[i,ff];i=0;ff[x__]:=(i++;p[i,x]);{Outer[ff,{a,b},{x,y}],i,$MessageList}", "List[List[List[p[1, a, x], p[2, a, y]], List[p[3, b, x], p[4, b, y]]], 4, List[]]")
+        , ("Through distinguishes eager and transparent callback arguments", "ClearAll[i,ff,first,second];i=0;ff[x__]:=p[i,x];first={Through[q[ff,ff][i++]],i};i=0;second={Through[Unevaluated[q[ff,ff][i++]]],i};{first,second}", "List[List[q[p[1, 0], p[1, 0]], 1], List[q[p[1, 0], p[2, 1]], 2]]")
+        , ("Through threads association callback state", "ClearAll[i,ff];i=0;ff[x__]:=(i++;p[i,x]);{Through[Unevaluated[<|a->ff,b:>ff|>[x]]],i}", "List[Association[Rule[a, p[1, x]], RuleDelayed[b, p[2, x]]], 2]")
+        , ("Tr threads default and recursive combiner state", "ClearAll[tungstenTrI,tungstenTrF];tungstenTrI=0;tungstenTrF[x__]:=(tungstenTrI++;p[tungstenTrI,x]);{Tr[{{a,b},{c,d}},tungstenTrF],tungstenTrI,Tr[{{{a,b},{c,d}},{{e,f},{g,h}}},tungstenTrF,2],tungstenTrI,$MessageList}", "List[p[1, a, d], 1, List[p[6, p[2, a, c], p[4, e, g]], p[7, p[3, b, d], p[5, f, h]]], 7, List[]]")
+        , ("Tr retains earlier callback state on later shape failure", "ClearAll[i,ff];i=0;ff[x__]:=(i++;p[i,x]);{Tr[{{a},{b},c},ff,2],i,$MessageList}", "List[Tr[List[List[a], List[b], c], ff, 2], 2, List[HoldForm[MessageName[Tr, \"error\"]]]]")
+        , ("Tr re-enters recovered non-Plus combiner calls", "ClearAll[tungstenTrI,tungstenTrA,tungstenTrB];tungstenTrI=0;tungstenTrA[]:=(tungstenTrI++;{a});tungstenTrB[]:=(tungstenTrI++;{b,c});{Tr[Unevaluated[{tungstenTrA[],tungstenTrB[]}],Times,1],tungstenTrI,$MessageList}", "List[Times[tungstenTrA[], tungstenTrB[]], 4, List[HoldForm[MessageName[Times, \"error\"]], HoldForm[MessageName[Times, \"error\"]]]]")
+        , ("listable complex projections evaluate each element once", "c=0; f[x_]:=(c++;x); {Re[{f[1+I],f[2+3I]}],c}", "List[List[1, 2], 2]")
+        , ("thread constructs callback calls without eager reentry", "ClearAll[f,y];y=0;f[x_?AtomQ]:=(y=y+1;x);{Thread[f[{a,b}]],y}", "List[List[f[a], f[b]], 0]")
+        , ("operate invokes its selected head callback exactly once", "ClearAll[y];y=0;{Operate[Function[x,y=y+1;q[x]],f[g][a],2],y}", "List[q[f][g][a], 1]")
         , ( "failure and missing predicates preserve the Python value domain"
           , "{FailureQ[Failure[\"x\", <||>]], FailureQ[$Failed], FailureQ[$Canceled], FailureQ[$Aborted], FailureQ[Missing[\"x\"]], MissingQ[Missing[\"x\"]], MissingQ[$Failed], System`FailureQ[System`Failure[\"x\", <||>]]}"
           , "List[True, True, True, True, False, True, False, True]"
@@ -1224,6 +1395,10 @@ checkEvaluationSession = do
         , ( "confirmation controls return values and project failure properties"
           , "{Enclose[1 + Confirm[2]], Enclose[Confirm[Missing[\"Nope\"], \"info\"], \"Expression\"], Enclose[Confirm[Missing[\"Nope\"], \"info\"], \"Information\"], Enclose[ConfirmBy[3, IntegerQ]], Enclose[ConfirmBy[3, StringQ, \"info\"], \"Function\"], Enclose[ConfirmMatch[3, _Integer]], Enclose[ConfirmMatch[3, _String, \"info\"], \"Pattern\"]}"
           , "List[3, Missing[\"Nope\"], \"info\", 3, StringQ, 3, Blank[String]]"
+          )
+        , ( "confirm assert values assertion state and qualification"
+          , "{Enclose[ConfirmAssert[True]],Enclose[ConfirmAssert[False,info],\"Information\"],Enclose[ConfirmAssert[False,info],\"Test\"],System`ConfirmAssert[True],Global`ConfirmAssert[1+1,2+2],System`Assert[1+1;False],Global`Assert[1+1;False],On[System`Assert],Assert[True],Off[System`Assert],Assert[False]}"
+          , "List[Null, info, False, Null, Global`ConfirmAssert[2, 4], Assert[CompoundExpression[Plus[1, 1], False]], Global`Assert[False], Null, Null, Null, Assert[False]]"
           )
         , ( "tagged confirmations route to the nearest matching enclose"
           , "{Enclose[Confirm[$Failed, \"info\", tag], \"Information\", tag], Enclose[Enclose[Confirm[$Failed, \"outer\", outer], inner, inner], \"Information\", outer]}"
@@ -1426,6 +1601,47 @@ checkEvaluationSession = do
         , ("downvalue pattern callbacks share one effectful match", "c = 0; q[x_] := (c = c + 1; x > 1); f[x_ /; q[x]] := x; {f[1], f[2], c}", "List[f[1], 2, 2]")
         , ("downvalue PatternTest and Condition callbacks run once", "c = 0; f[(x_?(c = c + 1; IntegerQ)) /; (c = c + 10; True)] := x; {f[1], c}", "List[1, 11]")
         , ("map callbacks thread session state", "y = 0; {Map[Function[x, y = y + 1; x], {a, b}], y}", "List[List[a, b], 2]")
+        , ("MapIndexed walks bottom up with paths and callback state", "ClearAll[i,mi];i=0;mi[x_,p_]:=(i++;q[i,x,p]);{MapIndexed[mi,h[a,g[b,c]],Infinity],i}", "List[h[q[1, a, List[1]], q[4, g[q[2, b, List[2, 1]], q[3, c, List[2, 2]]], List[2]]], 4]")
+        , ("MapIndexed preserves association keys rules and operator boundaries", "{MapIndexed[Function[{value,path},path],<|a->x,b:>g[y]|>,Infinity],MapIndexed[q][f[a,g[b]]],System`MapIndexed[q][f[a]],Global`MapIndexed[q][f[a]],System`MapIndexed[q,f[a]],MapIndexed[q,a,Infinity],MapIndexed[q,f[a],{0}]}", "List[Association[Rule[a, List[Key[a]]], RuleDelayed[b, List[Key[b]]]], f[q[a, List[1]], q[g[b], List[2]]], f[q[a, List[1]]], Global`MapIndexed[q][f[a]], System`MapIndexed[q, f[a]], a, f[a]]")
+        , ("MapIndexed normalizes callback results and direct Unevaluated arguments", "{MapIndexed[Function[{x,p},Nothing],{a,b}],MapIndexed[Function[{x,p},Sequence[x,p]],{a,b}],MapIndexed[q,Unevaluated[f[1+1]],Unevaluated[Infinity]],System`MapIndexed[q,Unevaluated[f[1+1]]],Global`MapIndexed[q,Unevaluated[f[1+1]]],MapIndexed[q,f[],{-2}]}", "List[List[], List[a, b], f[q[Plus[q[1, List[1, 1]], q[1, List[1, 2]]], List[1]]], System`MapIndexed[q, f[Plus[1, 1]]], Global`MapIndexed[q, Unevaluated[f[Plus[1, 1]]]], f[]]")
+        , ("MapThread supports default positive zero and empty depths", "{MapThread[f,{{a,b},{c,d}}],MapThread[f,{{{a,b},{c,d}},{{e,f},{g,h}}},2],MapThread[f,{a,b},0],MapThread[f,{},0],MapThread[f,{},3]}", "List[List[f[a, c], f[b, d]], List[List[f[a, e], f[b, f]], List[f[c, g], f[d, h]]], f[a, b], List[], List[]]")
+        , ("MapThread preserves prior callback state on later shape failure", "ClearAll[i,mt];i=0;mt[x__]:=(i++;q[i,x]);{MapThread[mt,{{{a},{b,c}},{{d},{e}}},2],i,$MessageList}", "List[MapThread[mt, List[List[List[a], List[b, c]], List[List[d], List[e]]], 2], 1, List[HoldForm[MessageName[MapThread, \"error\"]]]]")
+        , ("MapThread normalizes generated lists and preserves qualification boundaries", "{MapThread[Function[{x,y},Nothing],{{a,b},{c,d}}],MapThread[Function[{x,y},Splice[{p[x,y],q[x,y]},List]],{{a,b},{c,d}}],MapThread[Function[{x,y},HoldComplete[x,y]],Unevaluated[{{1+1},{2+2}}]],System`MapThread[f,Unevaluated[{{1+1},{2+2}}]],Global`MapThread[f,Unevaluated[{{1+1},{2+2}}]]}", "List[List[], List[p[a, c], q[a, c], p[b, d], q[b, d]], List[HoldComplete[Plus[1, 1], Plus[2, 2]]], System`MapThread[f, List[List[Plus[1, 1]], List[Plus[2, 2]]]], Global`MapThread[f, Unevaluated[List[List[Plus[1, 1]], List[Plus[2, 2]]]]]]")
+        , ("MapThread callback control signals retain traversal state", "i=0;{Catch[MapThread[(i++;If[i==2,Throw[t],q[i,##]])&,{{a,b,c},{d,e,f}}]],i}", "List[t, 2]")
+        , ("BlockMap schedules complete overlapping and gapped windows", "{BlockMap[f,{a,b,c,d,e},2],BlockMap[f,{a,b,c,d,e},2,1],BlockMap[f,{a,b,c,d,e,f},2,3],BlockMap[f,h[a,b,c,d,e],2],BlockMap[f,f[],1],BlockMap[f,{a},2]}", "List[List[f[List[a, b]], f[List[c, d]]], List[f[List[a, b]], f[List[b, c]], f[List[c, d]], f[List[d, e]]], List[f[List[a, b]], f[List[d, e]]], List[f[h[a, b]], f[h[c, d]]], List[], List[]]")
+        , ("BlockMap preserves association windows and normalizes generated lists", "ClearAll[seq,sp];seq[x_]:=Sequence[p[x],q[x]];sp[x_]:=Splice[{p[x],q[x]},List];{BlockMap[HoldComplete,<|a->1,b:>2,c->3,d:>4|>,2,1],BlockMap[Function[x,Nothing],{a,b,c,d},2],BlockMap[seq,{a,b,c,d},2],BlockMap[sp,{a,b,c,d},2]}", "List[List[HoldComplete[Association[Rule[a, 1], RuleDelayed[b, 2]]], HoldComplete[Association[RuleDelayed[b, 2], Rule[c, 3]]], HoldComplete[Association[Rule[c, 3], RuleDelayed[d, 4]]]], List[], List[p[List[a, b]], q[List[a, b]], p[List[c, d]], q[List[c, d]]], List[p[List[a, b]], q[List[a, b]], p[List[c, d]], q[List[c, d]]]]")
+        , ("BlockMap continues after recoverable callback errors", "ClearAll[i,bm];i=0;bm[x_]:=(i++;If[i==2,Part[x,99],q[i,x]]);{BlockMap[bm,{a,b,c,d,e,f},2],i,$MessageList}", "List[List[q[1, List[a, b]], Part[List[c, d], 99], q[3, List[e, f]]], 3, List[HoldForm[MessageName[Part, \"error\"]]]]")
+        , ("BlockMap propagates control and preserves qualification boundaries", "i=0;{Catch[BlockMap[(i++;If[i==2,Throw[t],q[i,#]])&,{a,b,c,d,e,f},2]],i,BlockMap[HoldComplete,Unevaluated[h[1+1,2+2,3+3,4+4]],2],System`BlockMap[HoldComplete,Unevaluated[h[1+1,2+2,3+3,4+4]],2],Global`BlockMap[HoldComplete,Unevaluated[h[1+1,2+2,3+3,4+4]],2]}", "List[t, 2, List[HoldComplete[h[Plus[1, 1], Plus[2, 2]]], HoldComplete[h[Plus[3, 3], Plus[4, 4]]]], System`BlockMap[HoldComplete, h[Plus[1, 1], Plus[2, 2], Plus[3, 3], Plus[4, 4]], 2], Global`BlockMap[HoldComplete, Unevaluated[h[Plus[1, 1], Plus[2, 2], Plus[3, 3], Plus[4, 4]]], 2]]")
+        , ("SubsetMap replaces selected items with duplicate and negative positions", "{SubsetMap[Reverse,{a,b,c,d,e},{1,3,5}],SubsetMap[Reverse,{a,b,c,d,e},{{1},{3},{5}}],SubsetMap[Reverse,{a,b,c,d,e},{-1,-3}],SubsetMap[Function[x,{p,q}],{a,b},{1,1}],SubsetMap[Function[x,{}],{a,b},{}],SubsetMap[Reverse,System`List[a,b,c],System`List[1,3]]}", "List[List[e, b, c, d, a], List[e, b, c, d, a], List[a, b, e, d, c], List[q, b], List[a, b], System`List[c, b, a]]")
+        , ("SubsetMap validates every position before invoking its callback", "ClearAll[i,sm];i=0;sm[x_]:=(i++;{p});{SubsetMap[sm,{a,b},{3,{1,2}}],i,$MessageList}", "List[SubsetMap[sm, List[a, b], List[3, List[1, 2]]], 0, List[HoldForm[MessageName[SubsetMap, \"error\"]]]]")
+        , ("SubsetMap preserves recoverable callback diagnostics and effects", "ClearAll[i,sm];i=0;sm[x_]:=(i++;Part[f[x],9]);{SubsetMap[sm,{a,b},{1}],i,$MessageList}", "List[SubsetMap[sm, List[a, b], List[1]], 1, List[HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[SubsetMap, \"error\"]]]]")
+        , ("SubsetMap can succeed after a recoverable callback diagnostic", "ClearAll[i,sm];i=0;sm[x_]:=(i++;Part[f[x],9];{p});{SubsetMap[sm,{a,b},{1}],i,$MessageList}", "List[List[p, b], 1, List[HoldForm[MessageName[Part, \"error\"]]]]")
+        , ("SubsetMap wrong-length recovery retains callback state", "ClearAll[i,sm];i=0;sm[x_]:=(i++;{p,q});{SubsetMap[sm,{a,b},{1}],i,$MessageList}", "List[SubsetMap[sm, List[a, b], List[1]], 1, List[HoldForm[MessageName[SubsetMap, \"error\"]]]]")
+        , ("SubsetMap evaluates arguments left to right but recovers raw syntax", "ClearAll[i];i=0;{SubsetMap[(i++;f),(i++;{a}),(i++;{1}),(i++;z)],i,SubsetMap[(i++;f),(i++;a),(i++;{1})],i}", "List[SubsetMap[CompoundExpression[Increment[i], f], CompoundExpression[Increment[i], List[a]], CompoundExpression[Increment[i], List[1]], CompoundExpression[Increment[i], z]], 4, SubsetMap[CompoundExpression[Increment[i], f], CompoundExpression[Increment[i], a], CompoundExpression[Increment[i], List[1]]], 7]")
+        , ("SubsetMap direct Unevaluated is held while Evaluate forces its payload", "ClearAll[i];i=0;{SubsetMap[f,Unevaluated[(i++;{a,b})],{1}],i,SubsetMap[f,Evaluate[Unevaluated[(i++;{a,b})]],{1}],i}", "List[SubsetMap[f, Unevaluated[CompoundExpression[Increment[i], List[a, b]]], List[1]], 0, SubsetMap[f, Evaluate[Unevaluated[CompoundExpression[Increment[i], List[a, b]]]], List[1]], 1]")
+        , ("SubsetMap propagates control and preserves qualification boundaries", "ClearAll[i,s,bb];i=0;s=System`SubsetMap;bb=SubsetMap;{Catch[SubsetMap[(i++;Throw[t])&,{a,b},{1}]],i,System`SubsetMap[Reverse,{a,b},{1,2}],Global`SubsetMap[Reverse,{a,b},{1,2}],s[Reverse,{a,b},{1,2}],bb[Reverse,{a,b},{1,2}]}", "List[t, 1, System`SubsetMap[Reverse, List[a, b], List[1, 2]], Global`SubsetMap[Reverse, List[a, b], List[1, 2]], System`SubsetMap[Reverse, List[a, b], List[1, 2]], List[b, a]]")
+        , ("SubsetMap ordinary downvalues take precedence over builtin dispatch", "Unprotect[SubsetMap];ClearAll[SubsetMap];SubsetMap[x__]:=HoldComplete[x];SubsetMap[f,{a,b},{1}]", "HoldComplete[f, List[a, b], List[1]]")
+        , ("FlattenAt splices nested batches selectors and sparse targets", "{FlattenAt[{x,{a,b},y},2],FlattenAt[f[g[a,h[b,c]],d],{1,2}],FlattenAt[f[g[a,b],h[c,d],k[e,f]],{{1},{1},{3}}],FlattenAt[f[g[a,b],h[c,d],k[e,f]],{{{1,3}}}],FlattenAt[f[g[a,b],h[c,d],k[e,f]],{{All}}],FlattenAt[f[g[h[a,b],c],k[d,e]],{{1,1},{1}}],FlattenAt[SparseArray[{{2}->g[a,b]},{3}],2]}", "List[List[x, a, b, y], f[g[a, b, c], d], f[a, b, h[c, d], e, f], f[a, b, h[c, d], e, f], f[a, b, c, d, e, f], f[a, b, c, k[d, e]], List[0, a, b, 0]]")
+        , ("FlattenAt preserves exact rebuild and association quirks", "{FlattenAt[f[g[a,b],h[c,d],k[e,f]],System`List[System`List[System`Span[1,3,2]]]],FlattenAt[Unevaluated[HoldComplete[f[Sequence[a,b]]]],1],FlattenAt[Unevaluated[System`HoldComplete[f[Sequence[a,b]]]],1],FlattenAt[Unevaluated[List[f[Nothing,Sequence[a,b]]]],1],FlattenAt[Unevaluated[System`List[f[Nothing,Sequence[a,b]]]],1],FlattenAt[Unevaluated[(p+q)[f[Sequence[a,b]]]],1],FlattenAt[Unevaluated[List[f[Splice[{a,b}]]]],1],FlattenAt[<|a->g[x,y],b:>h[p,q]|>,{{1},{2}}]}", "List[f[a, b, h[c, d], e, f], HoldComplete[Sequence[a, b]], System`HoldComplete[a, b], List[a, b], System`List[Nothing, a, b], Plus[p, q][Sequence[a, b]], List[a, b], Association[a, g[x, y], b, h[p, q]]]")
+        , ("FlattenAt evaluates arguments left to right and recovers raw syntax", "ClearAll[i];i=0;{FlattenAt[(i++;f[g[x,y]]),(i++;1)],i,(i=0;FlattenAt[(i++;f[g[x,y]]),(i++;1),(i++;z)]),i,(i=0;FlattenAt[Unevaluated[(i++;f[g[1+1,2+2]])],Unevaluated[(i++;1)]]),i,(i=0;FlattenAt[Evaluate[Unevaluated[(i++;f[g[x,y]])]],1]),i}", "List[f[x, y], 2, FlattenAt[CompoundExpression[Increment[i], f[g[x, y]]], CompoundExpression[Increment[i], 1], CompoundExpression[Increment[i], z]], 3, FlattenAt[Unevaluated[CompoundExpression[Increment[i], f[g[Plus[1, 1], Plus[2, 2]]]]], Unevaluated[CompoundExpression[Increment[i], 1]]], 0, f[x, y], 1]")
+        , ("FlattenAt preserves qualification aliases and absent operator form", "ClearAll[i,s,bb];i=0;s=System`FlattenAt;bb=FlattenAt;{System`FlattenAt[Unevaluated[(i++;f[g[x,y]])],Unevaluated[(i++;1)]],i,Global`FlattenAt[Unevaluated[(i++;f[g[x,y]])],Unevaluated[(i++;1)]],i,s[f[g[x,y]],1],bb[f[g[x,y]],1],FlattenAt[1][f[g[x,y]]]}", "List[System`FlattenAt[CompoundExpression[Increment[i], f[g[x, y]]], CompoundExpression[Increment[i], 1]], 0, Global`FlattenAt[Unevaluated[CompoundExpression[Increment[i], f[g[x, y]]]], Unevaluated[CompoundExpression[Increment[i], 1]]], 0, System`FlattenAt[f[g[x, y]], 1], f[x, y], FlattenAt[1][f[g[x, y]]]]")
+        , ("FlattenAt retains recoverable diagnostics effects and control", "ClearAll[i];i=0;{FlattenAt[Part[f[g[a,b]],9],1],(i=0;FlattenAt[(i++;f[g[a,b]]),(i++;x)]),i,(i=0;Catch[FlattenAt[(i++;Throw[t]),(i++;1)]]),i,(i=0;CheckAbort[FlattenAt[(i++;Abort[]),(i++;1)],caught]),i,$MessageList}", "List[Part[g[a, b], 9], FlattenAt[CompoundExpression[Increment[i], f[g[a, b]]], CompoundExpression[Increment[i], x]], 2, t, 1, caught, 1, List[HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[FlattenAt, \"error\"]]]]")
+        , ("FlattenAt ordinary downvalues take precedence over builtin dispatch", "Unprotect[FlattenAt];ClearAll[FlattenAt];FlattenAt[x__]:=HoldComplete[x];FlattenAt[f[g[a,b]],1]", "HoldComplete[f[g[a, b]], 1]")
+        , ("Scan follows postorder at default root infinite and negative levels", "{Reap[Scan[Sow,g[a,h[b,c]]]][[2,1]],Reap[Scan[Sow,g[a,h[b,c]],{0,Infinity}]][[2,1]],Reap[Scan[Sow,g[a,h[b,c]],{-1}]][[2,1]],Reap[Scan[Sow,g[a,h[b,c]],-2]][[2,1]],Reap[Scan[Sow,g[a,h[b,c]],{0}]][[2,1]],Reap[Scan[Sow,g[a,h[b,c]],Infinity]][[2,1]]}", "List[List[a, h[b, c]], List[a, b, c, h[b, c], g[a, h[b, c]]], List[a, b, c], List[h[b, c]], List[g[a, h[b, c]]], List[a, b, c, h[b, c]]]")
+        , ("Scan Heads visits nested ordinary heads while associations expose only values", "{Reap[Scan[Sow,g[a,h[b]],{0,Infinity},Heads->True]][[2,1]],Reap[Scan[Sow,g[a,h[b]],{0,Infinity},Heads:>False]][[2,1]],Reap[Scan[Sow,f[g][h][x],{0,Infinity},Heads->True]][[2,1]],Reap[Scan[Sow,<|a->x,b:>h[y]|>,{0,Infinity},Heads->True]][[2,1]]}", "List[List[g, a, h, b, h[b], g[a, h[b]]], List[a, b, h[b], g[a, h[b]]], List[f, g, f[g], h, f[g][h], x, f[g][h][x]], List[x, h, y, h[y], Association[Rule[a, x], RuleDelayed[b, h[y]]]]]")
+        , ("Scan continues after recoverable callback diagnostics", "ClearAll[i,sc];i=0;sc[x_]:=(i++;Part[f[x],99]);{Scan[sc,g[a,b],{0,Infinity}],i,$MessageList}", "List[Null, 3, List[HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]]]]")
+        , ("Scan ignores Nothing Sequence and Splice callback results", "ClearAll[i];i=0;{Scan[(i++;Nothing)&,{a,b}],i,Scan[Sequence[p,q]&,{a,b}],Scan[Splice[{p,q}]&,{a,b}]}", "List[Null, 2, Null, Null]")
+        , ("Scan propagates Throw and Abort with prior callback state", "ClearAll[i];i=0;{Catch[Scan[(i++;Throw[t])&,{a,b}]],i,CheckAbort[Scan[(i++;Abort[])&,{a,b}],caught],i}", "List[t, 1, caught, 2]")
+        , ("Scan propagates Return immediately", "ClearAll[i];i=0;Scan[(i++;Return[r])&,{a,b}];i", "Return[r]")
+        , ("Scan strips direct Unevaluated while Evaluate forces its payload", "{Reap[Scan[Function[x,Sow[HoldComplete[x]],HoldAll],Unevaluated[g[1+1]]]][[2,1]],Reap[Scan[Function[x,Sow[HoldComplete[x]],HoldAll],Evaluate[Unevaluated[g[1+1]]]]][[2,1]]}", "List[List[HoldComplete[Plus[1, 1]]], List[HoldComplete[2]]]")
+        , ("Scan preserves direct qualification and operator boundaries", "ClearAll[scanSystemAlias,scanBareAlias];scanSystemAlias=System`Scan;scanBareAlias=Scan;{Reap[Scan[Sow][g[a,c]]][[2,1]],Reap[System`Scan[Sow][g[a,c]]][[2,1]],Reap[System`Scan[Sow,{0,Infinity}][g[a,c]]][[2,1]],Global`Scan[Sow][g[a,c]],Scan[f,{0,Infinity}][g[a,c]],Reap[scanSystemAlias[Sow][g[a,c]]][[2,1]],Reap[scanBareAlias[Sow][g[a,c]]][[2,1]],System`Scan[HoldComplete,Unevaluated[g[1+1]]],Global`Scan[HoldComplete,Unevaluated[g[1+1]]]}", "List[List[a, c], List[a, c], List[a, c, g[a, c]], Global`Scan[Sow][g[a, c]], Null[g[a, c]], List[a, c], List[a, c], System`Scan[HoldComplete, g[Plus[1, 1]]], Global`Scan[HoldComplete, Unevaluated[g[Plus[1, 1]]]]]")
+        , ("Scan evaluates failing arguments left to right and recovers raw syntax", "ClearAll[i];i=0;{Scan[(i++;f),(i++;g[a]),(i++;1),(i++;2),(i++;z)],i,Scan[(i++;f),(i++;g[a]),(i++;x)],i,$MessageList}", "List[Scan[CompoundExpression[Increment[i], f], CompoundExpression[Increment[i], g[a]], CompoundExpression[Increment[i], 1], CompoundExpression[Increment[i], 2], CompoundExpression[Increment[i], z]], 5, Scan[CompoundExpression[Increment[i], f], CompoundExpression[Increment[i], g[a]], CompoundExpression[Increment[i], x]], 8, List[HoldForm[MessageName[Scan, \"error\"]], HoldForm[MessageName[Scan, \"error\"]]]]")
+        , ("Scan ordinary downvalues take precedence over builtin dispatch", "Unprotect[Scan];ClearAll[Scan];Scan[x__]:=HoldComplete[x];Scan[f,{a,b}]", "HoldComplete[f, List[a, b]]")
+        , ("thread distributes matching immediate heads", "{Thread[f[{a,b},{c,d}]],Thread[f[h[a,b],c],h],Thread[f[{},c]],Thread[f[a,b]],Thread[a],Thread[Unevaluated[f[{a,b}]]]}", "List[List[f[a, c], f[b, d]], h[f[a, c], f[b, c]], List[], f[a, b], a, List[f[a], f[b]]]")
+        , ("thread preserves exact target heads and qualification boundaries", "{Thread[f[System`List[a,b],c]],Thread[f[{a,b},c],System`List],System`Thread[Unevaluated[f[{a,b}]]],Global`Thread[Unevaluated[f[{a,b}]]]}", "List[f[System`List[a, b], c], f[List[a, b], c], System`Thread[f[List[a, b]]], Global`Thread[Unevaluated[f[List[a, b]]]]]")
+        , ("operate transforms nested heads at exact levels", "{Operate[p,f[g][h][x],0],Operate[p,f[g][h][x]],Operate[p,f[g][h][x],2],Operate[p,f[g][h][x],3],Operate[p,f[g][h][x],4],Operate[p,a,0],Operate[p,a],Operate[p,<|a->1|>,1]}", "List[p[f[g][h][x]], p[f[g][h]][x], p[f[g]][h][x], p[f][g][h][x], f[g][h][x], p[a], a, p[Association][Rule[a, 1]]]")
+        , ("operate preserves callback and qualification boundaries", "{Operate[Function[x,Nothing],f[a],0],Operate[Function[x,Nothing],f[a],1],Operate[Function[x,Sequence[p,q]],f[a],1],Operate[p,Sequence[f[a]]],Operate[p,f[a],Sequence[]],Operate[p,Unevaluated[f[a]],1],System`Operate[p,Unevaluated[f[a]]],Global`Operate[p,Unevaluated[f[a]]]}", "List[Nothing[a], p[a], p[f][a], p[f][a], p[f][a], System`Operate[p, f[a]], Global`Operate[p, Unevaluated[f[a]]]]")
+        , ("outer normalizes generated Sequence Splice and Nothing", "ClearAll[seq,sp,tsp,nt];seq[x__]:=Sequence[p[x],q[x]];sp[x__]:=Splice[{p[x],q[x]}];tsp[x__]:=Splice[{p[x],q[x]},h];nt[x__]:=Nothing;{Outer[seq,{a,b},{x}],Outer[sp,{a,b},{x}],Outer[tsp,h[a,b]],Outer[nt,{a,b},{x}],Outer[nt,System`List[a,b],{x}]}", "List[List[List[p[a, x], q[a, x]], List[p[b, x], q[b, x]]], List[List[p[a, x], q[a, x]], List[p[b, x], q[b, x]]], h[p[a], q[a], p[b], q[b]], List[List[], List[]], System`List[List[], List[]]]")
         , ("map level specifications", "{Map[f, {a, b}, {0}], Map[f, {a, {b, c}}, {2}], Map[f, {a, {b, c}}, {1, 2}]}", "List[f[List[a, b]], List[a, List[f[b], f[c]]], List[f[a], f[List[f[b], f[c]]]]]")
         , ("apply level specifications", "{Apply[f, {a, b}, {0}], Apply[f, {a, {b, c}}, {2}], Apply[f, {a, {b, c}}, {1, 2}]}", "List[f[a, b], List[a, List[b, c]], List[a, f[b, c]]]")
         , ("map normalizes generated Nothing", "Map[Nothing &, {a, b}]", "List[]")
@@ -1445,6 +1661,19 @@ checkEvaluationSession = do
         , ("sort by SameTest distinguishes eager and delayed rules", "c = 0; first = SortBy[{4, 3, 2, 1}, Identity, SameTest -> (c = c + 1; (False &))]; eager = c; c = 0; second = SortBy[{4, 3, 2, 1}, Identity, SameTest :> (c = c + 1; (False &))]; {first, eager, second, c}", "List[List[1, 2, 3, 4], 1, List[1, 2, 3, 4], 3]")
         , ("sort by last SameTest option wins", "c = 0; {SortBy[{2, 1}, Identity, SameTest -> (c = c + 1; (True &)), SameTest :> (c = c + 10; (False &))], c}", "List[List[1, 2], 11]")
         , ("reverse sort by preserves SameTest ties", "ReverseSortBy[{2, 1}, Identity, SameTest -> (True &)]", "List[2, 1]")
+        , ("SortBy accepts System List function specifications", "{SortBy[System`List[3,1,2],System`List[Identity]],ReverseSortBy[System`List[3,1,2],System`List[Identity]]}", "List[System`List[1, 2, 3], System`List[3, 2, 1]]")
+        , ("OrderingBy preserves scalar and key-list tie rules", "{OrderingBy[{{a,2},{b,1},{c,3}},Last],OrderingBy[{{c,2},{a,2},{b,1}},Last],OrderingBy[{{c,2},{a,2},{b,1}},{Last}],OrderingBy[{3,1,2},Identity,All,Greater],OrderingBy[f[c,a,b],Identity]}", "List[List[2, 1, 3], List[3, 2, 1], List[3, 1, 2], List[1, 3, 2], List[2, 3, 1]]")
+        , ("OrderingBy slices positive negative zero and oversized counts", "{OrderingBy[{d,c,b,a},Identity,-2],OrderingBy[{d,c,b,a},Identity,0],OrderingBy[{d,c,b,a},Identity,All],OrderingBy[{d,c,b,a},Identity,9],OrderingBy[{d,c,b,a},Identity,-9]}", "List[List[2, 1], List[], List[4, 3, 2, 1], List[4, 3, 2, 1], List[4, 3, 2, 1]]")
+        , ("MinimalBy and MaximalBy implement tied and counted extrema", "{MinimalBy[{{a,1},{b,2},{c,1}},Last],MinimalBy[{3,1,2,1},Identity,2],MaximalBy[{3,1,3,2},Identity,3],MinimalBy[{3,1,2},Identity,All],MaximalBy[{3,1,2},Identity,UpTo[2]],MinimalBy[{3,1,2},Identity,UpTo[-2]]}", "List[List[List[a, 1], List[c, 1]], List[1, 1], List[3, 3, 2], List[1, 2, 3], List[3, 2], List[]]")
+        , ("extrema preserve associations arbitrary heads and empty collections", "{MinimalBy[<|a->2,b:>1,c->1|>,Identity],MaximalBy[h[1,3,2],Identity,2],MinimalBy[System`List[3,1,2],System`List[Identity]],MinimalBy[f[],Identity,bad],MaximalBy[<||>,Identity,-1]}", "List[Association[RuleDelayed[b, 1], Rule[c, 1]], h[3, 2], System`List[1], f[], Association[]]")
+        , ("OrderingBy decorates item-major and applies SameTest tie policy", "ClearAll[log,k1,k2,c];log={};k1[x_]:=(AppendTo[log,HoldComplete[k1,x]];Last[x]);k2[x_]:=(AppendTo[log,HoldComplete[k2,x]];First[x]);ordered=OrderingBy[{{c,2},{a,2},{b,1}},{k1,k2}];schedule=log;c=0;first=OrderingBy[{4,3,2,1},Identity,All,Less,SameTest->(c++;(False&))];eager=c;c=0;second=OrderingBy[{4,3,2,1},Identity,All,Less,SameTest:>(c++;(False&))];{ordered,schedule,first,eager,second,c,OrderingBy[{{c,2},{a,2},{b,1}},Last,All,Less,SameTest->(True&)],OrderingBy[{{c,2},{a,2},{b,1}},{Last},All,Less,SameTest->(False&)]}", "List[List[3, 2, 1], List[HoldComplete[k1, List[c, 2]], HoldComplete[k2, List[c, 2]], HoldComplete[k1, List[a, 2]], HoldComplete[k2, List[a, 2]], HoldComplete[k1, List[b, 1]], HoldComplete[k2, List[b, 1]]], List[4, 3, 2, 1], 1, List[4, 3, 2, 1], 3, List[1, 2, 3], List[3, 1, 2]]")
+        , ("By validation follows key and comparator effects", "ClearAll[i,j,k,cmp];i=0;j=0;k[x_]:=(i++;Part[f[x],99];x);cmp[a_,b_]:=(j++;Less[a,b]);{OrderingBy[{3,1,2},k,bad,cmp],i,j,$MessageList}", "List[OrderingBy[List[3, 1, 2], k, bad, cmp], 3, 8, List[HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[OrderingBy, \"error\"]]]]")
+        , ("MinimalBy retains recoverable callback diagnostics", "ClearAll[i,cb];i=0;cb[x_]:=(i++;Part[f[x],99];x);{MinimalBy[{3,1,2,1},cb],i,$MessageList}", "List[List[1, 1], 4, List[HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]], HoldForm[MessageName[Part, \"error\"]]]]")
+        , ("By operators aliases qualification and Unevaluated match Python", "ClearAll[orderingAlias,minimalAlias,maximalAlias];orderingAlias=OrderingBy;minimalAlias=System`MinimalBy;maximalAlias=MaximalBy;{OrderingBy[Last],OrderingBy[Last][{{a,2},{b,1}}],System`OrderingBy[Last][{{a,2},{b,1}}],Global`OrderingBy[Last][{{a,2},{b,1}}],MinimalBy[Identity][{3,1,2}],System`MinimalBy[Identity][{3,1,2}],Global`MinimalBy[Identity][{3,1,2}],System`MaximalBy[Identity][{3,1,2}],orderingAlias[Last][{{a,2},{b,1}}],minimalAlias[Identity][{3,1,2}],maximalAlias[Identity][{3,1,2}],System`OrderingBy[Unevaluated[g[1+1]],Last],Global`OrderingBy[Unevaluated[g[1+1]],Last],System`MinimalBy[Unevaluated[g[1+1]],Identity],Global`MinimalBy[Unevaluated[g[1+1]],Identity]}", "List[OrderingBy[Last], List[2, 1], List[2, 1], Global`OrderingBy[Last][List[List[a, 2], List[b, 1]]], List[1], List[1], Global`MinimalBy[Identity][List[3, 1, 2]], List[3], List[2, 1], List[1], List[3], System`OrderingBy[g[Plus[1, 1]], Last], Global`OrderingBy[Unevaluated[g[Plus[1, 1]]], Last], System`MinimalBy[g[Plus[1, 1]], Identity], Global`MinimalBy[Unevaluated[g[Plus[1, 1]]], Identity]]")
+        , ("By failures evaluate left to right and recover raw syntax", "ClearAll[i];i=0;{OrderingBy[(i++;a),(i++;f),(i++;1),(i++;Less),(i++;z),(i++;q)],i,MinimalBy[(i++;a),(i++;f),(i++;1),(i++;Less),(i++;z)],i,OrderingBy[(i++;{2,1}),(i++;Identity),(i++;bad)],i,$MessageList}", "List[OrderingBy[CompoundExpression[Increment[i], a], CompoundExpression[Increment[i], f], CompoundExpression[Increment[i], 1], CompoundExpression[Increment[i], Less], CompoundExpression[Increment[i], z], CompoundExpression[Increment[i], q]], 6, MinimalBy[CompoundExpression[Increment[i], a], CompoundExpression[Increment[i], f], CompoundExpression[Increment[i], 1], CompoundExpression[Increment[i], Less], CompoundExpression[Increment[i], z]], 11, OrderingBy[CompoundExpression[Increment[i], List[2, 1]], CompoundExpression[Increment[i], Identity], CompoundExpression[Increment[i], bad]], 14, List[HoldForm[MessageName[OrderingBy, \"error\"]], HoldForm[MessageName[MinimalBy, \"error\"]], HoldForm[MessageName[OrderingBy, \"error\"]]]]")
+        , ("By callbacks propagate controls with prior state", "ClearAll[i];i=0;{Catch[OrderingBy[{3,1,2},(i++;If[i==2,Throw[t],#])&]],i,(i=0;Catch[MinimalBy[{3,1,2},(i++;If[i==2,Throw[u],#])&]]),i,(i=0;Catch[MaximalBy[{3,1,2},Identity,All,(i++;Throw[v])&]]),i}", "List[t, 2, u, 2, v, 1]")
+        , ("OrderingBy exposes bare Unevaluated but honors explicit Evaluate", "ClearAll[log,k];log={};SetAttributes[k,HoldAllComplete];k[x_]:=(AppendTo[log,HoldComplete[x]];0);{OrderingBy[Unevaluated[g[1+1,2+2]],k],log,(log={};OrderingBy[Evaluate[Unevaluated[g[1+1,2+2]]],k]),log}", "List[List[1, 2], List[HoldComplete[Plus[1, 1]], HoldComplete[Plus[2, 2]]], List[1, 2], List[HoldComplete[2], HoldComplete[4]]]")
+        , ("ordinary By downvalues precede builtin dispatch", "Unprotect[OrderingBy,MinimalBy,MaximalBy];ClearAll[OrderingBy,MinimalBy,MaximalBy];OrderingBy[x__]:=HoldComplete[ob,x];MinimalBy[x__]:=HoldComplete[mi,x];MaximalBy[x__]:=HoldComplete[ma,x];{OrderingBy[{2,1},Identity],MinimalBy[{2,1},Identity],MaximalBy[{2,1},Identity]}", "List[HoldComplete[ob, List[2, 1], Identity], HoldComplete[mi, List[2, 1], Identity], HoldComplete[ma, List[2, 1], Identity]]")
         , ("assignment update", "x = 10; AddTo[x, 5]; x", "15")
         , ("assignment updates cannot bypass protection", "protectedUpdateX = 2; Protect[protectedUpdateX]; {AddTo[protectedUpdateX, 1 + 2], protectedUpdateX}", "List[AddTo[protectedUpdateX, 3], 2]")
         , ("assignment updates leave special settings unchanged", "AddTo[$RecursionLimit, -1000]; $RecursionLimit", "1024")
@@ -1632,7 +1861,27 @@ checkEvaluationSession = do
         , ("module closure multiple arguments", "bin = Module[{f}, f[x_, y_] := x + y; f]; {bin[3, 4], bin[a, b]}", "List[7, Plus[a, b]]")
         ]
       printCases =
-        [ ( "nested abort protection re-defers at compound boundaries"
+        [ ( "Inner invokes pair callbacks before its final combiner"
+          , "Inner[(Print[InputForm[{##}]];q[##])&,{a,b},{x,y},(Print[InputForm[{##}]];g[##])&]"
+          , "g[q[a, x], q[b, y]]"
+          , ["{a, x}", "{b, y}", "{q[a, x], q[b, y]}"]
+          )
+        , ( "Outer invokes Cartesian callbacks in depth-first order"
+          , "Outer[(Print[InputForm[{##}]];q[##])&,{a,b},{x,y}]"
+          , "List[List[q[a, x], q[a, y]], List[q[b, x], q[b, y]]]"
+          , ["{a, x}", "{a, y}", "{b, x}", "{b, y}"]
+          )
+        , ( "Through invokes head callbacks left to right"
+          , "ClearAll[i,ff];i=0;ff[x__]:=(i++;Print[InputForm[{i,x}]];q[i,x]);Through[p[ff,ff][a,b]]"
+          , "p[q[1, a, b], q[2, a, b]]"
+          , ["{1, a, b}", "{2, a, b}"]
+          )
+        , ( "Tr invokes recursive contractions in depth-first order"
+          , "Tr[{{{a,b},{c,d}},{{e,f},{g,h}}},(Print[InputForm[{##}]];q[##])&,2]"
+          , "List[q[q[a, c], q[e, g]], q[q[b, d], q[f, h]]]"
+          , ["{a, c}", "{b, d}", "{e, g}", "{f, h}", "{q[a, c], q[e, g]}", "{q[b, d], q[f, h]}"]
+          )
+        , ( "nested abort protection re-defers at compound boundaries"
           , "CheckAbort[AbortProtect[AbortProtect[Abort[]; Print[\"innerTail\"]]; Print[\"outerTail\"]], fail]"
           , "fail"
           , ["innerTail", "outerTail"]
@@ -1651,6 +1900,21 @@ checkEvaluationSession = do
           , "Enclose[Confirm[Missing[\"x\"], (Print[\"info\"]; \"i\"), (Print[\"tag\"]; tag)], (Print[\"handler\"]; \"Information\"), tag]"
           , "\"i\""
           , ["info", "tag", "handler"]
+          )
+        , ( "confirm assert preserves test information tag and handler order"
+          , "Enclose[ConfirmAssert[(Print[\"test\"];False),(Print[\"info\"];info),(Print[\"tag\"];tag)],(Print[\"handler\"];\"Information\"),tag]"
+          , "info"
+          , ["test", "info", "tag", "handler"]
+          )
+        , ( "assert state holds disabled calls and skips successful tags"
+          , "{Assert[Print[\"disabled\"];False],On[Assert],Assert[(Print[\"true-test\"];True),(Print[\"skipped-tag\"];tag)],Check[Assert[(Print[\"false-test\"];False),(Print[\"failure-tag\"];tag)],caught],Off[Assert],Assert[Print[\"held-again\"];False]}"
+          , "List[Assert[CompoundExpression[Print[\"disabled\"], False]], Null, Null, caught, Null, Assert[CompoundExpression[Print[\"held-again\"], False]]]"
+          , ["true-test", "false-test", "failure-tag"]
+          )
+        , ( "confirm assert and assert propagate test control before later arguments"
+          , "{Catch[ConfirmAssert[(Print[\"test\"];Throw[x]),Print[\"info\"],Print[\"tag\"]]],CheckAbort[ConfirmAssert[Abort[],Print[\"info2\"],Print[\"tag2\"]],caught],On[Assert],Catch[Assert[Throw[y],Print[\"assert-tag\"]]],CheckAbort[Assert[Abort[],Print[\"assert-tag2\"]],caught2],Off[Assert]}"
+          , "List[x, caught, Null, y, caught2, Null]"
+          , ["test"]
           )
         , ( "with cleanup runs before an enclosed confirmation handler"
           , "Enclose[WithCleanup[Confirm[$Failed, \"bad\"], Print[\"cleanup\"]], \"Information\"]"
@@ -1799,7 +2063,242 @@ checkEvaluationSession = do
         , "g::b: Message generated."
         )
       messageCases =
-        [ ( "abort control arity diagnostics"
+        [ ( "numeric predicate arity stays diagnostic-free"
+          , "{NumericQ[], NumericQ[1,2], ExactNumberQ[], MachineNumberQ[1,2], TrueQ[]}"
+          , "List[NumericQ[], NumericQ[1, 2], ExactNumberQ[], MachineNumberQ[1, 2], TrueQ[]]"
+          , []
+          )
+        , ( "precision and accuracy arity stays diagnostic-free"
+          , "{Precision[],Precision[1,2],Accuracy[],Accuracy[1,2],$MessageList}"
+          , "List[Precision[], Precision[1, 2], Accuracy[], Accuracy[1, 2], List[]]"
+          , []
+          )
+        , ( "Distribute reports unsupported arities"
+          , "{Distribute[],Distribute[a,b,c,d],Distribute[a,b,c,d,e,f],$MessageList}"
+          , "List[Distribute[], Distribute[a, b, c, d], Distribute[a, b, c, d, e, f], List[HoldForm[MessageName[Distribute, \"error\"]], HoldForm[MessageName[Distribute, \"error\"]], HoldForm[MessageName[Distribute, \"error\"]]]]"
+          , [ ( "Distribute::error"
+              , "MessageName[Distribute, \"error\"]"
+              , "Distribute::error: Distribute expects an expression, optional distributed/outer heads, and an optional ``gp, fp`` replacement pair."
+              )
+            , ( "Distribute::error"
+              , "MessageName[Distribute, \"error\"]"
+              , "Distribute::error: Distribute expects an expression, optional distributed/outer heads, and an optional ``gp, fp`` replacement pair."
+              )
+            , ( "Distribute::error"
+              , "MessageName[Distribute, \"error\"]"
+              , "Distribute::error: Distribute expects an expression, optional distributed/outer heads, and an optional ``gp, fp`` replacement pair."
+              )
+            ]
+          )
+        , ( "Inner validates arity compound operands and lengths"
+          , "{Inner[],Inner[f,a,{b},g],Inner[f,{a},{b,c},g],$MessageList}"
+          , "List[Inner[], Inner[f, a, List[b], g], Inner[f, List[a], List[b, c], g], List[HoldForm[MessageName[Inner, \"error\"]], HoldForm[MessageName[Inner, \"error\"]], HoldForm[MessageName[Inner, \"error\"]]]]"
+          , [ ( "Inner::error"
+              , "MessageName[Inner, \"error\"]"
+              , "Inner::error: Inner expects exactly four arguments."
+              )
+            , ( "Inner::error"
+              , "MessageName[Inner, \"error\"]"
+              , "Inner::error: Inner expects a nonatomic expression."
+              )
+            , ( "Inner::error"
+              , "MessageName[Inner, \"error\"]"
+              , "Inner::error: Inner expects expressions with the same length."
+              )
+            ]
+          )
+        , ( "Outer validates arity and compound sequences"
+          , "{Outer[],Outer[f],Outer[f,a],Outer[f,{a},x],$MessageList}"
+          , "List[Outer[], Outer[f], Outer[f, a], Outer[f, List[a], x], List[HoldForm[MessageName[Outer, \"error\"]], HoldForm[MessageName[Outer, \"error\"]], HoldForm[MessageName[Outer, \"error\"]], HoldForm[MessageName[Outer, \"error\"]]]]"
+          , [ ( "Outer::error"
+              , "MessageName[Outer, \"error\"]"
+              , "Outer::error: Outer expects a function and at least one sequence."
+              )
+            , ( "Outer::error"
+              , "MessageName[Outer, \"error\"]"
+              , "Outer::error: Outer expects a function and at least one sequence."
+              )
+            , ( "Outer::error"
+              , "MessageName[Outer, \"error\"]"
+              , "Outer::error: Outer expects a nonatomic expression."
+              )
+            , ( "Outer::error"
+              , "MessageName[Outer, \"error\"]"
+              , "Outer::error: Outer expects a nonatomic expression."
+              )
+            ]
+          )
+        , ( "Through validates arity and restricting heads"
+          , "{Through[],Through[f[x],1],$MessageList}"
+          , "List[Through[], Through[f[x], 1], List[HoldForm[MessageName[Through, \"error\"]], HoldForm[MessageName[Through, \"error\"]]]]"
+          , [ ( "Through::error"
+              , "MessageName[Through, \"error\"]"
+              , "Through::error: Through expects an expression and an optional restricting head."
+              )
+            , ( "Through::error"
+              , "MessageName[Through, \"error\"]"
+              , "Through::error: Through's second argument must be a Symbol head."
+              )
+            ]
+          )
+        , ( "Tr validates arrays rank restrictions and contracted levels"
+          , "{Tr[],Tr[{},Plus,1,2],Tr[x],Tr[{{a},{b,c}}],Tr[{a,b},f,0],Tr[{{a},b},f,2],Tr[{f[a],{b}},f,2],Tr[SparseArray[{}, {2,2}],f,1],Tr[SparseArray[{}, {2,2,2}]],$MessageList}"
+          , "List[Tr[], Tr[List[], Plus, 1, 2], Tr[x], Tr[List[List[a], List[b, c]]], Tr[List[a, b], f, 0], Tr[List[List[a], b], f, 2], Tr[List[f[a], List[b]], f, 2], Tr[SparseArray[List[], List[2, 2]], f, 1], Tr[SparseArray[List[], List[2, 2, 2]]], List[HoldForm[MessageName[Tr, \"error\"]], HoldForm[MessageName[Tr, \"error\"]], HoldForm[MessageName[Tr, \"error\"]], HoldForm[MessageName[Tr, \"error\"]], HoldForm[MessageName[Tr, \"error\"]], HoldForm[MessageName[Tr, \"error\"]], HoldForm[MessageName[Tr, \"error\"]], HoldForm[MessageName[Tr, \"error\"]], HoldForm[MessageName[Tr, \"error\"]]]]"
+          , [ ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: Tr expects an array, an optional combiner, and an optional rank-restriction integer."
+              )
+            , ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: Tr expects an array, an optional combiner, and an optional rank-restriction integer."
+              )
+            , ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: Tr expects a rectangular array."
+              )
+            , ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: SparseArray dense input must be rectangular."
+              )
+            , ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: Tr level must be a positive integer."
+              )
+            , ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: Tr expects a nonatomic expression."
+              )
+            , ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: Tr expects a List at every contracted level."
+              )
+            , ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: Tr expects a nonatomic expression."
+              )
+            , ( "Tr::error"
+              , "MessageName[Tr, \"error\"]"
+              , "Tr::error: Tr currently supports vectors and matrices."
+              )
+            ]
+          )
+        , ( "Tr preserves repeated Times listable diagnostics"
+          , "{Tr[{{{a}},{{b,c}}},Times,1],$MessageList}"
+          , "List[List[Times[List[a], List[b, c]]], List[HoldForm[MessageName[Times, \"error\"]], HoldForm[MessageName[Times, \"error\"]]]]"
+          , [ ( "Times::error"
+              , "MessageName[Times, \"error\"]"
+              , "Times::error: Listable Function arguments have incompatible list lengths."
+              )
+            , ( "Times::error"
+              , "MessageName[Times, \"error\"]"
+              , "Times::error: Listable Function arguments have incompatible list lengths."
+              )
+            ]
+          )
+        , ( "Tr re-enters recoverable non-Plus combiner errors"
+          , "{Tr[{a,b},Cross,1],Tr[{a,b},Det,1],Tr[{a,b},Inverse,1],$MessageList}"
+          , "List[Cross[a, b], Det[a, b], Inverse[a, b], List[HoldForm[MessageName[Cross, \"error\"]], HoldForm[MessageName[Cross, \"error\"]], HoldForm[MessageName[Det, \"error\"]], HoldForm[MessageName[Det, \"error\"]], HoldForm[MessageName[Inverse, \"error\"]], HoldForm[MessageName[Inverse, \"error\"]]]]"
+          , [ ( "Cross::error"
+              , "MessageName[Cross, \"error\"]"
+              , "Cross::error: Cross expects vectors."
+              )
+            , ( "Cross::error"
+              , "MessageName[Cross, \"error\"]"
+              , "Cross::error: Cross expects vectors."
+              )
+            , ( "Det::error"
+              , "MessageName[Det, \"error\"]"
+              , "Det::error: Det expects exactly one matrix argument."
+              )
+            , ( "Det::error"
+              , "MessageName[Det, \"error\"]"
+              , "Det::error: Det expects exactly one matrix argument."
+              )
+            , ( "Inverse::error"
+              , "MessageName[Inverse, \"error\"]"
+              , "Inverse::error: Inverse expects exactly one matrix argument."
+              )
+            , ( "Inverse::error"
+              , "MessageName[Inverse, \"error\"]"
+              , "Inverse::error: Inverse expects exactly one matrix argument."
+              )
+            ]
+          )
+        , ( "listable complex projections diagnose incompatible lengths"
+          , "{Re[{1,2},{3}],$MessageList}"
+          , "List[Re[List[1, 2], List[3]], List[HoldForm[MessageName[Re, \"error\"]]]]"
+          , [ ( "Re::error"
+              , "MessageName[Re, \"error\"]"
+              , "Re::error: Listable Function arguments have incompatible list lengths."
+              )
+            ]
+          )
+        , ( "thread reports unequal argument lengths and invalid arity"
+          , "{Thread[f[{a,b},{c}]],Thread[],$MessageList}"
+          , "List[Thread[f[List[a, b], List[c]]], Thread[], List[HoldForm[MessageName[Thread, \"error\"]], HoldForm[MessageName[Thread, \"error\"]]]]"
+          , [ ( "Thread::error"
+              , "MessageName[Thread, \"error\"]"
+              , "Thread::error: Thread expects all threaded arguments to have the same length."
+              )
+            , ( "Thread::error"
+              , "MessageName[Thread, \"error\"]"
+              , "Thread::error: Thread expects an expression and an optional thread head."
+              )
+            ]
+          )
+        , ( "operate distinguishes level and arity diagnostics"
+          , "{Operate[p,f[a],-1],Operate[p,f[a],x],Operate[],$MessageList}"
+          , "List[Operate[p, f[a], -1], Operate[p, f[a], x], Operate[], List[HoldForm[MessageName[Operate, \"error\"]], HoldForm[MessageName[Operate, \"error\"]], HoldForm[MessageName[Operate, \"error\"]]]]"
+          , [ ( "Operate::error"
+              , "MessageName[Operate, \"error\"]"
+              , "Operate::error: Operate expects a non-negative integer level."
+              )
+            , ( "Operate::error"
+              , "MessageName[Operate, \"error\"]"
+              , "Operate::error: Operate expects an integer argument."
+              )
+            , ( "Operate::error"
+              , "MessageName[Operate, \"error\"]"
+              , "Operate::error: Operate expects an operator, an expression, and an optional positive level."
+              )
+            ]
+          )
+        , ( "numeric predicates retain argument diagnostics"
+          , "{NumericQ[Length[]], ExactNumberQ[Length[]], TrueQ[Length[]]}"
+          , "List[False, False, False]"
+          , [ ( "Length::error"
+              , "MessageName[Length, \"error\"]"
+              , "Length::error: Length expects exactly one argument."
+              )
+            , ( "Length::error"
+              , "MessageName[Length, \"error\"]"
+              , "Length::error: Length expects exactly one argument."
+              )
+            , ( "Length::error"
+              , "MessageName[Length, \"error\"]"
+              , "Length::error: Length expects exactly one argument."
+              )
+            ]
+          )
+        , ( "numeric constructor edge cases stay diagnostic-free"
+          , "{Rational[0,0], Rational[1,0], Rational[x,2], Rational[1], Complex[1,0], Complex[1,0.], Complex[x,0], Complex[1]}"
+          , "List[Indeterminate, ComplexInfinity, Rational[x, 2], Rational[1], 1, Complex[1., 0.], Complex[x, 0], Complex[1]]"
+          , []
+          )
+        , ( "numeric constructors retain argument diagnostics"
+          , "{Rational[Length[], 2], Complex[1, Length[]]}"
+          , "List[Rational[Length[], 2], Complex[1, Length[]]]"
+          , [ ( "Length::error"
+              , "MessageName[Length, \"error\"]"
+              , "Length::error: Length expects exactly one argument."
+              )
+            , ( "Length::error"
+              , "MessageName[Length, \"error\"]"
+              , "Length::error: Length expects exactly one argument."
+              )
+            ]
+          )
+        , ( "abort control arity diagnostics"
           , "{Abort[1], CheckAbort[1], AbortProtect[]}"
           , "List[Abort[1], CheckAbort[1], AbortProtect[]]"
           , [ ( "Abort::error"
@@ -1842,6 +2341,77 @@ checkEvaluationSession = do
               )
             ]
           )
+        , ( "unhandled confirm asserts preserve test failure fields"
+          , "{ConfirmAssert[False],ConfirmAssert[False,info],$MessageList}"
+          , "List[Failure[ConfirmationFailed, Association[Rule[\"ConfirmationType\", ConfirmAssert], Rule[\"Expression\", False], Rule[\"Information\", Null], Rule[\"Test\", False]]], Failure[ConfirmationFailed, Association[Rule[\"ConfirmationType\", ConfirmAssert], Rule[\"Expression\", False], Rule[\"Information\", info], Rule[\"Test\", False]]], List[HoldForm[MessageName[Confirm, \"confirmnotag\"]], HoldForm[MessageName[Confirm, \"confirmnotag\"]]]]"
+          , [ ( "Confirm::confirmnotag"
+              , "MessageName[Confirm, \"confirmnotag\"]"
+              , "Confirm::confirmnotag: Message generated."
+              )
+            , ( "Confirm::confirmnotag"
+              , "MessageName[Confirm, \"confirmnotag\"]"
+              , "Confirm::confirmnotag: Message generated."
+              )
+            ]
+          )
+        , ( "assert failures render tests and string tags exactly"
+          , "On[Assert];{Assert[False,tag],Assert[\"bad\",\"tag\"],$MessageList}"
+          , "List[Null, Null, List[HoldForm[MessageName[Assert, \"asrtfl\"]], HoldForm[MessageName[Assert, \"asrtfl\"]]]]"
+          , [ ( "Assert::asrtfl"
+              , "MessageName[Assert, \"asrtfl\"]"
+              , "Assert::asrtfl: False, tag"
+              )
+            , ( "Assert::asrtfl"
+              , "MessageName[Assert, \"asrtfl\"]"
+              , "Assert::asrtfl: bad, tag"
+              )
+            ]
+          )
+        , ( "assert failures apply the message pre-print hook"
+          , "$MessagePrePrint=HoldForm;On[Assert];Assert[False,1+1]"
+          , "Null"
+          , [ ( "Assert::asrtfl"
+              , "MessageName[Assert, \"asrtfl\"]"
+              , "Assert::asrtfl: HoldForm[False], HoldForm[2]"
+              )
+            ]
+          )
+        , ( "message pre-print hooks thread state and skip disabled messages"
+          , "i=0;j=0;$MessagePrePrint=Function[x,(i++;If[i==1,($MessagePrePrint=FullForm;HoldForm[x]),x])];Off[g::tag];Message[g::tag,(j=1;a)];Message[f::tag,{a},{b}];{i,j,$MessagePrePrint,$MessageList}"
+          , "List[1, 1, FullForm, List[HoldForm[MessageName[f, \"tag\"]]]]"
+          , [ ( "f::tag"
+              , "MessageName[f, \"tag\"]"
+              , "f::tag: HoldForm[{a}], List[b]"
+              )
+            ]
+          )
+        , ( "message pre-print hooks render output and C forms"
+          , "$MessagePrePrint=OutputForm;Message[f::x,1+2 I,a[b]];$MessagePrePrint=CForm;Message[g::x,1+2 I,a[b]]"
+          , "Null"
+          , [ ( "f::x"
+              , "MessageName[f, \"x\"]"
+              , "f::x: 1 + 2*I, a[b]"
+              )
+            , ( "g::x"
+              , "MessageName[g, \"x\"]"
+              , "g::x: Complex(1,2), a(b)"
+              )
+            ]
+          )
+        , ( "message pre-print control signals stop message generation"
+          , "$MessagePrePrint=Function[x,Throw[hooked]];Catch[Message[f::tag,a]]"
+          , "hooked"
+          , []
+          )
+        , ( "message enablement is fixed before pre-print hooks run"
+          , "$MessagePrePrint=Function[x,(Off[f::tag];HoldForm[x])];Message[f::tag,a];{Message[f::tag,b],$MessageList}"
+          , "List[Null, List[HoldForm[MessageName[f, \"tag\"]]]]"
+          , [ ( "f::tag"
+              , "MessageName[f, \"tag\"]"
+              , "f::tag: HoldForm[a]"
+              )
+            ]
+          )
         , ( "confirmation handlers cannot recatch their own failure"
           , "Enclose[Confirm[$Failed], Function[failure, Confirm[$Failed]]]"
           , "Failure[ConfirmationFailed, Association[Rule[\"ConfirmationType\", Confirm], Rule[\"Expression\", $Failed], Rule[\"Information\", Null]]]"
@@ -1869,6 +2439,27 @@ checkEvaluationSession = do
             , ( "ConfirmMatch::error"
               , "MessageName[ConfirmMatch, \"error\"]"
               , "ConfirmMatch::error: ConfirmMatch expects two, three, or four arguments."
+              )
+            ]
+          )
+        , ( "malformed confirm assert and assert calls hold every argument"
+          , "{ConfirmAssert[],ConfirmAssert[Print[\"t\"],Print[\"i\"],Print[\"tag\"],Print[\"extra\"]],Assert[],Assert[Print[\"a\"],Print[\"b\"],Print[\"c\"]],$MessageList}"
+          , "List[ConfirmAssert[], ConfirmAssert[Print[\"t\"], Print[\"i\"], Print[\"tag\"], Print[\"extra\"]], Assert[], Assert[Print[\"a\"], Print[\"b\"], Print[\"c\"]], List[HoldForm[MessageName[ConfirmAssert, \"error\"]], HoldForm[MessageName[ConfirmAssert, \"error\"]], HoldForm[MessageName[Assert, \"error\"]], HoldForm[MessageName[Assert, \"error\"]]]]"
+          , [ ( "ConfirmAssert::error"
+              , "MessageName[ConfirmAssert, \"error\"]"
+              , "ConfirmAssert::error: ConfirmAssert expects one, two, or three arguments."
+              )
+            , ( "ConfirmAssert::error"
+              , "MessageName[ConfirmAssert, \"error\"]"
+              , "ConfirmAssert::error: ConfirmAssert expects one, two, or three arguments."
+              )
+            , ( "Assert::error"
+              , "MessageName[Assert, \"error\"]"
+              , "Assert::error: Assert expects one or two arguments."
+              )
+            , ( "Assert::error"
+              , "MessageName[Assert, \"error\"]"
+              , "Assert::error: Assert expects one or two arguments."
               )
             ]
           )
@@ -2606,6 +3197,67 @@ checkEvaluationSession = do
               )
             ]
           )
+        , ( "OrderingBy MinimalBy and MaximalBy report Python diagnostics"
+          , "{OrderingBy[],OrderingBy[a,Identity],OrderingBy[{1},Identity,bad],OrderingBy[{1},Identity,All,Less,Foo->bar],OrderingBy[Identity][a,b],MinimalBy[],MinimalBy[a,Identity],MinimalBy[{1},Identity,-1],MinimalBy[{1},Identity,UpTo[x]],MinimalBy[{1},Identity,UpTo[]],MinimalBy[Identity][a,b],MaximalBy[],MaximalBy[a,Identity],MaximalBy[{1},Identity,-1]}"
+          , "List[OrderingBy[], OrderingBy[a, Identity], OrderingBy[List[1], Identity, bad], OrderingBy[List[1], Identity, All, Less, Rule[Foo, bar]], OrderingBy[Identity][a, b], MinimalBy[], MinimalBy[a, Identity], MinimalBy[List[1], Identity, -1], MinimalBy[List[1], Identity, UpTo[x]], MinimalBy[List[1], Identity, UpTo[]], MinimalBy[Identity][a, b], MaximalBy[], MaximalBy[a, Identity], MaximalBy[List[1], Identity, -1]]"
+          , [ ( "OrderingBy::error"
+              , "MessageName[OrderingBy, \"error\"]"
+              , "OrderingBy::error: OrderingBy expects an expression, functions, optional count, optional ordering function, and optional SameTest rule."
+              )
+            , ( "OrderingBy::error"
+              , "MessageName[OrderingBy, \"error\"]"
+              , "OrderingBy::error: OrderingBy expects a nonatomic expression."
+              )
+            , ( "OrderingBy::error"
+              , "MessageName[OrderingBy, \"error\"]"
+              , "OrderingBy::error: OrderingBy expects an integer or All count."
+              )
+            , ( "OrderingBy::error"
+              , "MessageName[OrderingBy, \"error\"]"
+              , "OrderingBy::error: OrderingBy currently supports only the SameTest option."
+              )
+            , ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: OrderingBy[f] expects exactly one argument when used as an operator."
+              )
+            , ( "MinimalBy::error"
+              , "MessageName[MinimalBy, \"error\"]"
+              , "MinimalBy::error: MinimalBy expects data, a function specification, optional count, and optional ordering function."
+              )
+            , ( "MinimalBy::error"
+              , "MessageName[MinimalBy, \"error\"]"
+              , "MinimalBy::error: MinimalBy expects a nonatomic expression."
+              )
+            , ( "MinimalBy::error"
+              , "MessageName[MinimalBy, \"error\"]"
+              , "MinimalBy::error: MinimalBy expects a non-negative count."
+              )
+            , ( "MinimalBy::error"
+              , "MessageName[MinimalBy, \"error\"]"
+              , "MinimalBy::error: MinimalBy expects UpTo[n] with an integer n."
+              )
+            , ( "MinimalBy::error"
+              , "MessageName[MinimalBy, \"error\"]"
+              , "MinimalBy::error: MinimalBy expects an integer, UpTo[n], or All count."
+              )
+            , ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: MinimalBy[f] expects exactly one argument when used as an operator."
+              )
+            , ( "MaximalBy::error"
+              , "MessageName[MaximalBy, \"error\"]"
+              , "MaximalBy::error: MaximalBy expects data, a function specification, optional count, and optional ordering function."
+              )
+            , ( "MaximalBy::error"
+              , "MessageName[MaximalBy, \"error\"]"
+              , "MaximalBy::error: MaximalBy expects a nonatomic expression."
+              )
+            , ( "MaximalBy::error"
+              , "MessageName[MaximalBy, \"error\"]"
+              , "MaximalBy::error: MaximalBy expects a non-negative count."
+              )
+            ]
+          )
         , ( "invalid selection arity is nonfatal"
           , "Select[]"
           , "Select[]"
@@ -2643,6 +3295,232 @@ checkEvaluationSession = do
             , ( "Part::error"
               , "MessageName[Part, \"error\"]"
               , "Part::error: Part specifications are invalid for f[a]."
+              )
+            ]
+          )
+        , ( "MapIndexed reports direct operator and level errors exactly"
+          , "{MapIndexed[],MapIndexed[q,x,1,z],MapIndexed[q,x,z],MapIndexed[q][],MapIndexed[q][a,b]}"
+          , "List[MapIndexed[], MapIndexed[q, x, 1, z], MapIndexed[q, x, z], MapIndexed[q][], MapIndexed[q][a, b]]"
+          , [ ( "MapIndexed::error"
+              , "MessageName[MapIndexed, \"error\"]"
+              , "MapIndexed::error: MapIndexed expects a function, an expression, and an optional level specification."
+              )
+            , ( "MapIndexed::error"
+              , "MessageName[MapIndexed, \"error\"]"
+              , "MapIndexed::error: MapIndexed expects a function, an expression, and an optional level specification."
+              )
+            , ( "MapIndexed::error"
+              , "MessageName[MapIndexed, \"error\"]"
+              , "MapIndexed::error: Unsupported Level specification: 'z'."
+              )
+            , ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: MapIndexed[f] expects exactly one argument when used as an operator."
+              )
+            , ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: MapIndexed[f] expects exactly one argument when used as an operator."
+              )
+            ]
+          )
+        , ( "MapThread reports arity depth and parallel-shape errors exactly"
+          , "{MapThread[],MapThread[f],MapThread[f,x],MapThread[f,{{a}},z],MapThread[f,{{a}},-1],MapThread[f,{{a},b},2],MapThread[f,{{a,b},{c}},1]}"
+          , "List[MapThread[], MapThread[f], MapThread[f, x], MapThread[f, List[List[a]], z], MapThread[f, List[List[a]], -1], MapThread[f, List[List[a], b], 2], MapThread[f, List[List[a, b], List[c]], 1]]"
+          , [ ( "MapThread::error"
+              , "MessageName[MapThread, \"error\"]"
+              , "MapThread::error: MapThread expects a function, a list of sequences, and an optional level."
+              )
+            , ( "MapThread::error"
+              , "MessageName[MapThread, \"error\"]"
+              , "MapThread::error: MapThread expects a function, a list of sequences, and an optional level."
+              )
+            , ( "MapThread::error"
+              , "MessageName[MapThread, \"error\"]"
+              , "MapThread::error: MapThread expects a list of sequences."
+              )
+            , ( "MapThread::error"
+              , "MessageName[MapThread, \"error\"]"
+              , "MapThread::error: MapThread expects an integer argument."
+              )
+            , ( "MapThread::error"
+              , "MessageName[MapThread, \"error\"]"
+              , "MapThread::error: MapThread expects a non-negative depth."
+              )
+            , ( "MapThread::error"
+              , "MessageName[MapThread, \"error\"]"
+              , "MapThread::error: MapThread expects parallel List structures down to the requested depth."
+              )
+            , ( "MapThread::error"
+              , "MessageName[MapThread, \"error\"]"
+              , "MapThread::error: MapThread expects sequences of the same length."
+              )
+            ]
+          )
+        , ( "BlockMap reports arity integer positivity and atomic errors exactly"
+          , "{BlockMap[],BlockMap[f,x],BlockMap[f,{a},z],BlockMap[f,{a},1,z],BlockMap[f,{a},0],BlockMap[f,{a},1,-2],BlockMap[f,a,1],BlockMap[f,SparseArray[{{1}->a},{2}],1]}"
+          , "List[BlockMap[], BlockMap[f, x], BlockMap[f, List[a], z], BlockMap[f, List[a], 1, z], BlockMap[f, List[a], 0], BlockMap[f, List[a], 1, -2], BlockMap[f, a, 1], BlockMap[f, SparseArray[List[Rule[List[1], a]], List[2]], 1]]"
+          , [ ( "BlockMap::error"
+              , "MessageName[BlockMap, \"error\"]"
+              , "BlockMap::error: BlockMap currently supports a function, an expression, a block size, and an optional offset."
+              )
+            , ( "BlockMap::error"
+              , "MessageName[BlockMap, \"error\"]"
+              , "BlockMap::error: BlockMap currently supports a function, an expression, a block size, and an optional offset."
+              )
+            , ( "BlockMap::error"
+              , "MessageName[BlockMap, \"error\"]"
+              , "BlockMap::error: BlockMap expects an integer argument."
+              )
+            , ( "BlockMap::error"
+              , "MessageName[BlockMap, \"error\"]"
+              , "BlockMap::error: BlockMap expects an integer argument."
+              )
+            , ( "BlockMap::error"
+              , "MessageName[BlockMap, \"error\"]"
+              , "BlockMap::error: BlockMap expects positive integer block sizes and offsets."
+              )
+            , ( "BlockMap::error"
+              , "MessageName[BlockMap, \"error\"]"
+              , "BlockMap::error: BlockMap expects positive integer block sizes and offsets."
+              )
+            , ( "BlockMap::error"
+              , "MessageName[BlockMap, \"error\"]"
+              , "BlockMap::error: BlockMap expects a nonatomic expression."
+              )
+            , ( "BlockMap::error"
+              , "MessageName[BlockMap, \"error\"]"
+              , "BlockMap::error: BlockMap expects a nonatomic expression."
+              )
+            ]
+          )
+        , ( "SubsetMap reports arity target position and callback errors exactly"
+          , "{SubsetMap[],SubsetMap[f,a,{1}],SubsetMap[f,{a},x],SubsetMap[f,{a},{{1,2}}],SubsetMap[f,{a},{0}],SubsetMap[f,{a},{2}],SubsetMap[First,{a},{1}],SubsetMap[Function[x,{p,q}],{a},{1}]}"
+          , "List[SubsetMap[], SubsetMap[f, a, List[1]], SubsetMap[f, List[a], x], SubsetMap[f, List[a], List[List[1, 2]]], SubsetMap[f, List[a], List[0]], SubsetMap[f, List[a], List[2]], SubsetMap[First, List[a], List[1]], SubsetMap[Function[x, List[p, q]], List[a], List[1]]]"
+          , [ ( "SubsetMap::error"
+              , "MessageName[SubsetMap, \"error\"]"
+              , "SubsetMap::error: SubsetMap expects a function, a list, and a list of positions."
+              )
+            , ( "SubsetMap::error"
+              , "MessageName[SubsetMap, \"error\"]"
+              , "SubsetMap::error: SubsetMap currently expects a List as the second argument."
+              )
+            , ( "SubsetMap::error"
+              , "MessageName[SubsetMap, \"error\"]"
+              , "SubsetMap::error: SubsetMap expects a List of positions as the third argument."
+              )
+            , ( "SubsetMap::error"
+              , "MessageName[SubsetMap, \"error\"]"
+              , "SubsetMap::error: SubsetMap currently supports flat integer positions (or one-element ``{i}`` lists)."
+              )
+            , ( "SubsetMap::error"
+              , "MessageName[SubsetMap, \"error\"]"
+              , "SubsetMap::error: Only top-level Part specifications may use index 0."
+              )
+            , ( "SubsetMap::error"
+              , "MessageName[SubsetMap, \"error\"]"
+              , "SubsetMap::error: Part index 2 is out of range for length 1."
+              )
+            , ( "SubsetMap::error"
+              , "MessageName[SubsetMap, \"error\"]"
+              , "SubsetMap::error: SubsetMap expects the function to return a List of the same length as the selection."
+              )
+            , ( "SubsetMap::error"
+              , "MessageName[SubsetMap, \"error\"]"
+              , "SubsetMap::error: SubsetMap expects the function to return a List of the same length as the selection."
+              )
+            ]
+          )
+        , ( "FlattenAt reports arity selector span and target errors exactly"
+          , "{FlattenAt[],FlattenAt[x],FlattenAt[x,1,z],FlattenAt[f[g[a,b]],x],FlattenAt[f[g[a,b]],All],FlattenAt[f[g[a,b]],{}],FlattenAt[f[g[a,b]],{0}],FlattenAt[f[g[a,b]],{2}],FlattenAt[f[a],1],FlattenAt[f[g[a,b]],{{Span[1]}}],FlattenAt[f[g[a,b]],{{1;;1;;x}}],FlattenAt[f[g[a,b]],{{1;;1;;0}}],FlattenAt[<|a->g[x,y]|>,{{{1,Key[a]}}}],FlattenAt[<|a->g[x,y]|>,Key[a]]}"
+          , "List[FlattenAt[], FlattenAt[x], FlattenAt[x, 1, z], FlattenAt[f[g[a, b]], x], FlattenAt[f[g[a, b]], All], FlattenAt[f[g[a, b]], List[]], FlattenAt[f[g[a, b]], List[0]], FlattenAt[f[g[a, b]], List[2]], FlattenAt[f[a], 1], FlattenAt[f[g[a, b]], List[List[Span[1]]]], FlattenAt[f[g[a, b]], List[List[Span[1, 1, x]]]], FlattenAt[f[g[a, b]], List[List[Span[1, 1, 0]]]], FlattenAt[Association[Rule[a, g[x, y]]], List[List[List[1, Key[a]]]]], FlattenAt[Association[Rule[a, g[x, y]]], Key[a]]]"
+          , [ ( "FlattenAt::error"
+              , "MessageName[FlattenAt, \"error\"]"
+              , "FlattenAt::error: FlattenAt expects exactly two arguments."
+              )
+            , ( "FlattenAt::error"
+              , "MessageName[FlattenAt, \"error\"]"
+              , "FlattenAt::error: FlattenAt expects exactly two arguments."
+              )
+            , ( "FlattenAt::error"
+              , "MessageName[FlattenAt, \"error\"]"
+              , "FlattenAt::error: FlattenAt expects exactly two arguments."
+              )
+            , ( "FlattenAt::error"
+              , "MessageName[FlattenAt, \"error\"]"
+              , "FlattenAt::error: Unsupported position specification: x."
+              )
+            , ( "FlattenAt::error"
+              , "MessageName[FlattenAt, \"error\"]"
+              , "FlattenAt::error: Unsupported position specification: All."
+              )
+            , ( "FlattenAt::error"
+              , "MessageName[FlattenAt, \"error\"]"
+              , "FlattenAt::error: FlattenAt positions are invalid for f[g[a, b]]."
+              )
+            , ( "FlattenAt::error"
+              , "MessageName[FlattenAt, \"error\"]"
+              , "FlattenAt::error: Position does not support index 0 in this position."
+              )
+            , ( "FlattenAt::error"
+              , "MessageName[FlattenAt, \"error\"]"
+              , "FlattenAt::error: FlattenAt positions are invalid for f[g[a, b]]."
+              )
+            , ( "FlattenAt::error"
+              , "MessageName[FlattenAt, \"error\"]"
+              , "FlattenAt::error: FlattenAt positions are invalid for f[a]."
+              )
+            , ( "FlattenAt::error"
+              , "MessageName[FlattenAt, \"error\"]"
+              , "FlattenAt::error: Span must contain two or three arguments."
+              )
+            , ( "FlattenAt::error"
+              , "MessageName[FlattenAt, \"error\"]"
+              , "FlattenAt::error: Span steps must be integers."
+              )
+            , ( "FlattenAt::error"
+              , "MessageName[FlattenAt, \"error\"]"
+              , "FlattenAt::error: Span step cannot be zero."
+              )
+            , ( "FlattenAt::error"
+              , "MessageName[FlattenAt, \"error\"]"
+              , "FlattenAt::error: Association selector lists may not mix numeric and key selectors."
+              )
+            , ( "FlattenAt::error"
+              , "MessageName[FlattenAt, \"error\"]"
+              , "FlattenAt::error: FlattenAt positions are invalid for <|a -> g[x, y]|>."
+              )
+            ]
+          )
+        , ( "Scan reports direct operator level and option errors exactly"
+          , "{Scan[],Scan[f,a,b,c,d],Scan[f,g[a],x],Scan[f][a,b],System`Scan[f][a,b],System`Scan[f,{0,Infinity}][a,b],Scan[f,g[a],1,Heads->x]}"
+          , "List[Scan[], Scan[f, a, b, c, d], Scan[f, g[a], x], Scan[f][a, b], System`Scan[f][a, b], System`Scan[f, List[0, Infinity]][a, b], Scan[f, g[a], 1, Rule[Heads, x]]]"
+          , [ ( "Scan::error"
+              , "MessageName[Scan, \"error\"]"
+              , "Scan::error: Scan expects a function, an expression, and an optional level specification."
+              )
+            , ( "Scan::error"
+              , "MessageName[Scan, \"error\"]"
+              , "Scan::error: Scan expects a function, an expression, and an optional level specification."
+              )
+            , ( "Scan::error"
+              , "MessageName[Scan, \"error\"]"
+              , "Scan::error: Unsupported Level specification: 'x'."
+              )
+            , ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: Scan[f] expects exactly one argument when used as an operator."
+              )
+            , ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: Scan[f] expects exactly one argument when used as an operator."
+              )
+            , ( "General::error"
+              , "MessageName[General, \"error\"]"
+              , "General::error: Scan[f, levelspec] expects exactly one argument when used as an operator."
+              )
+            , ( "Scan::error"
+              , "MessageName[Scan, \"error\"]"
+              , "Scan::error: Scan expects a function, an expression, and an optional level specification."
               )
             ]
           )
@@ -2919,6 +3797,24 @@ checkEvaluationSession = do
               )
             ]
           )
+        , ( "assert messages respect Quiet Off On and Check scopes"
+          , "On[Assert];{Check[Quiet[Assert[False]],caught],Off[Assert::asrtfl],Check[Assert[False],caught],On[Assert::asrtfl],Check[Assert[False],caught],$MessageList}"
+          , "List[Null, Null, Null, Null, caught, List[HoldForm[MessageName[Assert, \"asrtfl\"]], HoldForm[MessageName[Assert, \"asrtfl\"]]]]"
+          , [ ( "Assert::asrtfl"
+              , "MessageName[Assert, \"asrtfl\"]"
+              , "Assert::asrtfl: False, Null"
+              )
+            ]
+          , [ ( "Assert::asrtfl"
+              , "MessageName[Assert, \"asrtfl\"]"
+              , "Assert::asrtfl: False, Null"
+              )
+            , ( "Assert::asrtfl"
+              , "MessageName[Assert, \"asrtfl\"]"
+              , "Assert::asrtfl: False, Null"
+              )
+            ]
+          )
         , ( "Quiet on specifications override off specifications"
           , "Quiet[Message[f::a]; Message[g::b], All, f::a]; $MessageList"
           , "List[HoldForm[MessageName[f, \"a\"]], HoldForm[MessageName[g, \"b\"]]]"
@@ -3054,6 +3950,8 @@ checkSessionTimingRuntime = do
           { sessionRuntimeMonotonicSeconds = readIORef clock
           , sessionRuntimeSleepSeconds = \seconds ->
               modifyIORef' clock (+ seconds)
+          , sessionRuntimeRandomBelow =
+              sessionRuntimeRandomBelow defaultSessionRuntime
           }
       deterministicCases =
         [ ( "time remaining uses the active deadline"
@@ -3252,6 +4150,62 @@ checkSessionTimingRuntime = do
     readMaybe
       (Text.unpack (Text.replace "*^" "e" source))
 
+checkSessionRandomRuntime :: IO Bool
+checkSessionRandomRuntime = do
+  poolSample <-
+    checkScripted
+      "session random pool sample"
+      "RandomSample[{a,b,c,d},2]"
+      [3, 1]
+      ("List[d, b]", [4, 3])
+  transparentAlias <-
+    checkScripted
+      "session random alias preserves direct Unevaluated contents"
+      "sampleAlias=RandomSample;sampleAlias[Unevaluated[{1+1,3}],All]"
+      [0, 0]
+      ("List[Plus[1, 1], 3]", [2, 1])
+  rawAssociation <-
+    checkScripted
+      "session random return boundary preserves raw duplicate Association entries"
+      "RandomSample[Unevaluated[Association[Sequence[a->1,a->2]]],All]"
+      [0]
+      ("Association[Rule[a, 1], Rule[a, 2]]", [1])
+  permutation <-
+    checkScripted
+      "session random Fisher-Yates permutation"
+      "RandomPermutation[5]"
+      [0, 0, 0, 0]
+      ("Cycles[List[List[1, 2, 3, 4, 5]]]", [5, 4, 3, 2])
+  pure (and [poolSample, transparentAlias, rawAssociation, permutation])
+ where
+  checkScripted label source scriptedDraws expected = do
+    actual <- evaluateScripted source scriptedDraws
+    assertEqual label (Right expected) actual
+
+  evaluateScripted source scriptedDraws = case parseInputForm source of
+    Left parseError -> pure (Left (Text.pack (show parseError)))
+    Right expression -> do
+      draws <- newIORef scriptedDraws
+      bounds <- newIORef []
+      let drawBelow exclusiveUpperBound = do
+            modifyIORef' bounds (exclusiveUpperBound :)
+            atomicModifyIORef' draws $ \case
+              draw : remaining -> (remaining, draw)
+              [] -> ([], -1)
+          runtime =
+            defaultSessionRuntime
+              { sessionRuntimeRandomBelow = drawBelow
+              }
+      evaluated <- evaluateInSessionWithRuntime runtime emptySession expression
+      observedBounds <- reverse <$> readIORef bounds
+      remainingDraws <- readIORef draws
+      pure $ case evaluated of
+        Left evaluationError -> Left (evaluationErrorMessage evaluationError)
+        Right (value, _) ->
+          if null remainingDraws
+            then Right (fullForm value, observedBounds)
+            else Left "scripted random runtime left unused draws"
+
 checkRepl :: IO Bool
 checkRepl = do
   firstStep <- evaluateReplLine initialReplState "x = 2"
@@ -3279,6 +4233,16 @@ checkRepl = do
       "Message[f::tag]; $MessageList"
   resetMessageListStep <-
     evaluateReplLine (replStateFrom enabledMessageStep) "$MessageList"
+  assertOnStep <- evaluateReplLine initialReplState "On[Assert]"
+  assertedStep <-
+    evaluateReplLine
+      (replStateFrom assertOnStep)
+      "Check[Assert[False], caught]"
+  assertOffStep <- evaluateReplLine (replStateFrom assertedStep) "Off[Assert]"
+  heldAssertStep <-
+    evaluateReplLine
+      (replStateFrom assertOffStep)
+      "Assert[Print[\"held\"]; False]"
   printStep <- evaluateReplLine thirdState "Print[\"x\", 2]; 1"
   printSequenceStep <- evaluateReplLine thirdState "Print[Sequence[1, 2]]"
   printRationalStep <- evaluateReplLine thirdState "Print[1/2]"
@@ -3370,6 +4334,28 @@ checkRepl = do
             (Just (Call (Symbol "List") []))
             (replValueFrom resetMessageListStep)
         , assertEqual
+            "REPL assertion enabling persists across inputs"
+            (Just (Symbol "caught"))
+            (replValueFrom assertedStep)
+        , assertEqual
+            "REPL assertion disabling restores held evaluation"
+            ( Just
+                ( Call
+                    (Symbol "Assert")
+                    [ Call
+                        (Symbol "CompoundExpression")
+                        [ Call (Symbol "Print") [String "held"]
+                        , Symbol "False"
+                        ]
+                    ]
+                )
+            )
+            (replValueFrom heldAssertStep)
+        , assertEqual
+            "REPL disabled assertions suppress held effects"
+            []
+            (sessionPrints (replSession (replStateFrom heldAssertStep)))
+        , assertEqual
             "REPL captures Print output"
             ["x2"]
             (sessionPrints (replSession (replStateFrom printStep)))
@@ -3411,6 +4397,302 @@ checkRepl = do
   replValueFrom _ = Nothing
   replExitFrom (ReplExit code _) = Just code
   replExitFrom _ = Nothing
+
+checkHistoricalMessageList :: IO Bool
+checkHistoricalMessageList = do
+  noSession <- evaluateSessionSource "MessageList[Print[\"never\"], 1]"
+  defaultHistorySteps <-
+    runLines
+      [ "1+2"
+      , "{In[],Out[],InString[]}"
+      ]
+  historySteps <-
+    runLines
+      [ "Message[f::a]; Message[f::a]; Quiet[Message[g::b]]"
+      , "{MessageList[1],System`MessageList[-1],MessageList[$Line],MessageList[0],MessageList[99]}"
+      , "i=1;{MessageList[i++],i}"
+      , "{MessageList[(Message[now::tag];1)],$MessageList}"
+      ]
+  nestedSteps <-
+    runLines
+      [ "Message[indexed::tag];1"
+      , "{MessageList[Out[1]],MessageList[In[1]],MessageList[Out[1]+In[1]-1],MessageList[Evaluate[Unevaluated[Out[1]]]],$MessageList}"
+      , "k=0;{MessageList[Out[(k++;1)]],k}"
+      , "MessageList[Unevaluated[Out[1]]]"
+      , "System`MessageList[System`Out[x]]"
+      , "MessageList[Global`Out[1]]"
+      , "outAlias=System`Out;MessageList[outAlias[1]]"
+      , "{Catch[MessageList[Out[(Print[\"before\"];Throw[t])]]],CheckAbort[MessageList[In[(Print[\"abort\"];Abort[])]],caught],$MessageList}"
+      ]
+  boundarySteps <-
+    runLines
+      [ "i=0;{MessageList[(i++;1),(i++;2)],i,$MessageList}"
+      , "MessageList[Print[\"bad\"];missing]"
+      , "{MessageList[2],$MessageList}"
+      , "MessageList[Sequence[1]]"
+      , "{Global`MessageList[Print[\"g\"]],ml=System`MessageList;ml[Print[\"a\"]]}"
+      , "Unprotect[MessageList];MessageList[x_]:=owned;MessageList[1]"
+      , "Unprotect[Global`MessageList];Global`MessageList[x_]:=globalOwned;Global`MessageList[1]"
+      , "u=1;{MessageList[Unevaluated[u++]],u}"
+      ]
+  visibilitySteps <-
+    runLines
+      [ "Quiet[MessageList[x]]"
+      , "MessageList[1]"
+      , "Check[MessageList[x],fallback]"
+      , "MessageList[3]"
+      , "Off[MessageList::error]"
+      , "MessageList[x]"
+      , "{MessageList[1],MessageList[3],MessageList[6]}"
+      ]
+  pruningSteps <-
+    runLines
+      [ "$HistoryLength=2;Message[old::tag]"
+      , "Message[new::tag]"
+      , "{MessageList[1],MessageList[2]}"
+      , "$HistoryLength=0;Message[zero::tag]"
+      , "MessageList[4]"
+      ]
+  let held name tag = "List[HoldForm[MessageName[" <> name <> ", \"" <> tag <> "\"]]]"
+      duplicated =
+        "List[HoldForm[MessageName[f, \"a\"]], HoldForm[MessageName[f, \"a\"]]]"
+      messageListArity =
+        "MessageList::error: MessageList expects exactly one line specification."
+      historyInteger =
+        "MessageList::error: History functions expect an integer line specification."
+      outHistoryInteger =
+        "Out::error: History functions expect an integer line specification."
+      checks =
+        [ assertEqual
+            "MessageList no-session dispatch suppresses validation and held effects"
+            (Right ("List[]", [], [], []))
+            ( fmap
+                ( \(value, session) ->
+                    ( fullForm value
+                    , sessionPrints session
+                    , sessionVisibleMessages session
+                    , sessionGeneratedMessages session
+                    )
+                )
+                noSession
+            )
+        , assertEqual
+            "default In Out and InString resolve the previous retained line"
+            (Just "List[3, 3, \"1+2\"]")
+            (stepForm (defaultHistorySteps !! 1))
+        , assertEqual
+            "REPL historical MessageList supports bare System relative current missing and future lines"
+            ( Just
+                ( "List[" <> duplicated <> ", " <> duplicated
+                    <> ", List[], List[], List[]]"
+                )
+            )
+            (stepForm (historySteps !! 1))
+        , assertEqual
+            "REPL historical MessageList evaluates an index once"
+            (Just ("List[" <> duplicated <> ", 2]"))
+            (stepForm (historySteps !! 2))
+        , assertEqual
+            "REPL historical MessageList keeps current messages separate from retained history"
+            ( Just
+                ( "List[" <> duplicated
+                    <> ", List[HoldForm[MessageName[now, \"tag\"]]]]"
+                )
+            )
+            (stepForm (historySteps !! 3))
+        , assertEqual
+            "REPL message history retains ordered visible duplicates only"
+            ( Just
+                [ "f::a: Message generated."
+                , "f::a: Message generated."
+                ]
+            )
+            ( historyMessageTexts
+                1
+                (historySteps !! 3)
+            )
+        , assertEqual
+            "nested In Out and explicit Evaluate resolve before historical lookup"
+            ( Just
+                ( "List[" <> held "indexed" "tag" <> ", "
+                    <> held "indexed" "tag" <> ", "
+                    <> held "indexed" "tag" <> ", "
+                    <> held "indexed" "tag" <> ", "
+                    <> "List[HoldForm[MessageName[indexed, \"tag\"]], "
+                    <> "HoldForm[MessageName[indexed, \"tag\"]]]]"
+                )
+            )
+            (stepForm (nestedSteps !! 1))
+        , assertEqual
+            "nested Out index effects occur once"
+            (Just ("List[" <> held "indexed" "tag" <> ", 1]"))
+            (stepForm (nestedSteps !! 2))
+        , assertEqual
+            "direct Unevaluated stays held and recovers raw MessageList syntax"
+            ( Just
+                ( "MessageList[Unevaluated[Out[1]]]"
+                , [historyInteger]
+                )
+            )
+            (stepFormAndMessages (nestedSteps !! 3))
+        , assertEqual
+            "qualified nested failures recover qualified raw syntax and diagnostics"
+            ( Just
+                ( "System`MessageList[System`Out[x]]"
+                , [outHistoryInteger, historyInteger]
+                )
+            )
+            (stepFormAndMessages (nestedSteps !! 4))
+        , assertEqual
+            "Global and aliased Out calls remain ordinary expressions"
+            [ ( "MessageList[Global`Out[1]]"
+              , [historyInteger]
+              )
+            , ( "MessageList[outAlias[1]]"
+              , [historyInteger]
+              )
+            ]
+            ( map
+                (maybe ("", []) id . stepFormAndMessages)
+                [nestedSteps !! 5, nestedSteps !! 6]
+            )
+        , assertEqual
+            "nested history propagates Throw Abort and preceding Print effects"
+            (Just ("List[t, caught, List[]]", ["before", "abort"], []))
+            (stepFormPrintsAndMessages (nestedSteps !! 7))
+        , assertEqual
+            "MessageList arity validation does not evaluate indices and snapshots its diagnostic"
+            ( Just
+                ( "List[MessageList[CompoundExpression[Increment[i], 1], CompoundExpression[Increment[i], 2]], 0, "
+                    <> held "MessageList" "error" <> "]"
+                , [messageListArity]
+                )
+            )
+            (stepFormAndMessages (boundarySteps !! 0))
+        , assertEqual
+            "MessageList invalid index retains prior Print and raw recovery"
+            ( Just
+                ( "MessageList[CompoundExpression[Print[\"bad\"], missing]]"
+                , ["bad"]
+                , [historyInteger]
+                )
+            )
+            (stepFormPrintsAndMessages (boundarySteps !! 1))
+        , assertEqual
+            "MessageList stores only the prior line's visible diagnostic"
+            ( Just
+                ( "List[" <> held "MessageList" "error" <> ", List[]]"
+                )
+            )
+            (stepForm (boundarySteps !! 2))
+        , assertEqual
+            "MessageList preserves Sequence at its held direct boundary"
+            ( Just
+                ( "MessageList[Sequence[1]]"
+                , [historyInteger]
+                )
+            )
+            (stepFormAndMessages (boundarySteps !! 3))
+        , assertEqual
+            "Global and aliased MessageList calls use ordinary evaluation"
+            ( Just
+                ( "List[Global`MessageList[Null], System`MessageList[Null]]"
+                , ["g", "a"]
+                , []
+                )
+            )
+            (stepFormPrintsAndMessages (boundarySteps !! 4))
+        , assertEqual
+            "direct MessageList dispatch precedes its ordinary downvalues"
+            (Just (held "MessageList" "error"))
+            (stepForm (boundarySteps !! 5))
+        , assertEqual
+            "Global MessageList downvalues retain ordinary precedence"
+            (Just "globalOwned")
+            (stepForm (boundarySteps !! 6))
+        , assertEqual
+            "direct Unevaluated holds its index payload and effects"
+            ( Just
+                "List[MessageList[Unevaluated[Increment[u]]], 1]"
+            )
+            (stepForm (boundarySteps !! 7))
+        , assertEqual
+            "historical MessageList retains visible Check diagnostics but not Quiet or Off diagnostics"
+            ( Just
+                ( "List[List[], " <> held "MessageList" "error"
+                    <> ", List[]]"
+                )
+            )
+            (stepForm (visibilitySteps !! 6))
+        , assertEqual
+            "visible-only diagnostic history is mirrored into the evaluator session"
+            ([], [historyInteger], [])
+            ( historyMessageTextsOrEmpty 1 (visibilitySteps !! 3)
+            , historyMessageTextsOrEmpty 3 (visibilitySteps !! 6)
+            , historyMessageTextsOrEmpty 6 (visibilitySteps !! 6)
+            )
+        , assertEqual
+            "$HistoryLength prunes old messages before the next input"
+            (Just ("List[List[], " <> held "new" "tag" <> "]"))
+            (stepForm (pruningSteps !! 2))
+        , assertEqual
+            "$HistoryLength zero removes the just-finished line"
+            (Just "List[]")
+            (stepForm (pruningSteps !! 4))
+        , assertEqual
+            "$HistoryLength zero prunes all synchronized REPL histories"
+            (0, 0, 0, 0)
+            ( let state = stepState (pruningSteps !! 4)
+               in ( Map.size (replInputHistory state)
+                  , Map.size (replInputStrings state)
+                  , Map.size (replOutputHistory state)
+                  , Map.size (replMessageHistory state)
+                  )
+            )
+        ]
+  and <$> sequence checks
+ where
+  runLines = go initialReplState
+   where
+    go _ [] = pure []
+    go state (source : rest) = do
+      step <- evaluateReplLine state source
+      remaining <- go (stepState step) rest
+      pure (step : remaining)
+
+  stepState (ReplValue _ _ state) = state
+  stepState (ReplFailure _ state) = state
+  stepState (ReplExit _ state) = state
+  stepState (ReplEmpty state) = state
+
+  stepValue (ReplValue _ value _) = Just value
+  stepValue _ = Nothing
+
+  stepForm = fmap fullForm . stepValue
+
+  stepMessages =
+    map evaluationMessageText
+      . sessionVisibleMessages
+      . replSession
+      . stepState
+
+  stepPrints = sessionPrints . replSession . stepState
+
+  stepFormAndMessages step =
+    fmap (\value -> (value, stepMessages step)) (stepForm step)
+
+  stepFormPrintsAndMessages step =
+    (,,) <$> stepForm step <*> pure (stepPrints step) <*> pure (stepMessages step)
+
+  historyMessageTexts line step =
+    map evaluationMessageText
+      <$> Map.lookup line (replMessageHistory (stepState step))
+
+  historyMessageTextsOrEmpty line =
+    maybe [] (map evaluationMessageText)
+      . Map.lookup line
+      . replMessageHistory
+      . stepState
 
 checkDiscovery :: IO Bool
 checkDiscovery = do
@@ -3524,6 +4806,7 @@ checkParserCorpus = withTemporaryDirectory "tungsten-parser-corpus" $ \corpusRoo
   TextIO.writeFile (notebookRoot </> "sample.nb") "Notebook[{Cell[\"Hello\", \"Text\"]}]"
   discovery <- discoverCorpusFiles corpusRoot [] [] ["**/bad.wl"] Nothing False 0
   filtered <- discoverCorpusFiles corpusRoot ["wl"] ["github/*"] [] (Just 1) False 0
+  shuffled <- discoverCorpusFiles corpusRoot [] [] [] Nothing True 7
   attempts <- case discovery of
     Left _ -> pure []
     Right files -> traverse (\file -> (corpusFileRelativePath file,) <$> parseCorpusFile file "input" (Just 2097152) 2000) files
@@ -3577,6 +4860,7 @@ checkParserCorpus = withTemporaryDirectory "tungsten-parser-corpus" $ \corpusRoo
   let relativePaths = map corpusFileRelativePath (either (const []) id discovery)
       attemptStatuses = [(path, parserAttemptStatus attempt) | (path, attempt) <- attempts]
       filteredPaths = map corpusFileRelativePath (either (const []) id filtered)
+      shuffledPaths = map corpusFileRelativePath (either (const []) id shuffled)
       success = ParserAttempt "tungsten" "success" Nothing Nothing Nothing Map.empty
       failure = ParserAttempt "wolfram" "failure" Nothing (Just "ParseFailure") Nothing Map.empty
   checks <- sequence
@@ -3588,6 +4872,10 @@ checkParserCorpus = withTemporaryDirectory "tungsten-parser-corpus" $ \corpusRoo
         "parser corpus include/extension/max filters"
         ["github/sample/bad.wl"]
         filteredPaths
+    , assertEqual
+        "parser corpus matches CPython seeded shuffle"
+        ["notebookarchive/sample.nb", "github/sample/bad.wl", "github/sample/expr.wl"]
+        shuffledPaths
     , assertEqual
         "parser corpus local parse attempts"
         [("github/sample/expr.wl", "success"), ("notebookarchive/sample.nb", "success")]
@@ -3720,7 +5008,7 @@ checkNotebookModel = do
         , assertEqual "notebook group count" 1 (groupCount document)
         , assertEqual "notebook paths" [[0], [1, 0], [1, 1]] (map cellRecordPath records)
         , assertEqual "notebook styles" [Just "Title", Just "Input", Just "Output"] (map cellRecordStyle records)
-        , assertEqual "notebook previews" ["Demo", "1+2", "RowBox[List[\"1\", \"+\", \"2\"]]"] (map cellRecordPreview records)
+        , assertEqual "notebook previews" ["Demo", "1+2", "1 + 2"] (map cellRecordPreview records)
         , assertEqual "notebook render round trip" (Right document) (parseNotebook (renderNotebook document))
         , assertEqual "created notebook cell count" 2 (cellCount created)
         , assertEqual
@@ -3794,19 +5082,38 @@ checkFullForms = do
 checkInputForms :: IO Bool
 checkInputForms = do
   let cases =
-        [ ("list and association", "{a, <|x -> 1/2|>}", "{a, <|x -> 1/2|>}")
+        [ ("list and association", "{a, <|x -> 1/2|>}", "{a, <|x -> 1 / 2|>}")
+        , ("explicit numeric constructors", "{Rational[2,4],Complex[1.,0.]}", "{Rational[2, 4], Complex[1., 0.]}")
         , ("operator precedence", "(a + b) * c^(-2)", "(a + b) * c^(-2)")
+        , ("dot vectors", "{a,b}.{c,d}", "{a, b} . {c, d}")
+        , ("dot pure function", "Hold[#1.#2 &]", "Hold[# . #2 &]")
+        , ("dot sparse constructors", "SparseArray[{}, {2,2}].SparseArray[{}, {2,2}]", "SparseArray[{}, {2, 2}] . SparseArray[{}, {2, 2}]")
+        , ("dot arithmetic precedence", "{-a.b, a*b.c, a.b*c, a^b.c, a.b^c, a^-b.c}", "{-(a . b), a * (b . c), a . b * c, a^b . c, a . b^c, a^(-(b . c))}")
+        , ("dot decimal adjacency", "{a.5, a .5, a . 5}", "{a * .5, a * .5, a . 5}")
         , ("singleton negative Times", "Times[-1]", "-Times[]")
         , ("slots", "{#, #2, ##, ##3}", "{#, #2, ##, ##3}")
         , ("blank patterns", "{x_, x__Integer, x___}", "{x_, x__Integer, x___}")
         , ("pattern operators", "{x_?p, x_:1, p.., p...}", "{x_?p, x_:1, p.., p...}")
         , ("condition", "x_ /; p[x]", "x_ /; p[x]")
-        , ("mapping operators", "{f /@ x, f @@ x, x /. r, x //. r}", "{f /@ x, f @@ x, x /. r, x //. r}")
+        , ("postfix function rule precedence", "a -> b &", "a -> b &")
+        , ("postfix function delayed rule precedence", "lhs :> rhs &", "lhs :> rhs &")
+        , ("postfix function before delayed rule", "p & :> value", "(p &) :> value")
+        , ("postfix function assignment precedence", "a = b &", "a = (b &)")
+        , ("named function parameters", "{x,y} |-> x+y", "{x, y} |-> x + y")
+        , ("Select postfix predicate property rule", "Select[f[1,a,2,3], #>1 & -> \"Index\"]", "Select[f[1, a, 2, 3], (# > 1 &) -> \"Index\"]")
+        , ("Select postfix predicate property list rule", "Select[{1,a,2,3}, #>1 & -> {\"Element\",\"Index\"}]", "Select[{1, a, 2, 3}, (# > 1 &) -> {\"Element\", \"Index\"}]")
+        , ("SelectFirst postfix predicate property rule", "SelectFirst[{1,a}, #>1 & -> {\"Element\",\"Index\"}, q]", "SelectFirst[{1, a}, (# > 1 &) -> {\"Element\", \"Index\"}, q]")
+        , ("association Select postfix MatchQ property rule", "Select[<|a->1,b->x,c->2|>, MatchQ[#,_Integer] & -> \"Index\"]", "Select[<|a -> 1, b -> x, c -> 2|>, (MatchQ[#, _Integer] &) -> \"Index\"]")
+        , ("association Discard postfix MatchQ property rule", "Discard[<|a->1,b->x,c->2|>, MatchQ[#,_Integer] & -> \"Index\"]", "Discard[<|a -> 1, b -> x, c -> 2|>, (MatchQ[#, _Integer] &) -> \"Index\"]")
+        , ("mapping operators", "{f /@ x, f //@ x, f @@ x, f @@@ x, x /. r, x //. r}", "{f /@ x, f //@ x, f @@ x, f @@@ x, x /. r, x //. r}")
         , ("composition", "{f @* g, f /* g}", "{f @* g, f /* g}")
         , ("updates", "{x++, ++x, x =.}", "{x++, ++x, x =.}")
         , ("tagged delayed assignment", "TagSetDelayed[f, h[f[x_]], x]", "f /: h[f[x_]] := x")
         , ("tagged unset", "TagUnset[f, h[f[x_]]]", "f /: h[f[x_]] =.")
         , ("message name", "a::b", "a::b")
+        , ("postfix derivative primes", "Hold[fn''[x]]", "Hold[fn''[x]]")
+        , ("Get filename", "Hold[<< foo]", "Hold[<< foo]")
+        , ("Get path token", "Hold[<< pkg/path-name.wl]", "Hold[<< pkg/path-name.wl]")
         , ("nested prefix not", "!!a", "!!a")
         , ("span shorthand", "1 ;; 3", ";; 3")
         , ("part shorthand", "Part[f[a], 1]", "f[a][[1]]")
@@ -3877,6 +5184,8 @@ checkExpressionJsonRoundTrips = do
         , Integer 999999999999999999999999999999999999999999
         , Rational (-7) 13
         , Real "6.02214076*^23`8"
+        , SpecialReal OverflowReal
+        , SpecialReal UnderflowReal
         , Complex (Integer 2) (Real "-0.0")
         , String "snowman ☃\n"
         , ByteArray (BS.pack [0 .. 255])
@@ -3884,10 +5193,27 @@ checkExpressionJsonRoundTrips = do
         , expectRight (root [1, 0, 1] 1 2)
         , expectRight (sparseArray [2] [SparseEntry [2] (Rational 1 3)] (Integer 0))
         ]
-  and
-    <$> traverse
+      expectedOverflowJson =
+        JsonObject
+          ( Map.fromList
+              [ ("special", JsonString "Overflow")
+              , ("type", JsonString "real")
+              ]
+          )
+      unknownSpecialJson =
+        JsonObject
+          ( Map.fromList
+              [ ("special", JsonString "Unknown")
+              , ("type", JsonString "real")
+              ]
+          )
+  roundTrips <-
+    traverse
       (\expression -> assertEqual ("expression JSON round trip: " <> fullForm expression) (Right expression) (exprFromJson (exprToJson expression)))
       expressions
+  overflowShape <- assertEqual "special real JSON shape" expectedOverflowJson (exprToJson (SpecialReal OverflowReal))
+  unknownSpecial <- assertLeft "reject unknown special real JSON" (exprFromJson unknownSpecialJson)
+  pure (and (roundTrips <> [overflowShape, unknownSpecial]))
 
 checkJsonCodec :: IO Bool
 checkJsonCodec = do

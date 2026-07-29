@@ -100,10 +100,10 @@ namedFunctionParser = do
 
 compoundExpressionParser :: Parser Expr
 compoundExpressionParser = do
-  firstExpression <- functionParser
+  firstExpression <- assignmentParser
   remaining <- many $ do
     _ <- operator ";" ";"
-    option (Symbol "Null") functionParser
+    option (Symbol "Null") assignmentParser
   pure $ case remaining of
     [] -> firstExpression
     values -> Call (Symbol "CompoundExpression") (firstExpression : values)
@@ -128,13 +128,25 @@ spanParser = do
       )
 
 functionParser :: Parser Expr
-functionParser = assignmentParser >>= functionPostfixes
+functionParser = compositionParser >>= functionPostfixes
  where
   functionPostfixes expression =
     option expression $ do
       _ <- operator "&" "&"
       postfixed <- postfixesParser True (Call (Symbol "Function") [expression])
-      functionPostfixes postfixed
+      continued <- continueAfterFunction postfixed
+      functionPostfixes continued
+
+  -- Function sits below rules, replacement, mapping, and composition but above
+  -- assignment.  A higher-precedence operator can therefore continue after a
+  -- completed postfix function: @p & -> property@ is a rule whose left side is
+  -- @Function[p]@, while @lhs -> rhs &@ wraps the already-completed rule.
+  -- Re-enter the higher-precedence layer with the completed tree parenthesized
+  -- so the recursive-descent grammar can model that Pratt-style continuation.
+  continueAfterFunction expression = do
+    remaining <- getInput
+    Parsec.setInput ("(" <> fullForm expression <> ")" <> remaining)
+    compositionParser
 
 assignmentParser :: Parser Expr
 assignmentParser = do
@@ -142,12 +154,12 @@ assignmentParser = do
   option lhs (assignmentSuffix lhs)
 
 taggedAssignmentPrefixParser :: Parser Expr
-taggedAssignmentPrefixParser = compositionParser >>= gatherPrefixes
+taggedAssignmentPrefixParser = functionParser >>= gatherPrefixes
  where
   gatherPrefixes lhs =
     option lhs $ do
       _ <- operator "/:" ""
-      target <- withTaggedUnsetSuppression True compositionParser
+      target <- withTaggedUnsetSuppression True functionParser
       gatherPrefixes (Call (Symbol "TagSetPrefix") [lhs, target])
 
 assignmentSuffix :: Expr -> Parser Expr
@@ -225,12 +237,18 @@ compositionParser =
 applyOperatorParser :: Parser Expr
 applyOperatorParser = chainr1 mapOperatorParser applyOperator
  where
-  applyOperator = binary "@@" (call2 "Apply")
+  applyOperator = choice
+    [ binary "@@@" (call2 "MapApply")
+    , binary "@@" (call2 "Apply")
+    ]
 
 mapOperatorParser :: Parser Expr
 mapOperatorParser = chainr1 replacementParser mapOperator
  where
-  mapOperator = binary "/@" (call2 "Map")
+  mapOperator = choice
+    [ binary "//@" (call2 "MapAll")
+    , binary "/@" (call2 "Map")
+    ]
 
 replacementParser :: Parser Expr
 replacementParser = chainl1 ruleParser replacementOperator
@@ -284,8 +302,8 @@ andParser = chainl1 comparisonParser (binary "&&" (call2 "And"))
 
 comparisonParser :: Parser Expr
 comparisonParser = do
-  firstExpression <- applyParser
-  comparisons <- many ((,) <$> comparisonOperator <*> applyParser)
+  firstExpression <- defaultNamedInfixParser
+  comparisons <- many ((,) <$> comparisonOperator <*> defaultNamedInfixParser)
   pure (comparisonExpression firstExpression comparisons)
  where
   comparisonOperator = choice
@@ -298,6 +316,31 @@ comparisonParser = do
     , "Less" <$ operator "<" "|>"
     , "Greater" <$ operator ">" "="
     ]
+
+-- Generic named infix operators use the comparison binding power but are
+-- left-associative (their Pratt right binding power is one tick higher).
+-- Parsing them as each built-in comparison operand reproduces that asymmetry:
+-- @a < b \[Precedes] c@ keeps @Precedes[b, c]@ on the comparison's right.
+defaultNamedInfixParser :: Parser Expr
+defaultNamedInfixParser = do
+  firstExpression <- applyParser
+  operations <- many ((,) <$> namedOperator <*> applyParser)
+  pure (namedInfixExpression firstExpression operations)
+ where
+  namedOperator = namedInfixOperatorParser isDefaultNamedInfix
+  isDefaultNamedInfix headName =
+    headName /= "CirclePlus"
+      && headName /= "CircleTimes"
+      && headName /= "Diamond"
+
+namedInfixExpression :: Expr -> [(Text, Expr)] -> Expr
+namedInfixExpression = go
+ where
+  go expression [] = expression
+  go expression ((headName, value) : remaining) =
+    let (sameHead, rest) = span ((== headName) . fst) remaining
+        operands = expression : value : map snd sameHead
+     in go (Call (Symbol headName) operands) rest
 
 comparisonExpression :: Expr -> [(Text, Expr)] -> Expr
 comparisonExpression firstExpression comparisons = case comparisons of
@@ -316,8 +359,15 @@ applyParser = do
   functions <- many (operator "//" ".=@" *> spanParser)
   pure (foldl' (\argument function -> Call function [argument]) firstExpression functions)
 
+-- The three named infix operators with non-default Wolfram precedences each
+-- occupy their own layer.  Gathering operands in the layer itself makes an
+-- unparenthesized chain n-ary while retaining a nested call introduced by
+-- parentheses or an explicit head call as a structural boundary.
+circlePlusParser :: Parser Expr
+circlePlusParser = namedInfixChainParser "CirclePlus" timesParser timesParser
+
 plusParser :: Parser Expr
-plusParser = chainl1 timesParser plusOperator
+plusParser = chainl1 circlePlusParser plusOperator
  where
   plusOperator = choice
     [ binary "<>" (call2 "StringJoin")
@@ -329,17 +379,22 @@ timesParser :: Parser Expr
 timesParser = do
   firstFactor <- unaryParser
   operations <- many timesTail
-  pure (foldl' applyTimes firstFactor operations)
+  pure (fst (foldl' applyTimes (firstFactor, False) operations))
  where
   timesTail = choice
     [ (,) Multiply <$> (operator "*" "*^*=" *> unaryParser)
     , (,) Divide <$> (operator "/" "/:;.@=*" *> unaryParser)
     , try $ do
         notFollowedBy (char '-')
-        (,) Multiply <$> powerParser
+        (,) Multiply <$> circleTimesParser
     ]
-  applyTimes lhs (Multiply, rhs) = flatCall2 "Times" lhs rhs
-  applyTimes lhs (Divide, rhs) = divideExpression lhs rhs
+  applyTimes (lhs, isUngroupedTimes) (Multiply, rhs) =
+    case (isUngroupedTimes, lhs) of
+      (True, Call (Symbol "Times") values) ->
+        (Call (Symbol "Times") (values <> [rhs]), True)
+      _ -> (Call (Symbol "Times") [lhs, rhs], True)
+  applyTimes (lhs, isUngroupedTimes) (Divide, rhs) =
+    divideExpression isUngroupedTimes lhs rhs
 
 data TimesOperation = Multiply | Divide
 
@@ -348,16 +403,76 @@ unaryParser = choice
   [ operator "+" "+=" *> unaryParser
   , negateExpression <$> (operator "-" "-=>" *> unaryParser)
   , Call (Symbol "Not") . pure <$> (operator "!" "=" *> comparisonParser)
-  , powerParser
+  , circleTimesParser
   ]
+
+circleTimesParser :: Parser Expr
+circleTimesParser =
+  namedInfixChainParser
+    "CircleTimes"
+    diamondParser
+    (namedHighPrecedenceRightParser diamondParser)
+
+diamondParser :: Parser Expr
+diamondParser =
+  namedInfixChainParser
+    "Diamond"
+    dotParser
+    (namedHighPrecedenceRightParser dotParser)
+
+-- Prefix operators may begin the right operand of a tighter infix operator.
+-- Once a prefix appears, its own lower binding power controls how much of the
+-- remainder it absorbs, mirroring the existing Dot/Power right-side parser.
+namedHighPrecedenceRightParser :: Parser Expr -> Parser Expr
+namedHighPrecedenceRightParser fallback = choice
+  [ operator "+" "+=" *> unaryParser
+  , negateExpression <$> (operator "-" "-=>" *> unaryParser)
+  , Call (Symbol "Not") . pure <$> (operator "!" "=" *> comparisonParser)
+  , fallback
+  ]
+
+namedInfixChainParser :: Text -> Parser Expr -> Parser Expr -> Parser Expr
+namedInfixChainParser headName firstParser rightParser = do
+  firstExpression <- firstParser
+  remaining <- many (namedOperator *> rightParser)
+  pure $ case remaining of
+    [] -> firstExpression
+    values -> Call (Symbol headName) (firstExpression : values)
+ where
+  namedOperator = namedInfixOperatorParser (== headName)
+
+-- Wolfram's Dot binds more tightly than Times but less tightly than Power.
+-- Prefix +/- sit between Dot and Times: they absorb a following Dot expression
+-- while leaving a following product outside, so @-a.b*c@ is
+-- @Times[Times[-1, Dot[a, b]], c]@.  A prefix operator may still begin the
+-- right operand of Dot or Power even though its own binding power is lower.
+dotParser :: Parser Expr
+dotParser = do
+  firstFactor <- powerParser
+  remaining <- many (operator "." ".0123456789" *> highPrecedenceRightParser)
+  pure $ case remaining of
+    [] -> firstFactor
+    values -> Call (Symbol "Dot") (firstFactor : values)
 
 powerParser :: Parser Expr
 powerParser = do
   base <- prefixUpdateParser
   option base $ do
     _ <- operator "^" "^:="
-    exponentValue <- unaryParser
+    exponentValue <- highPrecedenceRightParser
     pure (Call (Symbol "Power") [base, exponentValue])
+
+-- Pratt-style prefix parsing permits a sign (or Not) at the start of a
+-- high-precedence right operand.  Once present, the prefix operator applies
+-- its own lower binding power, which is why @a^-b.c@ absorbs @b.c@ into the
+-- exponent while @a^b.c@ leaves Dot outside Power.
+highPrecedenceRightParser :: Parser Expr
+highPrecedenceRightParser = choice
+  [ operator "+" "+=" *> unaryParser
+  , negateExpression <$> (operator "-" "-=>" *> unaryParser)
+  , Call (Symbol "Not") . pure <$> (operator "!" "=" *> comparisonParser)
+  , powerParser
+  ]
 
 prefixUpdateParser :: Parser Expr
 prefixUpdateParser = choice
@@ -393,6 +508,13 @@ postfixesParser allowPatternTest expression =
     , do
         _ <- operator "!" "!="
         postfixesParser allowPatternTest (Call (Symbol "Factorial") [expression])
+    , do
+        primes <- many1 (operator "'" "")
+        let derivative =
+              Call
+                (Call (Symbol "Derivative") [Integer (toInteger (length primes))])
+                [expression]
+        postfixesParser allowPatternTest derivative
     , do
         updateHead <- choice
           [ "Increment" <$ operator "++" ""
@@ -472,6 +594,7 @@ inputAtomParser = lexeme $ choice
   [ try numberParser
   , String <$> stringLiteralParser
   , listParser
+  , try getParser
   , associationParser
   , percentHistoryParser
   , slotParser
@@ -479,6 +602,28 @@ inputAtomParser = lexeme $ choice
   , Symbol <$> symbolParser
   , between (symbolChar '(') (symbolChar ')') nestedInputExpressionParser
   ]
+
+getParser :: Parser Expr
+getParser = do
+  _ <- string "<<"
+  fileName <- try contextualBareFileName <|> regularFileName
+  pure (Call (Symbol "Get") [String fileName])
+ where
+  -- Get and Put use a context-sensitive filename token.  Only spaces and tabs,
+  -- plus at most one line continuation, are skipped before scanning its broad
+  -- path alphabet.  A plain newline or comment falls back to ordinary symbol
+  -- tokenization, so @<<foo.wl@ and @<<\nfoo.wl@ intentionally parse
+  -- differently just as they do in the Python reference.
+  contextualBareFileName = do
+    horizontalSpace
+    _ <- optionMaybe lineContinuation
+    horizontalSpace
+    T.pack <$> many1 (satisfy isFileNameCharacter)
+  regularFileName = ignored *> (stringLiteralParser <|> symbolParser)
+  horizontalSpace = skipMany (void (oneOf " \t"))
+  isFileNameCharacter character =
+    isAlphaNum character
+      || character `elem` ("_-*:/\\.`$!?~" :: String)
 
 percentHistoryParser :: Parser Expr
 percentHistoryParser = do
@@ -540,6 +685,26 @@ binary operatorText constructor = constructor <$ operator operatorText ""
 binaryExcept :: Text -> String -> (Expr -> Expr -> Expr) -> Parser (Expr -> Expr -> Expr)
 binaryExcept operatorText blocked constructor = constructor <$ operator operatorText blocked
 
+-- Parse either the canonical escaped spelling (\[Precedes]) or the direct
+-- Unicode codepoint for any head in the complete named-infix catalog.  The
+-- predicate lets precedence layers select only the heads they own without
+-- duplicating the catalog in the grammar.
+namedInfixOperatorParser :: (Text -> Bool) -> Parser Text
+namedInfixOperatorParser accepted = lexeme (try escapedSpelling <|> try directSpelling)
+ where
+  escapedSpelling = try $ do
+    _ <- string "\\["
+    name <- T.pack <$> many1 (satisfy (/= ']'))
+    _ <- char ']'
+    case namedInfixOperatorHead name of
+      Just headName | accepted headName -> pure headName
+      _ -> unexpected "a named infix operator at this precedence"
+  directSpelling = do
+    character <- satisfy isNamedOperatorCharacter
+    case namedInfixOperatorHeadForCharacter character of
+      Just headName | accepted headName -> pure headName
+      _ -> unexpected "a named infix operator at this precedence"
+
 operator :: Text -> String -> Parser Text
 operator operatorText blocked = lexeme (choice (map spellingParser (namedOperatorSpellings operatorText)))
  where
@@ -567,13 +732,20 @@ negateExpression expression = case expression of
     _ -> "-" <> source
   _ -> Call (Symbol "Times") [Integer (-1), expression]
 
-divideExpression :: Expr -> Expr -> Expr
-divideExpression (Integer numerator) (Integer denominator)
-  | denominator /= 0 = either (const fallback) id (rational numerator denominator)
- where
-  fallback = Call (Symbol "Times") [Integer numerator, Call (Symbol "Power") [Integer denominator, Integer (-1)]]
-divideExpression lhs rhs =
-  flatCall2 "Times" lhs (Call (Symbol "Power") [rhs, Integer (-1)])
+divideExpression :: Bool -> Expr -> Expr -> (Expr, Bool)
+divideExpression isUngroupedTimes lhs rhs =
+  case (isUngroupedTimes, lhs) of
+    (True, Call (Symbol "Times") values@(_ : _)) ->
+      let reciprocal = Call (Symbol "Power") [rhs, Integer (-1)]
+          prefix = init values
+          dividedFactor = Call (Symbol "Times") [last values, reciprocal]
+       in (Call (Symbol "Times") (prefix <> [dividedFactor]), True)
+    _ ->
+      ( Call
+          (Symbol "Times")
+          [lhs, Call (Symbol "Power") [rhs, Integer (-1)]]
+      , False
+      )
 
 expressionParser :: Parser Expr
 expressionParser = do
@@ -587,10 +759,6 @@ foldCalls expression argumentLists = foldl' step (pure expression) argumentLists
   step accumulated arguments' = accumulated >>= (`canonicalCall` arguments')
 
 canonicalCall :: Expr -> [Expr] -> Parser Expr
-canonicalCall (Symbol "Rational") [Integer numerator, Integer denominator] =
-  either (fail . T.unpack . expressionErrorMessage) pure (rational numerator denominator)
-canonicalCall (Symbol "Complex") [realPart, imaginaryPart] =
-  pure (Complex realPart imaginaryPart)
 canonicalCall expressionHead arguments' = pure (Call expressionHead arguments')
 
 argumentsParser :: Parser [Expr]

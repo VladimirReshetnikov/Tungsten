@@ -1,5 +1,6 @@
 #include "tungsten/assistant.hpp"
 #include "tungsten/detail/numeric.hpp"
+#include "tungsten/detail/unicode.hpp"
 #include "tungsten/discovery.hpp"
 #include "tungsten/docs_index.hpp"
 #include "tungsten/evaluator.hpp"
@@ -139,40 +140,50 @@ std::string trim_copy(std::string value) {
     return value.substr(first, last - first + 1);
 }
 
-std::int64_t parse_int64_argument(
-    const std::string& value, const std::string& option) {
-    try {
-        std::size_t consumed = 0;
-        const auto parsed = std::stoll(value, &consumed);
-        if (consumed != value.size()) throw std::invalid_argument("trailing text");
-        return parsed;
-    } catch (const std::exception&) {
-        throw std::invalid_argument(option + " requires an integer: " + value);
-    }
-}
-
 mpz_class parse_arbitrary_integer_argument(
     const std::string& value, const std::string& option) {
-    const auto text = trim_copy(value);
+    std::vector<tungsten::detail::Utf8CodePoint> codepoints;
+    codepoints.reserve(value.size());
+    for (std::size_t offset = 0; offset < value.size();) {
+        const auto decoded = tungsten::detail::decode_utf8_code_point(
+            value, offset);
+        if (!decoded.valid)
+            throw std::invalid_argument(
+                option + " requires an integer: " + value);
+        codepoints.push_back(decoded);
+        offset += decoded.length;
+    }
+
+    std::size_t first = 0;
+    while (first < codepoints.size()
+        && tungsten::detail::unicode_is_whitespace(codepoints[first].value))
+        ++first;
+    std::size_t last = codepoints.size();
+    while (last > first
+        && tungsten::detail::unicode_is_whitespace(codepoints[last - 1].value))
+        --last;
+
     std::string normalized;
-    normalized.reserve(text.size());
-    std::size_t index = 0;
-    if (!text.empty() && (text.front() == '+' || text.front() == '-')) {
-        if (text.front() == '-') normalized.push_back('-');
-        index = 1;
+    normalized.reserve(value.size());
+    auto index = first;
+    if (index < last && (codepoints[index].value == '+'
+            || codepoints[index].value == '-')) {
+        if (codepoints[index].value == '-') normalized.push_back('-');
+        ++index;
     }
     bool previous_digit = false;
     bool any_digit = false;
-    for (; index < text.size(); ++index) {
-        const auto character = text[index];
-        if (character >= '0' && character <= '9') {
-            normalized.push_back(character);
+    for (; index < last; ++index) {
+        const auto character = codepoints[index].value;
+        if (const auto digit = tungsten::detail::unicode_decimal_value(character)) {
+            normalized.push_back(static_cast<char>('0' + *digit));
             previous_digit = true;
             any_digit = true;
             continue;
         }
-        if (character == '_' && previous_digit && index + 1 < text.size()
-            && text[index + 1] >= '0' && text[index + 1] <= '9') {
+        if (character == '_' && previous_digit && index + 1 < last
+            && tungsten::detail::unicode_decimal_value(
+                codepoints[index + 1].value)) {
             previous_digit = false;
             continue;
         }
@@ -182,6 +193,22 @@ mpz_class parse_arbitrary_integer_argument(
         throw std::invalid_argument(option + " requires an integer: " + value);
     try {
         return mpz_class(normalized, 10);
+    } catch (const std::exception&) {
+        throw std::invalid_argument(option + " requires an integer: " + value);
+    }
+}
+
+std::int64_t parse_int64_argument(
+    const std::string& value, const std::string& option) {
+    try {
+        const auto parsed = parse_arbitrary_integer_argument(value, option);
+        const mpz_class minimum(std::to_string(
+            std::numeric_limits<std::int64_t>::min()), 10);
+        const mpz_class maximum(std::to_string(
+            std::numeric_limits<std::int64_t>::max()), 10);
+        if (parsed < minimum || parsed > maximum)
+            throw std::out_of_range("outside int64 range");
+        return std::stoll(parsed.get_str());
     } catch (const std::exception&) {
         throw std::invalid_argument(option + " requires an integer: " + value);
     }
@@ -674,8 +701,12 @@ int execute_parser_corpus_command(int argc, char** argv) {
     bool fail_on_tungsten_gap = false;
     bool fail_on_mismatch = false;
 
-    const auto nonnegative_size = [](std::int64_t value) {
-        return value <= 0 ? std::size_t{0} : static_cast<std::size_t>(value);
+    const auto nonnegative_size = [](const mpz_class& value) {
+        if (value <= 0) return std::size_t{0};
+        const mpz_class maximum(std::to_string(
+            std::numeric_limits<std::size_t>::max()), 10);
+        if (value >= maximum) return std::numeric_limits<std::size_t>::max();
+        return static_cast<std::size_t>(std::stoull(value.get_str()));
     };
     for (int index = 3; index < argc; ++index) {
         const std::string argument = argv[index];
@@ -757,11 +788,12 @@ int execute_parser_corpus_command(int argc, char** argv) {
                 discovery.exclude_globs.push_back(value);
             else if (argument == "--max-files")
                 discovery.max_files = nonnegative_size(
-                    parse_int64_argument(value, argument));
+                    parse_arbitrary_integer_argument(value, argument));
             else if (argument == "--seed")
                 discovery.seed = parse_arbitrary_integer_argument(value, argument);
             else if (argument == "--sample")
-                sample = nonnegative_size(parse_int64_argument(value, argument));
+                sample = nonnegative_size(
+                    parse_arbitrary_integer_argument(value, argument));
             else if (argument == "--out-dir") out_dir = path_from_utf8(value);
             else if (argument == "--max-file-mb") {
                 const auto parsed = tungsten::detail::parse_ascii_double(
@@ -778,13 +810,13 @@ int execute_parser_corpus_command(int argc, char** argv) {
                     throw std::invalid_argument("invalid parser form: " + value);
             } else if (argument == "--kernel-batch-size")
                 kernel_batch_size = nonnegative_size(
-                    parse_int64_argument(value, argument));
+                    parse_arbitrary_integer_argument(value, argument));
             else if (argument == "--tungsten-workers")
                 tungsten_workers = nonnegative_size(
-                    parse_int64_argument(value, argument));
+                    parse_arbitrary_integer_argument(value, argument));
             else
                 preview_chars = nonnegative_size(
-                    parse_int64_argument(value, argument));
+                    parse_arbitrary_integer_argument(value, argument));
         } catch (const std::exception& error) {
             std::cerr << "tungsten-cpp: invalid " << argument
                       << ": " << error.what() << '\n';

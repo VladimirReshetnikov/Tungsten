@@ -8,12 +8,14 @@
 module Tungsten.TextualForms
   ( baseDecodeExpr
   , baseEncodeExpr
+  , displayOutputText
   , exportByteArrayExpr
   , exportStringExpr
   , importByteArrayExpr
   , importStringExpr
   , makeBoxesExpr
   , makeExpressionExpr
+  , parseStandardFormSource
   , stripBoxesExpr
   , syntaxLengthExpr
   , syntaxQExpr
@@ -24,12 +26,14 @@ module Tungsten.TextualForms
 
 import Data.Bits ((.&.), (.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import Data.Char (chr, isAlphaNum, isDigit, isSpace, ord, toUpper)
 import Data.List (partition)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Codec.Compression.GZip as GZip
 import Numeric (showHex)
 import Text.Parsec
   ( anyChar
@@ -60,8 +64,19 @@ import Tungsten.NamedCharacters (encodePrintableAscii)
 import Tungsten.Parser (parseErrorMessage, parseInputForm)
 import Tungsten.SystemSymbols (normalizeSystemSymbolName)
 import Tungsten.WolframString (wlString)
+import qualified Tungsten.BZip2 as BZip2
 
 type Conversion = Either Text Expr
+
+-- | Parse StandardForm source and interpret box constructors when the parsed
+-- tree is a box expression.  Plain StandardForm text shares InputForm's
+-- surface grammar; boxes add a semantic projection after that syntax pass.
+parseStandardFormSource :: Text -> Either Text Expr
+parseStandardFormSource source = case parseInputForm source of
+  Left parseError -> Left (parseErrorMessage parseError)
+  Right expression
+    | looksLikeBoxes expression -> interpretBoxes expression
+    | otherwise -> Right expression
 
 shortSystemName :: Text -> Text
 shortSystemName name = maybe name id (normalizeSystemSymbolName name)
@@ -433,7 +448,7 @@ renderTextualForm form expression =
       FortranForm -> cLikeText True expression
       TraditionalForm -> "\\!\\(\\*" <> inputForm (Call (Symbol "FormBox") [makeBoxes TraditionalForm expression, Symbol "TraditionalForm"]) <> "\\)"
       TeXForm -> texText expression
-      MathMLForm -> "<math>\n " <> mathMlText expression <> "\n</math>"
+      MathMLForm -> mathMlFormText False expression
 
 displayWrapper :: Expr -> Maybe (Text, Expr)
 displayWrapper = \case
@@ -451,12 +466,36 @@ renderDisplayWrapper wrapperName payload = case wrapperName of
   "OutputForm" -> outputFormText payload
   "StandardForm" -> textualInputForm payload
   "TraditionalForm" -> renderTextualForm TraditionalForm payload
-  "TeXForm" -> texText payload
-  "MathMLForm" -> renderTextualForm MathMLForm payload
+  "TeXForm" -> case displayWrapper payload of
+    Just ("StandardForm", standardPayload) -> preservingStandardText standardPayload
+    _ -> texText (stripDisplayWrappers payload)
+  "MathMLForm" -> mathMlFormText True payload
   "CForm" -> cLikeText False payload
   "FortranForm" -> cLikeText True payload
   "TextForm" -> outputFormText payload
   _ -> inputForm payload
+
+stripDisplayWrappers :: Expr -> Expr
+stripDisplayWrappers expression = case displayWrapper expression of
+  Just (_, payload) -> stripDisplayWrappers payload
+  Nothing -> expression
+
+preservingStandardText :: Expr -> Text
+preservingStandardText (Call (Symbol plusHead) values)
+  | shortSystemName plusHead == "Plus" =
+      T.intercalate "+" (map preservingStandardText values)
+preservingStandardText expression = texText (stripDisplayWrappers expression)
+
+displayOutputText :: Expr -> Text
+displayOutputText expression = case displayWrapper expression of
+  Just (wrapperName, payload) -> renderDisplayWrapper wrapperName payload
+  Nothing -> case expression of
+    String value -> value
+    _ -> inputForm expression
+
+mathMlFormText :: Bool -> Expr -> Text
+mathMlFormText includeFinalNewline expression =
+  "<math>\n " <> mathMlText expression <> "\n</math>" <> if includeFinalNewline then "\n" else ""
 
 textualInputForm :: Expr -> Text
 textualInputForm expression = case expression of
@@ -477,6 +516,9 @@ cLikeText fortran = go
     Rational numerator denominator ->
       "(" <> T.pack (show numerator) <> (if fortran then ".0/" else "/") <> T.pack (show denominator) <> ")"
     Real source -> source
+    Complex realPart imaginaryPart ->
+      "Complex(" <> go realPart <> "," <> go imaginaryPart <> ")"
+    SpecialReal kind -> specialRealName kind
     String source -> wlString source
     Call (Symbol name) values -> case (shortSystemName name, values) of
       ("Plus", operands) -> T.intercalate "+" (map go operands)
@@ -493,6 +535,7 @@ texText = \case
   Integer value -> T.pack (show value)
   Rational numerator denominator -> "\\frac{" <> T.pack (show numerator) <> "}{" <> T.pack (show denominator) <> "}"
   Real source -> source
+  SpecialReal kind -> specialRealName kind
   String source -> "\\text{" <> source <> "}"
   Call (Symbol name) values -> case (shortSystemName name, values) of
     (headName, operands)
@@ -522,6 +565,7 @@ mathMlText = \case
   Rational numerator denominator ->
     "<mfrac><mn>" <> T.pack (show numerator) <> "</mn><mn>" <> T.pack (show denominator) <> "</mn></mfrac>"
   Real source -> "<mn>" <> xmlEscape source <> "</mn>"
+  SpecialReal kind -> "<mi>" <> specialRealName kind <> "</mi>"
   String source -> "<mtext>" <> xmlEscape source <> "</mtext>"
   Call (Symbol name) values -> case (shortSystemName name, values) of
     (headName, operands)
@@ -555,6 +599,7 @@ traditionalPlusArguments values =
   isNumericAtom Integer {} = True
   isNumericAtom Rational {} = True
   isNumericAtom Real {} = True
+  isNumericAtom SpecialReal {} = True
   isNumericAtom _ = False
 
 namedInfixOperator :: Text -> Maybe (Text, Text, Text)
@@ -598,6 +643,7 @@ makeStandardBoxes expression = case displayWrapper expression of
     Rational numerator denominator ->
       Call (Symbol "FractionBox") [String (T.pack (show numerator)), String (T.pack (show denominator))]
     Real source -> String source
+    SpecialReal kind -> makeStandardBoxes (Call (Symbol (specialRealName kind)) [])
     Complex realPart imaginaryPart -> makeStandardBoxes (Call (Symbol "Complex") [realPart, imaginaryPart])
     String source -> String (wlString source)
     ByteArray bytes -> makeStandardBoxes (Call (Symbol "ByteArray") [Call (Symbol "List") (map (Integer . fromIntegral) (BS.unpack bytes))])
@@ -615,6 +661,7 @@ makeTraditionalBoxes expression = case expression of
   Rational numerator denominator ->
     Call (Symbol "FractionBox") [makeTraditionalBoxes (Integer numerator), makeTraditionalBoxes (Integer denominator)]
   Real {} -> makeStandardBoxes expression
+  SpecialReal {} -> makeStandardBoxes expression
   String {} -> makeStandardBoxes expression
   ByteArray {} -> makeStandardBoxes expression
   Complex realPart imaginaryPart -> makeTraditionalBoxes (Call (Symbol "Complex") [realPart, imaginaryPart])
@@ -743,6 +790,7 @@ textualInterpretationBox source semantic =
 makeFullFormBoxes :: Expr -> Expr
 makeFullFormBoxes = \case
   Rational numerator denominator -> makeFullFormBoxes (Call (Symbol "Rational") [Integer numerator, Integer denominator])
+  SpecialReal kind -> makeFullFormBoxes (Call (Symbol (specialRealName kind)) [])
   Complex realPart imaginaryPart -> makeFullFormBoxes (Call (Symbol "Complex") [realPart, imaginaryPart])
   ByteArray values -> makeFullFormBoxes (Call (Symbol "ByteArray") [String (base64Encode values)])
   Call expressionHead values -> genericCallBoxes makeFullFormBoxes expressionHead values
@@ -1089,10 +1137,30 @@ interpretBoxes expression = case expression of
       , Just parsed <- interpretNamedRow rowItems -> Right parsed
     (wrapper, first : _)
       | wrapper `elem` ["AdjustmentBox", "BoxData", "FormBox", "FrameBox", "PaneBox", "StyleBox", "TagBox", "TooltipBox"] -> interpretBoxes first
+    ("SubscriptBox", arguments') -> interpretScriptBox "Subscript" 2 arguments'
+    ("SubsuperscriptBox", arguments') -> interpretScriptBox "Subsuperscript" 3 arguments'
+    ("OverscriptBox", arguments') -> interpretScriptBox "Overscript" 2 arguments'
+    ("UnderscriptBox", arguments') -> interpretScriptBox "Underscript" 2 arguments'
+    ("UnderoverscriptBox", arguments') -> interpretScriptBox "Underoverscript" 3 arguments'
     _ -> boxText expression >>= firstText "box parse failure" . parseInputForm
   _ -> Left "unsupported box expression"
  where
   firstText message = either (const (Left message)) Right
+
+interpretScriptBox :: Text -> Int -> [Expr] -> Either Text Expr
+interpretScriptBox headName arity values
+  | length values < arity = Left (headName <> " box has too few operands")
+  | otherwise = Call (Symbol headName) <$> traverse interpretBoxOperand (take arity values)
+
+interpretBoxOperand :: Expr -> Either Text Expr
+interpretBoxOperand (String source)
+  | T.null (T.strip source) = Right (String source)
+  | otherwise = case parseInputForm (T.strip source) of
+      Right expression -> Right expression
+      Left _ -> Right (String source)
+interpretBoxOperand expression
+  | looksLikeBoxes expression = interpretBoxes expression
+  | otherwise = Right expression
 
 interpretNamedRow :: [Expr] -> Maybe Expr
 interpretNamedRow values = firstMatch operators
@@ -1272,7 +1340,15 @@ importByteArrayExpr = \case
   _ -> Left "ImportByteArray currently expects a byte array and an explicit format specification."
 
 exportStringWith :: FormatSpec -> Expr -> Conversion
-exportStringWith (FormatSpec outer (Just _)) _ = Left ("Unsupported compression wrapper: " <> outer <> ".")
+exportStringWith (FormatSpec outer (Just inner)) expression = do
+  exported <- exportStringWith inner expression
+  case exported of
+    String source ->
+      Right
+        ( String
+            (rawBytesText (compressBytes outer (TE.encodeUtf8 source)))
+        )
+    _ -> Left "Compressed ExportString did not produce a string."
 exportStringWith (FormatSpec name Nothing) expression = case name of
   "Text" -> Right (asText expression)
   "String" -> Right (asText expression)
@@ -1289,7 +1365,9 @@ exportStringWith (FormatSpec name Nothing) expression = case name of
   asText value = String (inputForm value)
 
 importStringWith :: FormatSpec -> Text -> Conversion
-importStringWith (FormatSpec outer (Just _)) _ = Left ("Unsupported compression wrapper: " <> outer <> ".")
+importStringWith (FormatSpec outer (Just inner)) source = do
+  compressed <- rawTextBytes "ImportString" source
+  importStringWith inner (decodeUtf8Preserving (decompressBytes outer compressed))
 importStringWith (FormatSpec name Nothing) source = case name of
   "Text" -> Right (String source)
   "String" -> Right (String source)
@@ -1303,7 +1381,11 @@ importStringWith (FormatSpec name Nothing) source = case name of
   _ -> Left ("Unsupported ImportString format: " <> name <> ".")
 
 exportByteArrayWith :: FormatSpec -> Expr -> Conversion
-exportByteArrayWith (FormatSpec outer (Just _)) _ = Left ("Unsupported compression wrapper: " <> outer <> ".")
+exportByteArrayWith (FormatSpec outer (Just inner)) expression = do
+  exported <- exportByteArrayWith inner expression
+  case exported of
+    ByteArray bytes -> Right (ByteArray (compressBytes outer bytes))
+    _ -> Left "Compressed ExportByteArray did not produce a ByteArray."
 exportByteArrayWith spec@(FormatSpec name Nothing) expression = case name of
   "Byte" -> ByteArray <$> exprBytes "ExportByteArray" expression
   "String" -> case expression of
@@ -1317,13 +1399,32 @@ exportByteArrayWith spec@(FormatSpec name Nothing) expression = case name of
   _ -> Left ("Unsupported ExportByteArray format: " <> name <> ".")
 
 importByteArrayWith :: FormatSpec -> BS.ByteString -> Conversion
-importByteArrayWith (FormatSpec outer (Just _)) _ = Left ("Unsupported compression wrapper: " <> outer <> ".")
+importByteArrayWith (FormatSpec outer (Just inner)) bytes =
+  importByteArrayWith inner (decompressBytes outer bytes)
 importByteArrayWith spec@(FormatSpec name Nothing) bytes = case name of
   "Byte" -> Right (Call (Symbol "List") (map (Integer . fromIntegral) (BS.unpack bytes)))
   "String" -> Right (String (rawBytesText bytes))
   _ | name `elem` ["CSV", "JSON", "RawJSON", "Table", "Text", "TSV", "WL"] ->
         importStringWith spec (decodeUtf8Preserving bytes)
   _ -> Left ("Unsupported ImportByteArray format: " <> name <> ".")
+
+compressBytes :: Text -> BS.ByteString -> BS.ByteString
+compressBytes wrapper bytes =
+  LBS.toStrict
+    ( case wrapper of
+        "GZIP" -> GZip.compress (LBS.fromStrict bytes)
+        "BZIP2" -> LBS.fromStrict (BZip2.compress bytes)
+        _ -> LBS.fromStrict bytes
+    )
+
+decompressBytes :: Text -> BS.ByteString -> BS.ByteString
+decompressBytes wrapper bytes =
+  LBS.toStrict
+    ( case wrapper of
+        "GZIP" -> GZip.decompress (LBS.fromStrict bytes)
+        "BZIP2" -> LBS.fromStrict (BZip2.decompress bytes)
+        _ -> LBS.fromStrict bytes
+    )
 
 exprBytes :: Text -> Expr -> Either Text BS.ByteString
 exprBytes _ (ByteArray bytes) = Right bytes

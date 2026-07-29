@@ -6,15 +6,46 @@ import Data.Text (Text)
 import qualified Data.Text as Text
 import qualified Data.Text.IO as TextIO
 import Tungsten.Evaluate (EvaluationError (..), evaluate)
-import Tungsten.Expression (Expr, fullForm)
+import Tungsten.Expression (Expr (..), fullForm, inputForm)
 import Tungsten.Parser (parseInputForm)
 import Tungsten.Session (emptySession, evaluateInSession)
+import qualified Tungsten.TextualForms as TextualForms
 
 checkTextualFormsEvaluator :: IO Bool
 checkTextualFormsEvaluator = do
   values <- traverse checkValue valueCases
   errors <- traverse checkError errorCases
-  pure (and (values <> errors))
+  renderers <- traverse checkRenderer rendererCases
+  standardForms <- traverse checkStandardForm standardFormCases
+  pure (and (values <> errors <> renderers <> standardForms))
+
+rendererCases :: [(Text, Expr, Text)]
+rendererCases =
+  [ ( "named union operator"
+    , Call (Symbol "Union") [Symbol "a", Symbol "b", Symbol "c"]
+    , "a \\[Union] b \\[Union] c"
+    )
+  , ( "named intersection operator"
+    , Call (Symbol "Intersection") [Symbol "a", Symbol "b"]
+    , "a \\[Intersection] b"
+    )
+  , ( "named cross operator"
+    , Call (Symbol "Cross") [Symbol "a", Symbol "b"]
+    , "a \\[Cross] b"
+    )
+  ]
+
+standardFormCases :: [(Text, Text, Text)]
+standardFormCases =
+  [ ( "grouped named-operator RowBox"
+    , "RowBox[{RowBox[{\"(\",RowBox[{\"a\",\"+\",\"b\"}],\")\"}],\"\\\\[CirclePlus]\",\"c\"}]"
+    , "CirclePlus[Plus[a, b], c]"
+    )
+  , ("SubscriptBox", "SubscriptBox[\"x\",\"i\"]", "Subscript[x, i]")
+  , ("SubsuperscriptBox", "SubsuperscriptBox[\"x\",\"i\",\"2\"]", "Subsuperscript[x, i, 2]")
+  , ("OverscriptBox string operand", "OverscriptBox[\"x\",\"~\"]", "Overscript[x, \"~\"]")
+  , ("UnderoverscriptBox", "UnderoverscriptBox[\"x\",\"a\",\"b\"]", "Underoverscript[x, a, b]")
+  ]
 
 valueCases :: [(Text, Text, Text)]
 valueCases =
@@ -28,8 +59,12 @@ valueCases =
   , ("StandardForm text", "ToString[HoldComplete[f@x//g],StandardForm]", "\"HoldComplete[g[f[x]]]\"")
   , ("CForm text", "ToString[x^2,CForm]", "\"Power(x,2)\"")
   , ("FortranForm text", "ToString[x^2,FortranForm]", "\"x**2\"")
+  , ("CForm special real", "ToString[CForm[Overflow[]]]", "\"Overflow\"")
+  , ("FortranForm special real", "ToString[FortranForm[Underflow[]]]", "\"Underflow\"")
   , ("TeX text", "ToString[1+x,TeXForm]", "\"x+1\"")
   , ("TeX power text", "ToString[x^2,TeXForm]", "\"x^{2}\"")
+  , ("TeX special real", "ToString[TeXForm[Overflow[]]]", "\"Overflow\"")
+  , ("MathML special real", "ToString[MathMLForm[Underflow[]]]", "\"<math>\\n <mi>Underflow</mi>\\n</math>\\n\"")
   , ("traditional inline boxes", "ToString[1+x,TraditionalForm]", "\"\\\\!\\\\(\\\\*FormBox[RowBox[{\\\"x\\\", \\\"+\\\", \\\"1\\\"}], TraditionalForm]\\\\)\"")
   , ("named operator InputForm", "ToString[CirclePlus[a,b],InputForm]", "\"a \\\\[CirclePlus] b\"")
   , ("named operator TeX", "ToString[CirclePlus[a,b],TeXForm]", "\"a\\\\oplus b\"")
@@ -42,6 +77,7 @@ valueCases =
   , ("MathML power round trip", "ToExpression[ToString[x^2,MathMLForm],MathMLForm,HoldComplete]", "HoldComplete[Power[x, 2]]")
   , ("held standard boxes", "MakeBoxes[1+2,StandardForm]", "RowBox[List[\"1\", \"+\", \"2\"]]")
   , ("evaluated standard boxes", "ToBoxes[1+2,StandardForm]", "\"3\"")
+  , ("special real boxes", "ToBoxes[Overflow[]]", "RowBox[List[\"Overflow\", \"[\", \"\", \"]\"]]")
   , ("traditional boxes", "ToBoxes[1+x,TraditionalForm]", "FormBox[RowBox[List[\"x\", \"+\", \"1\"]], TraditionalForm]")
   , ("box interpretation", "ToExpression[RowBox[{\"1\",\"+\",\"2\"}],StandardForm,HoldComplete]", "HoldComplete[Plus[1, 2]]")
   , ("MakeExpression holds syntax", "MakeExpression[RowBox[{\"1\",\"+\",\"2\"}],StandardForm]", "HoldComplete[Plus[1, 2]]")
@@ -64,6 +100,16 @@ valueCases =
   , ("raw string byte array import", "ImportByteArray[ByteArray[{97,98,99}],\"String\"]", "\"abc\"")
   , ("byte array export", "Normal[ExportByteArray[{97,98,99},\"Byte\"]]", "List[97, 98, 99]")
   , ("RawJSON byte-array round trip", "ImportByteArray[ExportByteArray[<|\"a\"->1|>,\"RawJSON\"],\"RawJSON\"]", "Association[Rule[\"a\", 1]]")
+  , ("GZIP string round trip", "ImportString[ExportString[\"hello\",{\"GZIP\",\"String\"}],{\"GZIP\",\"String\"}]", "\"hello\"")
+  , ("BZIP2 string round trip", "ImportString[ExportString[\"hello\",{\"BZIP2\",\"String\"}],{\"BZIP2\",\"String\"}]", "\"hello\"")
+  , ( "BZIP2 export matches independent vector"
+    , "Normal[ExportByteArray[\"hello\",{\"BZIP2\",\"String\"}]]"
+    , "List[66, 90, 104, 57, 49, 65, 89, 38, 83, 89, 25, 49, 101, 61, 0, 0, 0, 129, 0, 2, 68, 160, 0, 33, 154, 104, 51, 77, 7, 51, 139, 185, 34, 156, 40, 72, 12, 152, 178, 158, 128]"
+    )
+  , ( "BZIP2 import accepts independent vector"
+    , "ImportByteArray[ByteArray[{66,90,104,57,49,65,89,38,83,89,25,49,101,61,0,0,0,129,0,2,68,160,0,33,154,104,51,77,7,51,139,185,34,156,40,72,12,152,178,158,128}],{\"BZIP2\",\"String\"}]"
+    , "\"hello\""
+    )
   ]
 
 errorCases :: [(Text, Text, Text)]
@@ -77,7 +123,6 @@ errorCases =
   , ("ImportString validates input", "ImportString[1,\"Text\"]", "ImportString expects the source data to be a string.")
   , ("ExportString validates bytes", "ExportString[{256},\"Byte\"]", "ByteArray values must be integers between 0 and 255.")
   , ("RawJSON rejects rule lists", "ExportString[{\"a\"->1},\"RawJSON\"]", "ExportString RawJSON export expects associations for JSON objects, not lists of rules.")
-  , ("compression boundary is explicit", "ExportString[\"hello\",{\"GZIP\",\"String\"}]", "Unsupported compression wrapper: GZIP.")
   ]
 
 checkValue :: (Text, Text, Text) -> IO Bool
@@ -107,6 +152,22 @@ checkError (label, source, expected) = case parseInputForm source of
       | message == expected -> pure True
       | otherwise -> failCheck label ("expected error " <> expected <> ", got " <> message)
     Right result -> failCheck label ("expected an evaluation error, got " <> fullForm result)
+
+checkRenderer :: (Text, Expr, Text) -> IO Bool
+checkRenderer (label, expression, expected)
+  | actual == expected = pure True
+  | otherwise = failCheck label ("expected " <> expected <> ", got " <> actual)
+ where
+  actual = inputForm expression
+
+checkStandardForm :: (Text, Text, Text) -> IO Bool
+checkStandardForm (label, source, expected) = case TextualForms.parseStandardFormSource source of
+  Left message -> failCheck label ("parse error: " <> message)
+  Right expression ->
+    let actual = fullForm expression
+     in if actual == expected
+          then pure True
+          else failCheck label ("expected " <> expected <> ", got " <> actual)
 
 failCheck :: Text -> Text -> IO Bool
 failCheck label detail = do

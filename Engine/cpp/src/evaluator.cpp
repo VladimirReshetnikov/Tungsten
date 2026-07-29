@@ -197,6 +197,10 @@ std::optional<std::size_t> nonnegative_size_t(const mpz_class& value) {
     return result;
 }
 
+mpz_class exact_size_t(std::size_t value) {
+    return mpz_class(std::to_string(value), 10);
+}
+
 std::optional<long> checked_signed_sum(long value, long increment) noexcept {
     if (increment > 0
         && value > std::numeric_limits<long>::max() - increment) return std::nullopt;
@@ -276,15 +280,20 @@ mpz_class bounded_euler_phi(unsigned long value,
     return result;
 }
 
-std::vector<unsigned long> integer_digits(unsigned long value, unsigned long base) {
-    if (value == 0) return {0};
-    std::vector<unsigned long> digits;
-    while (value != 0) {
-        digits.push_back(value % base);
-        value /= base;
+template<typename Consumer>
+void for_each_integer_digit(mpz_class value, unsigned long base, Consumer consumer) {
+    if (value < 0) value = -value;
+    if (value == 0) {
+        consumer(0UL);
+        return;
     }
-    std::reverse(digits.begin(), digits.end());
-    return digits;
+    while (value != 0) {
+        mpz_class quotient;
+        const auto digit = mpz_tdiv_q_ui(
+            quotient.get_mpz_t(), value.get_mpz_t(), base);
+        consumer(digit);
+        value = std::move(quotient);
+    }
 }
 
 void append_integer_partitions(unsigned long remaining, unsigned long maximum_part,
@@ -331,12 +340,26 @@ std::optional<Expr> evaluate_exact_integer_function(
     });
 
     if (function == "Binomial" && args.size() == 2 && all_integers) {
-        if (args[1].integer_value() < 0) return integer(0L);
-        const auto k = bounded_nonnegative_ulong(args[1].integer_value(), 100000UL);
+        const auto& n_value = args[0].integer_value();
+        const auto& k_value = args[1].integer_value();
+        if (k_value < 0) return integer(0L);
+        mpz_class effective_k = k_value;
+        if (n_value >= 0) {
+            if (k_value > n_value) return integer(0L);
+            const mpz_class complement = n_value - k_value;
+            if (complement < effective_k) effective_k = complement;
+            if (effective_k == 0) return integer(1L);
+            if (effective_k == 1) return integer(n_value);
+        }
+        const auto k = bounded_nonnegative_ulong(effective_k, 100000UL);
         if (!k) return std::nullopt;
-        return integer(exact_binomial(args[0].integer_value(), *k));
+        return integer(exact_binomial(n_value, *k));
     }
     if (function == "Multinomial" && all_integers) {
+        if (args.size() == 1) {
+            if (args[0].integer_value() < 0) return std::nullopt;
+            return integer(1L);
+        }
         unsigned long total = 0;
         mpz_class result = 1;
         for (const auto& argument : args) {
@@ -370,10 +393,11 @@ std::optional<Expr> evaluate_exact_integer_function(
     }
     if (function == "BernoulliB" && args.size() == 1
         && args[0].kind() == ExprKind::Integer) {
-        const auto n = bounded_nonnegative_ulong(args[0].integer_value(), 256UL);
+        const auto& n_value = args[0].integer_value();
+        if (n_value > 1 && mpz_odd_p(n_value.get_mpz_t())) return integer(0L);
+        const auto n = bounded_nonnegative_ulong(n_value, 256UL);
         if (!n) return std::nullopt;
         if (*n == 1) return rational(-1L, 2L);
-        if (*n > 1 && *n % 2 == 1) return integer(0L);
         std::vector<mpq_class> values(*n + 1);
         for (unsigned long row = 0; row <= *n; ++row) {
             values[row] = mpq_class(1, mpz_class(row + 1));
@@ -386,9 +410,10 @@ std::optional<Expr> evaluate_exact_integer_function(
     }
     if (function == "EulerE" && args.size() == 1
         && args[0].kind() == ExprKind::Integer) {
-        const auto n = bounded_nonnegative_ulong(args[0].integer_value(), 256UL);
+        const auto& n_value = args[0].integer_value();
+        if (n_value >= 0 && mpz_odd_p(n_value.get_mpz_t())) return integer(0L);
+        const auto n = bounded_nonnegative_ulong(n_value, 256UL);
         if (!n) return std::nullopt;
-        if (*n % 2 == 1) return integer(0L);
         std::vector<mpz_class> values(*n + 1, 0);
         values[0] = 1;
         for (unsigned long order = 2; order <= *n; order += 2) {
@@ -401,6 +426,7 @@ std::optional<Expr> evaluate_exact_integer_function(
     }
     if (function == "HarmonicNumber" && (args.size() == 1 || args.size() == 2)
         && all_integers) {
+        if (args[0].integer_value() == 0) return integer(0L);
         const auto n = bounded_nonnegative_ulong(args[0].integer_value(), 100000UL);
         const mpz_class order_value = args.size() == 2 ? args[1].integer_value() : mpz_class(1);
         const auto order = bounded_nonnegative_ulong(abs(order_value), 64UL);
@@ -572,11 +598,12 @@ std::optional<Expr> evaluate_exact_integer_function(
     }
     if (function == "JordanTotient" && args.size() == 2 && all_integers
         && args[0].integer_value() >= 0 && args[1].integer_value() > 0) {
+        if (args[0].integer_value() == 0)
+            return integer(args[1].integer_value() == 1 ? 1L : 0L);
         const auto order = bounded_nonnegative_ulong(args[0].integer_value(), 1000UL);
         const auto n = bounded_nonnegative_ulong(args[1].integer_value(), 1000000000UL);
         const auto factors = bounded_factorization(args[1].integer_value());
         if (!order || !n || !factors) return std::nullopt;
-        if (*order == 0) return integer(*n == 1 ? 1L : 0L);
         mpz_class result;
         mpz_pow_ui(result.get_mpz_t(), args[1].integer_value().get_mpz_t(), *order);
         for (const auto& [prime, exponent] : *factors) {
@@ -610,6 +637,8 @@ std::optional<Expr> evaluate_exact_integer_function(
     }
     if (function == "DivisorSigma" && args.size() == 2 && all_integers
         && args[1].integer_value() != 0) {
+        if (args[1].integer_value() == 1 || args[1].integer_value() == -1)
+            return integer(1L);
         const auto order_magnitude = bounded_nonnegative_ulong(abs(args[0].integer_value()), 64UL);
         const auto n = bounded_nonnegative_ulong(abs(args[1].integer_value()), 1000000000UL);
         const auto factors = bounded_factorization(abs(args[1].integer_value()));
@@ -633,32 +662,29 @@ std::optional<Expr> evaluate_exact_integer_function(
     }
     if ((function == "IntegerReverse" || function == "DigitCount") && !args.empty()
         && args.size() <= (function == "DigitCount" ? 3U : 2U)
-        && args[0].kind() == ExprKind::Integer) {
-        const mpz_class base_value = args.size() >= 2 && args[1].kind() == ExprKind::Integer
+        && all_integers) {
+        const mpz_class base_value = args.size() >= 2
             ? args[1].integer_value() : mpz_class(10);
         const auto base = bounded_nonnegative_ulong(base_value, 4096UL);
-        const auto value = bounded_nonnegative_ulong(abs(args[0].integer_value()),
-            std::numeric_limits<unsigned long>::max());
-        if (!base || *base < 2 || !value) return std::nullopt;
-        const auto digits = integer_digits(*value, *base);
+        if (!base || *base < 2) return std::nullopt;
         if (function == "IntegerReverse") {
             mpz_class result = 0;
-            for (auto iterator = digits.rbegin(); iterator != digits.rend(); ++iterator)
-                result = result * *base + *iterator;
+            for_each_integer_digit(args[0].integer_value(), *base,
+                [&](unsigned long digit) { result = result * *base + digit; });
             return integer(result);
         }
-        std::vector<unsigned long> counts(*base, 0);
-        for (const auto digit : digits) ++counts[digit];
+        std::vector<mpz_class> counts(*base, 0);
+        for_each_integer_digit(args[0].integer_value(), *base,
+            [&](unsigned long digit) { ++counts[digit]; });
         if (args.size() == 3) {
-            if (args[2].kind() != ExprKind::Integer) return std::nullopt;
             const auto digit = bounded_nonnegative_ulong(args[2].integer_value(), *base - 1);
             if (!digit) return std::nullopt;
-            return integer(mpz_class(counts[*digit]));
+            return integer(counts[*digit]);
         }
         std::vector<Expr> result;
         for (unsigned long digit = 1; digit < *base; ++digit)
-            result.push_back(integer(mpz_class(counts[digit])));
-        result.push_back(integer(mpz_class(counts[0])));
+            result.push_back(integer(counts[digit]));
+        result.push_back(integer(counts[0]));
         return list(std::move(result));
     }
     if ((function == "BitNot" || function == "BitLength") && args.size() == 1
@@ -671,7 +697,10 @@ std::optional<Expr> evaluate_exact_integer_function(
     }
     if ((function == "BitClear" || function == "BitSet" || function == "BitGet")
         && args.size() == 2 && all_integers) {
-        const auto index = bounded_nonnegative_ulong(args[1].integer_value(), 10000000UL);
+        const auto& index_value = args[1].integer_value();
+        if (args[0].integer_value() == 0 && index_value >= 0
+            && (function == "BitClear" || function == "BitGet")) return integer(0L);
+        const auto index = bounded_nonnegative_ulong(index_value, 10000000UL);
         if (!index) return std::nullopt;
         if (function == "BitGet")
             return integer(static_cast<long>(
@@ -2471,6 +2500,7 @@ Expr interval_expression(const std::vector<IntervalSegment>& segments) {
 constexpr std::size_t maximum_sparse_materialized_nodes = 1000000;
 
 using DenseDimensions = std::vector<mpz_class>;
+using SparsePosition = std::vector<mpz_class>;
 
 struct NormalizedDenseDimensions {
     std::optional<DenseDimensions> values;
@@ -2642,51 +2672,37 @@ NormalizedDensePadding normalize_dense_padding(
         "ArrayPad expects padding widths as p, {p1, ...}, or {{l1, r1}, ...}."};
 }
 
-std::optional<std::size_t> checked_dimension_product(
-    const std::vector<std::size_t>& dimensions) noexcept {
-    std::size_t product = 1;
-    for (const auto dimension : dimensions) {
-        if (dimension != 0
-            && product > std::numeric_limits<std::size_t>::max() / dimension)
-            return std::nullopt;
-        product *= dimension;
-    }
-    return product;
-}
-
 bool sparse_has_implicit_values(const Expr& value) noexcept {
-    const auto product = checked_dimension_product(value.dimensions());
-    return !product || *product > value.sparse_entries().size();
+    mpz_class product = 1;
+    for (const auto& dimension : value.sparse_dimensions())
+        product *= dimension;
+    return product > mpz_class(
+        std::to_string(value.sparse_entries().size()), 10);
 }
 
 bool sparse_materialization_within_limit(const Expr& value) noexcept {
-    std::size_t prefix_count = 1;
-    std::size_t node_count = 1;
-    for (const auto dimension : value.dimensions()) {
-        if (dimension != 0
-            && prefix_count > maximum_sparse_materialized_nodes / dimension)
-            return false;
-        prefix_count *= dimension;
-        if (prefix_count > maximum_sparse_materialized_nodes - node_count)
-            return false;
-        node_count += prefix_count;
-    }
-    return true;
+    return dense_materialization_within_limit(value.sparse_dimensions());
 }
 
 std::optional<Expr> sparse_dense_value(const Expr& value) {
     if (value.kind() != ExprKind::SparseArray) return value;
     if (!sparse_materialization_within_limit(value)) return std::nullopt;
-    auto build = [&](auto&& self, std::vector<std::size_t> prefix) -> Expr {
-        if (prefix.size() == value.dimensions().size()) {
+    auto build = [&](auto&& self, SparsePosition prefix) -> Expr {
+        if (prefix.size() == value.sparse_dimensions().size()) {
             const auto found = std::find_if(value.sparse_entries().begin(), value.sparse_entries().end(),
                 [&](const SparseEntry& entry) { return entry.indices == prefix; });
             return found == value.sparse_entries().end() ? value.fill_value() : found->value;
         }
+        const auto dimension = nonnegative_size_t(
+            value.sparse_dimensions()[prefix.size()]);
+        if (!dimension) return call("TerminatedEvaluation", {
+            symbol("NativeMaterializationLimit")});
         std::vector<Expr> items;
-        items.reserve(value.dimensions()[prefix.size()]);
-        for (std::size_t index = 1; index <= value.dimensions()[prefix.size()]; ++index) {
-            auto child = prefix; child.push_back(index); items.push_back(self(self, std::move(child)));
+        items.reserve(*dimension);
+        for (std::size_t index = 1; index <= *dimension; ++index) {
+            auto child = prefix;
+            child.push_back(exact_size_t(index));
+            items.push_back(self(self, std::move(child)));
         }
         return list(std::move(items));
     };
@@ -2702,11 +2718,18 @@ std::optional<std::vector<std::size_t>> dense_dimensions(const Expr& value) {
     dimensions.insert(dimensions.end(), child->begin(), child->end()); return dimensions;
 }
 
-std::optional<std::vector<std::size_t>> rectangular_array_dimensions(
+std::optional<DenseDimensions> rectangular_array_dimensions(
     const Expr& value) {
-    if (value.kind() == ExprKind::SparseArray) return value.dimensions();
+    if (value.kind() == ExprKind::SparseArray)
+        return value.sparse_dimensions();
     if (!value.has_head("List")) return std::nullopt;
-    return dense_dimensions(value);
+    const auto native = dense_dimensions(value);
+    if (!native) return std::nullopt;
+    DenseDimensions exact;
+    exact.reserve(native->size());
+    for (const auto dimension : *native)
+        exact.push_back(exact_size_t(dimension));
+    return exact;
 }
 
 std::vector<std::size_t> common_dense_dimensions(const Expr& value) {
@@ -2726,13 +2749,18 @@ std::vector<std::size_t> common_dense_dimensions(const Expr& value) {
     return dimensions;
 }
 
-std::vector<std::size_t> common_array_dimensions(const Expr& value) {
-    return value.kind() == ExprKind::SparseArray
-        ? value.dimensions() : common_dense_dimensions(value);
+DenseDimensions common_array_dimensions(const Expr& value) {
+    if (value.kind() == ExprKind::SparseArray)
+        return value.sparse_dimensions();
+    DenseDimensions exact;
+    for (const auto dimension : common_dense_dimensions(value))
+        exact.push_back(exact_size_t(dimension));
+    return exact;
 }
 
 std::size_t maximum_array_depth(const Expr& value) {
-    if (value.kind() == ExprKind::SparseArray) return value.dimensions().size();
+    if (value.kind() == ExprKind::SparseArray)
+        return value.sparse_dimensions().size();
     if (!value.has_head("List")) return 0;
     std::size_t depth = 1;
     for (const auto& item : value.args())
@@ -2752,75 +2780,62 @@ bool dense_array_leaves_match(const Expr& value, Predicate&& predicate) {
 std::optional<Expr> sparse_from_dense(const Expr& value, const Expr& fill = integer(0L)) {
     const auto dimensions = dense_dimensions(value); if (!dimensions || dimensions->empty()) return std::nullopt;
     std::vector<SparseEntry> entries;
-    auto collect = [&](auto&& self, const Expr& item, std::vector<std::size_t> prefix) -> void {
+    auto collect = [&](auto&& self, const Expr& item, SparsePosition prefix) -> void {
         if (prefix.size() == dimensions->size()) { if (item != fill) entries.push_back({std::move(prefix), item}); return; }
         for (std::size_t index = 0; index < item.args().size(); ++index) {
-            auto child = prefix; child.push_back(index + 1); self(self, item.args()[index], std::move(child));
+            auto child = prefix;
+            child.push_back(exact_size_t(index + 1));
+            self(self, item.args()[index], std::move(child));
         }
     };
     collect(collect, value, {}); return sparse_array(*dimensions, std::move(entries), fill);
 }
 
 mpz_class sparse_dimension_product(
-    const std::vector<std::size_t>& dimensions) {
+    const DenseDimensions& dimensions) {
     mpz_class product = 1;
-    for (const auto dimension : dimensions)
-        product *= mpz_class(std::to_string(dimension), 10);
+    for (const auto& dimension : dimensions)
+        product *= dimension;
     return product;
 }
 
 mpz_class sparse_linear_offset(
-    const std::vector<std::size_t>& indices,
-    const std::vector<std::size_t>& dimensions) {
+    const SparsePosition& indices,
+    const DenseDimensions& dimensions) {
     mpz_class offset = 0;
     for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
-        offset *= mpz_class(std::to_string(dimensions[axis]), 10);
-        offset += mpz_class(std::to_string(indices[axis] - 1), 10);
+        offset *= dimensions[axis];
+        offset += indices[axis] - 1;
     }
     return offset;
 }
 
-std::optional<std::vector<std::size_t>> sparse_indices_from_offset(
-    mpz_class offset, const std::vector<std::size_t>& dimensions) {
-    std::vector<std::size_t> indices(dimensions.size(), 1);
+std::optional<SparsePosition> sparse_indices_from_offset(
+    mpz_class offset, const DenseDimensions& dimensions) {
+    SparsePosition indices(dimensions.size(), mpz_class(1));
     for (std::size_t reverse_axis = dimensions.size(); reverse_axis > 0;
          --reverse_axis) {
         const auto axis = reverse_axis - 1;
         if (dimensions[axis] == 0) return std::nullopt;
-        const mpz_class dimension(std::to_string(dimensions[axis]), 10);
-        const mpz_class remainder = offset % dimension;
-        offset /= dimension;
-        const auto index = nonnegative_size_t(remainder + 1);
-        if (!index) return std::nullopt;
-        indices[axis] = *index;
+        const mpz_class remainder = offset % dimensions[axis];
+        offset /= dimensions[axis];
+        indices[axis] = remainder + 1;
     }
     return indices;
 }
 
-std::optional<std::vector<std::size_t>> native_sparse_dimensions(
-    const DenseDimensions& dimensions) {
-    std::vector<std::size_t> native;
-    native.reserve(dimensions.size());
-    for (const auto& dimension : dimensions) {
-        const auto value = nonnegative_size_t(dimension);
-        if (!value) return std::nullopt;
-        native.push_back(*value);
-    }
-    return native;
-}
-
 Expr sparse_coordinate_value(
-    const Expr& array, const std::vector<std::size_t>& indices) {
+    const Expr& array, const SparsePosition& indices) {
     const auto found = std::lower_bound(
         array.sparse_entries().begin(), array.sparse_entries().end(), indices,
-        [](const SparseEntry& entry, const std::vector<std::size_t>& target) {
+        [](const SparseEntry& entry, const SparsePosition& target) {
             return entry.indices < target;
         });
     return found != array.sparse_entries().end() && found->indices == indices
         ? found->value : array.fill_value();
 }
 
-using ExactSparsePosition = std::vector<mpz_class>;
+using ExactSparsePosition = SparsePosition;
 
 struct ExactSparseEntry {
     ExactSparsePosition indices;
@@ -2914,7 +2929,7 @@ SparseRuleExpansionResult expand_sparse_rule(
     return {std::vector<ExactSparseEntry>{{*position, values}}, {}};
 }
 
-SparseConstructionResult make_native_sparse_array(
+SparseConstructionResult make_sparse_array(
     const DenseDimensions& exact_dimensions,
     const std::vector<ExactSparseEntry>& exact_entries,
     const Expr& fill) {
@@ -2942,32 +2957,12 @@ SparseConstructionResult make_native_sparse_array(
         if (entry.value != fill) normalized_entries.push_back(entry);
     }
 
-    std::vector<std::size_t> dimensions;
-    dimensions.reserve(exact_dimensions.size());
-    for (const auto& dimension : exact_dimensions) {
-        const auto native = nonnegative_size_t(dimension);
-        if (!native)
-            return {std::nullopt,
-                "SparseArray dimensions exceed the native representation limit."};
-        dimensions.push_back(*native);
-    }
-
     std::vector<SparseEntry> entries;
     entries.reserve(normalized_entries.size());
-    for (const auto& entry : normalized_entries) {
-        std::vector<std::size_t> indices;
-        indices.reserve(entry.indices.size());
-        for (const auto& index : entry.indices) {
-            const auto native = nonnegative_size_t(index);
-            if (!native)
-                return {std::nullopt,
-                    "SparseArray positions exceed the native representation limit."};
-            indices.push_back(*native);
-        }
-        entries.push_back({std::move(indices), entry.value});
-    }
+    for (const auto& entry : normalized_entries)
+        entries.push_back({entry.indices, entry.value});
     return {sparse_array(
-        std::move(dimensions), std::move(entries), fill), {}};
+        exact_dimensions, std::move(entries), fill), {}};
 }
 
 SparseConstructionResult reencode_sparse_fill(
@@ -2978,15 +2973,15 @@ SparseConstructionResult reencode_sparse_fill(
             "SparseArray dimensions exceed the native materialization limit."};
 
     std::vector<SparseEntry> entries;
-    std::vector<std::size_t> position;
-    position.reserve(source.dimensions().size());
+    SparsePosition position;
+    position.reserve(source.sparse_dimensions().size());
     auto visit = [&](auto&& self, std::size_t axis) -> void {
-        if (axis == source.dimensions().size()) {
+        if (axis == source.sparse_dimensions().size()) {
             const auto found = std::lower_bound(
                 source.sparse_entries().begin(), source.sparse_entries().end(),
                 position,
                 [](const SparseEntry& entry,
-                    const std::vector<std::size_t>& target) {
+                    const SparsePosition& target) {
                     return entry.indices < target;
                 });
             const auto value = found != source.sparse_entries().end()
@@ -2995,16 +2990,19 @@ SparseConstructionResult reencode_sparse_fill(
             if (value != fill) entries.push_back({position, value});
             return;
         }
+        const auto dimension = nonnegative_size_t(
+            source.sparse_dimensions()[axis]);
+        if (!dimension) return;
         for (std::size_t index = 1;
-             index <= source.dimensions()[axis]; ++index) {
-            position.push_back(index);
+             index <= *dimension; ++index) {
+            position.push_back(exact_size_t(index));
             self(self, axis + 1);
             position.pop_back();
         }
     };
     visit(visit, 0);
     return {sparse_array(
-        source.dimensions(), std::move(entries), fill), {}};
+        source.sparse_dimensions(), std::move(entries), fill), {}};
 }
 
 SparseConstructionResult construct_sparse_array(
@@ -3026,10 +3024,7 @@ SparseConstructionResult construct_sparse_array(
     }
 
     if (data.kind() == ExprKind::SparseArray) {
-        DenseDimensions source_dimensions;
-        source_dimensions.reserve(data.dimensions().size());
-        for (const auto dimension : data.dimensions())
-            source_dimensions.emplace_back(std::to_string(dimension), 10);
+        const auto& source_dimensions = data.sparse_dimensions();
         if (dimensions && *dimensions != source_dimensions)
             return {std::nullopt,
                 "SparseArray cannot reinterpret an existing sparse array with different dimensions."};
@@ -3037,7 +3032,7 @@ SparseConstructionResult construct_sparse_array(
     }
 
     if (is_symbol(data, "Automatic") && dimensions)
-        return make_native_sparse_array(*dimensions, {}, fill);
+        return make_sparse_array(*dimensions, {}, fill);
 
     std::optional<std::vector<Expr>> rule_expressions;
     if (sparse_rule_expression(data)) {
@@ -3082,7 +3077,7 @@ SparseConstructionResult construct_sparse_array(
                     final_dimensions[axis] = std::max(
                         final_dimensions[axis], entry.indices[axis]);
         }
-        return make_native_sparse_array(
+        return make_sparse_array(
             final_dimensions, entries, fill);
     }
 
@@ -3138,7 +3133,7 @@ SparseArithmeticResult sparse_binary_elementwise(
 
     if (left.kind() == ExprKind::SparseArray
         && right.kind() == ExprKind::SparseArray) {
-        if (left.dimensions() != right.dimensions())
+        if (left.sparse_dimensions() != right.sparse_dimensions())
             return {std::nullopt, function
                 + " expects SparseArray dimensions to agree."};
 
@@ -3160,7 +3155,7 @@ SparseArithmeticResult sparse_binary_elementwise(
                     && right.sparse_entries()[right_index].indices
                         < left.sparse_entries()[left_index].indices);
 
-            std::vector<std::size_t> indices;
+            SparsePosition indices;
             Expr left_value = left.fill_value();
             Expr right_value = right.fill_value();
             if (take_left) {
@@ -3183,7 +3178,7 @@ SparseArithmeticResult sparse_binary_elementwise(
                 entries.push_back({std::move(indices), value});
         }
         return {sparse_array(
-            left.dimensions(), std::move(entries), fill), {}};
+            left.sparse_dimensions(), std::move(entries), fill), {}};
     }
 
     if (left.kind() == ExprKind::SparseArray) {
@@ -3196,7 +3191,7 @@ SparseArithmeticResult sparse_binary_elementwise(
                 entries.push_back({entry.indices, value});
         }
         return {sparse_array(
-            left.dimensions(), std::move(entries), fill), {}};
+            left.sparse_dimensions(), std::move(entries), fill), {}};
     }
 
     if (right.kind() == ExprKind::SparseArray) {
@@ -3209,7 +3204,7 @@ SparseArithmeticResult sparse_binary_elementwise(
                 entries.push_back({entry.indices, value});
         }
         return {sparse_array(
-            right.dimensions(), std::move(entries), fill), {}};
+            right.sparse_dimensions(), std::move(entries), fill), {}};
     }
 
     return {evaluated_binary(left, right), {}};
@@ -3946,7 +3941,8 @@ struct SparseAxisSelection {
     bool preserve = false;
     bool identity = false;
     std::vector<std::size_t> source_indices;
-    std::size_t output_dimension = 0;
+    std::optional<mpz_class> scalar_source_index;
+    mpz_class output_dimension = 0;
 };
 
 struct SparsePartResult {
@@ -3956,7 +3952,7 @@ struct SparsePartResult {
 
 SparsePartResult sparse_part(
     const Expr& array, const std::vector<Expr>& specifications) {
-    const auto& dimensions = array.dimensions();
+    const auto& dimensions = array.sparse_dimensions();
     if (specifications.size() > dimensions.size())
         return {std::nullopt,
             "Part received too many specifications for SparseArray."};
@@ -3966,7 +3962,8 @@ SparsePartResult sparse_part(
     for (std::size_t axis = 0; axis < dimensions.size(); ++axis) {
         if (axis >= specifications.size()
             || is_symbol(specifications[axis], "All")) {
-            selections.push_back({true, true, {}, dimensions[axis]});
+            selections.push_back(
+                {true, true, {}, std::nullopt, dimensions[axis]});
             continue;
         }
 
@@ -3978,47 +3975,64 @@ SparsePartResult sparse_part(
                 + specification.to_input_form() + "."};
         }
 
+        if (!preserve) {
+            const auto& raw_index = specification.integer_value();
+            const auto source_index = raw_index > 0
+                ? raw_index : dimensions[axis] + raw_index + 1;
+            if (source_index < 1 || source_index > dimensions[axis])
+                return {std::nullopt,
+                    "Part specifications are invalid for SparseArray."};
+            selections.push_back(
+                {false, false, {}, source_index, mpz_class(0)});
+            continue;
+        }
+
+        const auto native_dimension = nonnegative_size_t(dimensions[axis]);
+        if (!native_dimension)
+            return {std::nullopt,
+                "Part selections over large SparseArray dimensions exceed the native representation limit."};
         const auto numeric = structural_numeric_selectors(
-            dimensions[axis], specification, "Part", false);
+            *native_dimension, specification, "Part", false);
         if (!numeric.error.empty()) return {std::nullopt, numeric.error};
         if (numeric.invalid || (!preserve && numeric.indices.size() != 1))
             return {std::nullopt,
                 "Part specifications are invalid for SparseArray."};
-        selections.push_back({preserve, false, numeric.indices,
-            preserve ? numeric.indices.size() : 0});
+        selections.push_back({true, false, numeric.indices, std::nullopt,
+            exact_size_t(numeric.indices.size())});
     }
 
     const bool scalar = std::none_of(
         selections.begin(), selections.end(),
         [](const SparseAxisSelection& selection) { return selection.preserve; });
     if (scalar) {
-        std::vector<std::size_t> indices;
+        SparsePosition indices;
         indices.reserve(selections.size());
         for (const auto& selection : selections)
-            indices.push_back(selection.source_indices.front());
+            indices.push_back(*selection.scalar_source_index);
         const auto found = std::lower_bound(
             array.sparse_entries().begin(), array.sparse_entries().end(), indices,
-            [](const SparseEntry& entry, const std::vector<std::size_t>& target) {
+            [](const SparseEntry& entry, const SparsePosition& target) {
                 return entry.indices < target;
             });
         return {found != array.sparse_entries().end() && found->indices == indices
                 ? found->value : array.fill_value(), {}};
     }
 
-    std::vector<std::size_t> output_dimensions;
+    DenseDimensions output_dimensions;
     for (const auto& selection : selections)
         if (selection.preserve)
             output_dimensions.push_back(selection.output_dimension);
 
     std::vector<SparseEntry> output_entries;
     for (const auto& entry : array.sparse_entries()) {
-        std::vector<std::vector<std::size_t>> output_options;
+        std::vector<SparsePosition> output_options;
         bool include = true;
         for (std::size_t axis = 0; axis < selections.size(); ++axis) {
             const auto& selection = selections[axis];
             const auto source_index = entry.indices[axis];
             if (!selection.preserve) {
-                if (selection.source_indices.front() != source_index) {
+                if (*selection.scalar_source_index
+                    != source_index) {
                     include = false;
                     break;
                 }
@@ -4031,24 +4045,29 @@ SparsePartResult sparse_part(
             std::vector<std::size_t> mapped;
             for (std::size_t output_index = 0;
                  output_index < selection.source_indices.size(); ++output_index)
-                if (selection.source_indices[output_index] == source_index)
+                if (exact_size_t(selection.source_indices[output_index])
+                    == source_index)
                     mapped.push_back(output_index + 1);
             if (mapped.empty()) {
                 include = false;
                 break;
             }
-            output_options.push_back(std::move(mapped));
+            SparsePosition exact_mapped;
+            exact_mapped.reserve(mapped.size());
+            for (const auto index : mapped)
+                exact_mapped.push_back(exact_size_t(index));
+            output_options.push_back(std::move(exact_mapped));
         }
         if (!include) continue;
 
-        std::vector<std::size_t> output_index;
+        SparsePosition output_index;
         output_index.reserve(output_options.size());
         auto append = [&](auto&& self, std::size_t axis) -> void {
             if (axis == output_options.size()) {
                 output_entries.push_back({output_index, entry.value});
                 return;
             }
-            for (const auto index : output_options[axis]) {
+            for (const auto& index : output_options[axis]) {
                 output_index.push_back(index);
                 self(self, axis + 1);
                 output_index.pop_back();
@@ -4785,7 +4804,7 @@ std::optional<std::vector<Expr>> compound_sequence_values(
 std::optional<std::vector<Expr>> sequence_fold_values(
     const Expr& expression, std::string& error) {
     if (expression.kind() == ExprKind::SparseArray) {
-        if (expression.dimensions().size() != 1) {
+        if (expression.sparse_dimensions().size() != 1) {
             error = "SequenceFoldList expects a one-dimensional SparseArray sequence.";
             return std::nullopt;
         }
@@ -6069,7 +6088,13 @@ std::optional<bool> simple_truth(const Expr& expression) {
     if (operation == "UnsameQ") return expression.args()[0] != expression.args()[1];
     auto simple_value = [](auto&& self, const Expr& value) -> std::optional<double> {
         if (const auto number = numeric_real(value)) return number;
-        if (value.has_head("Length") && value.args().size() == 1) return static_cast<double>(value.args()[0].length());
+        if (value.has_head("Length") && value.args().size() == 1) {
+            const auto& argument = value.args()[0];
+            if (argument.kind() == ExprKind::SparseArray)
+                return argument.sparse_dimensions().empty()
+                    ? 0.0 : argument.sparse_dimensions().front().get_d();
+            return static_cast<double>(argument.length());
+        }
         if (value.has_head("Plus")) {
             double result = 0.0;
             for (const auto& argument : value.args()) {
@@ -7951,6 +7976,11 @@ bool Evaluator::message_is_enabled(const Expr& name) const {
 
 void Evaluator::emit_message(const Expr& name, std::string text) {
     if (!message_is_enabled(name)) return;
+    // $MessageList reports every enabled message generated by the current
+    // evaluation, including messages suppressed from visible effects by
+    // Quiet.  Disabled messages belong to neither stream.
+    generated_messages_.push_back(name);
+    if (generated_message_sink_) generated_message_sink_(name);
     for (auto scope = message_scopes_.rbegin(); scope != message_scopes_.rend(); ++scope) {
         if (scope->quiet) return;
         if (scope->selectors.empty()
@@ -8137,7 +8167,8 @@ Expr Evaluator::evaluate(const Expr& expression) {
     const bool root = depth_ == 0;
     if (root) {
         register_expression_symbols(expression);
-        messages_.clear(); message_texts_.clear(); prints_.clear(); aborted_ = false;
+        generated_messages_.clear(); messages_.clear(); message_texts_.clear();
+        prints_.clear(); aborted_ = false;
         abort_protect_scopes_.clear(); check_abort_depths_.clear();
         active_own_values_.clear();
         reap_stack_.clear();
@@ -8188,6 +8219,8 @@ Expr Evaluator::evaluate(const Expr& expression) {
 Expr Evaluator::evaluate_impl(const Expr& expression) {
     if (expression.kind() == ExprKind::Symbol) {
         const auto name = system_dispatch_name(expression.text());
+        if (name == "$Line" && session_line_resolver_)
+            return session_line_resolver_();
         if (name == "I") return complex(integer(0L), integer(1L));
         if (name == "$Context") return string("Global`");
         if (name == "$ContextPath") return list({string("System`"), string("Global`")});
@@ -8196,8 +8229,11 @@ Expr Evaluator::evaluate_impl(const Expr& expression) {
         if (name == "$MinMachineNumber") return real("2.2250738585072014*^-308");
         if (name == "$MachineEpsilon") return real("2.220446049250313*^-16");
         if (name == "$MessageList") {
+            if (current_message_list_resolver_)
+                return current_message_list_resolver_();
             std::vector<Expr> held;
-            for (const auto& message : messages_) held.push_back(call("HoldForm", {message}));
+            for (const auto& message : generated_messages_)
+                held.push_back(call("HoldForm", {message}));
             return list(std::move(held));
         }
         const auto full_name = resolve_full_symbol_name(expression.text());
@@ -8216,6 +8252,21 @@ Expr Evaluator::evaluate_impl(const Expr& expression) {
     }
     if (expression.kind() != ExprKind::Call) return expression;
     return evaluate_call(expression.head(), expression.args());
+}
+
+void Evaluator::set_session_resolvers(
+    std::function<Expr()> line_resolver,
+    std::function<Expr(const mpz_class&)> message_list_resolver,
+    std::function<Expr(
+        const std::string&, const std::optional<mpz_class>&)>
+        history_resolver,
+    std::function<void(const Expr&)> generated_message_sink,
+    std::function<Expr()> current_message_list_resolver) {
+    session_line_resolver_ = std::move(line_resolver);
+    message_list_resolver_ = std::move(message_list_resolver);
+    session_history_resolver_ = std::move(history_resolver);
+    generated_message_sink_ = std::move(generated_message_sink);
+    current_message_list_resolver_ = std::move(current_message_list_resolver);
 }
 
 bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
@@ -8273,7 +8324,7 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
     return product({numerator, reciprocal(denominator)});
   };
   const auto sparse_value_at = [](const Expr &array,
-                                  const std::vector<std::size_t> &indices) {
+                                  const SparsePosition &indices) {
     const auto found = std::find_if(
         array.sparse_entries().begin(), array.sparse_entries().end(),
         [&](const SparseEntry &entry) { return entry.indices == indices; });
@@ -8300,7 +8351,7 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
   auto matrix_rows = [&](const Expr &value, const std::string &caller,
                          std::vector<std::vector<Expr>> &rows) {
     if (value.kind() == ExprKind::SparseArray) {
-      if (value.dimensions().size() != 2) {
+      if (value.sparse_dimensions().size() != 2) {
         error = caller + " expects a matrix.";
         return false;
       }
@@ -8451,7 +8502,7 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
   };
 
   auto determinant_sparse = [&](const Expr &array) {
-    const auto &dimensions = array.dimensions();
+    const auto &dimensions = array.sparse_dimensions();
     if (dimensions.size() != 2 || dimensions[0] != dimensions[1]) {
       error = "Det expects a square matrix.";
       return Expr{};
@@ -8465,17 +8516,30 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
     const auto size = dimensions[0];
     if (size == 0)
       return integer(1L);
-    std::set<std::size_t> occupied_rows;
+    std::set<mpz_class> occupied_rows;
     for (const auto &entry : array.sparse_entries())
       if (!exact_zero(entry.value))
         occupied_rows.insert(entry.indices[0]);
-    if (occupied_rows.size() != size)
+    if (exact_size_t(occupied_rows.size()) != size)
       return integer(0L);
-    std::vector<std::vector<std::pair<std::size_t, Expr>>> candidates(size);
-    for (const auto &entry : array.sparse_entries())
-      if (!exact_zero(entry.value))
-        candidates[entry.indices[0] - 1].emplace_back(entry.indices[1] - 1,
-                                                      entry.value);
+    const auto native_size = nonnegative_size_t(size);
+    if (!native_size) {
+      error = "SparseArray dimensions exceed the native representation limit.";
+      return Expr{};
+    }
+    std::vector<std::vector<std::pair<std::size_t, Expr>>> candidates(
+        *native_size);
+    for (const auto &entry : array.sparse_entries()) {
+      if (exact_zero(entry.value))
+        continue;
+      const auto row = nonnegative_size_t(entry.indices[0]);
+      const auto column = nonnegative_size_t(entry.indices[1]);
+      if (!row || !column) {
+        error = "SparseArray positions exceed the native representation limit.";
+        return Expr{};
+      }
+      candidates[*row - 1].emplace_back(*column - 1, entry.value);
+    }
     return determinant_candidates(candidates);
   };
 
@@ -8493,15 +8557,15 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
         }
         return dot_two(*dense_left, *dense_right);
       }
-      const auto left_rank = left.dimensions().size();
-      const auto right_rank = right.dimensions().size();
+      const auto left_rank = left.sparse_dimensions().size();
+      const auto right_rank = right.sparse_dimensions().size();
       if ((left_rank != 1 && left_rank != 2) ||
           (right_rank != 1 && right_rank != 2)) {
         error = "Dot currently supports sparse vectors and matrices only.";
         return std::nullopt;
       }
       auto add_to = [&](std::vector<SparseEntry> &entries,
-                        const std::vector<std::size_t> &indices,
+                        const SparsePosition &indices,
                         const Expr &contribution) {
         if (exact_zero(contribution))
           return;
@@ -8517,7 +8581,7 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
           entries.erase(found);
       };
       if (left_rank == 1 && right_rank == 1) {
-        if (left.dimensions()[0] != right.dimensions()[0]) {
+        if (left.sparse_dimensions()[0] != right.sparse_dimensions()[0]) {
           error = "Dot expects vectors of the same length.";
           return std::nullopt;
         }
@@ -8537,7 +8601,7 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
       }
       std::vector<SparseEntry> entries;
       if (left_rank == 2 && right_rank == 1) {
-        if (left.dimensions()[1] != right.dimensions()[0]) {
+        if (left.sparse_dimensions()[1] != right.sparse_dimensions()[0]) {
           error = "Dot expects compatible sparse matrix/vector dimensions.";
           return std::nullopt;
         }
@@ -8553,10 +8617,10 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
           if (immediate_signal_active())
             return control_expression();
         }
-        return sparse_array({left.dimensions()[0]}, std::move(entries));
+        return sparse_array({left.sparse_dimensions()[0]}, std::move(entries));
       }
       if (left_rank == 1 && right_rank == 2) {
-        if (left.dimensions()[0] != right.dimensions()[0]) {
+        if (left.sparse_dimensions()[0] != right.sparse_dimensions()[0]) {
           error = "Dot expects compatible sparse vector/matrix dimensions.";
           return std::nullopt;
         }
@@ -8572,9 +8636,9 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
           if (immediate_signal_active())
             return control_expression();
         }
-        return sparse_array({right.dimensions()[1]}, std::move(entries));
+        return sparse_array({right.sparse_dimensions()[1]}, std::move(entries));
       }
-      if (left.dimensions()[1] != right.dimensions()[0]) {
+      if (left.sparse_dimensions()[1] != right.sparse_dimensions()[0]) {
         error = "Dot expects compatible sparse matrix dimensions.";
         return std::nullopt;
       }
@@ -8586,7 +8650,7 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
         if (immediate_signal_active())
           return control_expression();
       }
-      return sparse_array({left.dimensions()[0], right.dimensions()[1]},
+      return sparse_array({left.sparse_dimensions()[0], right.sparse_dimensions()[1]},
                           std::move(entries));
     }
     if (left.kind() == ExprKind::SparseArray) {
@@ -8815,11 +8879,11 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
 
   auto vector_values = [&](const Expr &value, std::vector<Expr> &values) {
     if (value.kind() == ExprKind::SparseArray) {
-      if (value.dimensions().size() != 1) {
+      if (value.sparse_dimensions().size() != 1) {
         error = "Cross expects vectors.";
         return false;
       }
-      const auto size = value.dimensions()[0];
+      const auto size = value.sparse_dimensions()[0];
       if (size != 2 && size != 3)
         return true;
       for (std::size_t index = 1; index <= size; ++index)
@@ -8896,9 +8960,17 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
           emit_message(message, text);
       }
     }
-    return is_symbol(combiner, "Plus")
-               ? sum(std::move(terms))
-               : evaluate(call(combiner, std::move(terms)));
+    if (is_symbol(combiner, "Plus"))
+      return sum(std::move(terms));
+
+    const auto application = call(combiner, std::move(terms));
+    auto combined = evaluate(application);
+    // Python's outer evaluator re-enters an unchanged callable result once
+    // after Tr's internal combiner evaluation.  Preserve that observable
+    // diagnostic schedule without re-running successful reductions.
+    if (!immediate_signal_active() && combined == application)
+      combined = evaluate(combined);
+    return combined;
   };
 
   if (function == "Tr") {
@@ -8909,13 +8981,15 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
     }
     const auto combiner = args.size() >= 2 ? args[1] : symbol("Plus");
     if (args.size() < 3) {
-      std::vector<std::size_t> dimensions;
+      DenseDimensions dimensions;
       if (args[0].kind() == ExprKind::SparseArray)
-        dimensions = args[0].dimensions();
+        dimensions = args[0].sparse_dimensions();
       else {
         bool rectangular = true;
-        dimensions = strict_dense_dimensions(args[0], strict_dense_dimensions,
-                                             rectangular);
+        const auto native_dimensions = strict_dense_dimensions(
+            args[0], strict_dense_dimensions, rectangular);
+        for (const auto dimension : native_dimensions)
+          dimensions.push_back(exact_size_t(dimension));
         if (!rectangular) {
           error = "SparseArray dense input must be rectangular.";
           return true;
@@ -8937,7 +9011,8 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
                     "limit.";
             return true;
           }
-          for (std::size_t index = 1; index <= dimensions[0]; ++index)
+          const auto native_dimension = *nonnegative_size_t(dimensions[0]);
+          for (std::size_t index = 1; index <= native_dimension; ++index)
             terms.push_back(sparse_value_at(args[0], {index}));
         } else
           terms = args[0].args();
@@ -8962,10 +9037,12 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
               "SparseArray dimensions exceed the native materialization limit.";
           return true;
         }
-        for (std::size_t index = 1; index <= diagonal_count; ++index)
+        const auto native_diagonal = *nonnegative_size_t(diagonal_count);
+        for (std::size_t index = 1; index <= native_diagonal; ++index)
           terms.push_back(sparse_value_at(args[0], {index, index}));
       } else {
-        for (std::size_t index = 0; index < diagonal_count; ++index)
+        const auto native_diagonal = *nonnegative_size_t(diagonal_count);
+        for (std::size_t index = 0; index < native_diagonal; ++index)
           terms.push_back(args[0].args()[index].args()[index]);
       }
       result = combine_terms(std::move(terms), combiner);
@@ -9055,7 +9132,7 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
   std::function<std::optional<Expr>(const Expr &)> inverse_matrix;
   inverse_matrix = [&](const Expr &value) -> std::optional<Expr> {
     if (value.kind() == ExprKind::SparseArray) {
-      const auto &dimensions = value.dimensions();
+      const auto &dimensions = value.sparse_dimensions();
       if (dimensions.size() != 2 || dimensions[0] != dimensions[1]) {
         error = "Inverse expects a square matrix.";
         return std::nullopt;
@@ -9069,13 +9146,27 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
           }
         }
         if (diagonal) {
-          if (value.sparse_entries().size() != dimensions[0]) {
+          if (exact_size_t(value.sparse_entries().size())
+              != dimensions[0]) {
             error = "Inverse expects a nonsingular matrix.";
             return std::nullopt;
           }
-          std::vector<const SparseEntry *> entries(dimensions[0], nullptr);
-          for (const auto &entry : value.sparse_entries())
-            entries[entry.indices[0] - 1] = &entry;
+          const auto native_size = nonnegative_size_t(dimensions[0]);
+          if (!native_size) {
+            error =
+                "SparseArray dimensions exceed the native representation limit.";
+            return std::nullopt;
+          }
+          std::vector<const SparseEntry *> entries(*native_size, nullptr);
+          for (const auto &entry : value.sparse_entries()) {
+            const auto index = nonnegative_size_t(entry.indices[0]);
+            if (!index) {
+              error =
+                  "SparseArray positions exceed the native representation limit.";
+              return std::nullopt;
+            }
+            entries[*index - 1] = &entry;
+          }
           if (std::any_of(entries.begin(), entries.end(),
                           [](const auto *entry) { return entry == nullptr; })) {
             error = "Inverse expects a nonsingular matrix.";
@@ -9191,18 +9282,33 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
       error = "MatrixPower expects an integer argument.";
       return true;
     }
+    auto exponent = args[1].integer_value();
     std::size_t size = 0;
     if (args[0].kind() == ExprKind::SparseArray) {
-      const auto &dimensions = args[0].dimensions();
+      const auto &dimensions = args[0].sparse_dimensions();
       if (dimensions.size() != 2 || dimensions[0] != dimensions[1]) {
         error = "MatrixPower expects a square matrix.";
         return true;
       }
-      size = dimensions[0];
+      if (exponent == 1) {
+        result = args[0];
+        return true;
+      }
+      const auto native_size = nonnegative_size_t(dimensions[0]);
+      if (!native_size) {
+        error =
+            "SparseArray dimensions exceed the native representation limit.";
+        return true;
+      }
+      size = *native_size;
     } else {
       std::vector<std::vector<Expr>> rows;
       if (!square_matrix_rows(args[0], "MatrixPower", rows))
         return true;
+      if (exponent == 1) {
+        result = args[0];
+        return true;
+      }
       size = rows.size();
     }
     auto identity = [&](bool sparse) -> std::optional<Expr> {
@@ -9226,7 +9332,6 @@ bool Evaluator::evaluate_tensor_matrix_call(const Expr &head,
       }
       return list(std::move(rows));
     };
-    auto exponent = args[1].integer_value();
     if (exponent == 0) {
       const auto value = identity(args[0].kind() == ExprKind::SparseArray);
       if (value)
@@ -9440,6 +9545,49 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         emit_message(message, message_prefix + "::error: " + text);
         return call(raw_head, raw_args);
     };
+    if (name == "MessageList") {
+        // Outside an EvaluationSession the Python compatibility evaluator
+        // returns an empty history for every raw MessageList call, before
+        // validating or evaluating any arguments.
+        if (!message_list_resolver_) return list({});
+        auto message_list_error = [&](const std::string& text) {
+            const auto message = call("MessageName", {
+                symbol("MessageList"), string("error")});
+            emit_message(message, "MessageList::error: " + text);
+            return call(raw_head, raw_args);
+        };
+        if (raw_args.size() != 1)
+            return message_list_error(
+                "MessageList expects exactly one line specification.");
+        const auto index = evaluate(raw_args[0]);
+        if (immediate_signal_active()) return index;
+        if (index.kind() != ExprKind::Integer)
+            return message_list_error(
+                "History functions expect an integer line specification.");
+        return message_list_resolver_(index.integer_value());
+    }
+    if (session_history_resolver_
+        && (name == "In" || name == "InString" || name == "Out")) {
+        auto history_error = [&](const std::string& text) {
+            const auto message = call("MessageName", {
+                symbol(name), string("error")});
+            emit_message(message, name + "::error: " + text);
+            return call(raw_head, raw_args);
+        };
+        if (raw_args.size() > 1)
+            return history_error(
+                name + " expects zero or one line specification.");
+        std::optional<mpz_class> requested;
+        if (!raw_args.empty()) {
+            const auto index = evaluate(raw_args[0]);
+            if (immediate_signal_active()) return index;
+            if (index.kind() != ExprKind::Integer)
+                return history_error(
+                    "History functions expect an integer line specification.");
+            requested = index.integer_value();
+        }
+        return session_history_resolver_(name, requested);
+    }
     if (name == "Failsafe") {
         if (raw_args.empty() || raw_args.size() > 3)
             return raw_evaluation_error(
@@ -10986,13 +11134,13 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         }
         if (args[0].text() == "ExplicitPositions") {
             std::vector<Expr> positions;
-            for (const auto& entry : head.sparse_entries()) { std::vector<Expr> indices; for (const auto index : entry.indices) indices.push_back(integer(index)); positions.push_back(list(std::move(indices))); }
+            for (const auto& entry : head.sparse_entries()) { std::vector<Expr> indices; for (const auto& index : entry.indices) indices.push_back(integer(index)); positions.push_back(list(std::move(indices))); }
             return list(std::move(positions));
         }
         if (args[0].text() == "Density") {
             mpz_class count = 1;
-            for (const auto dimension : head.dimensions())
-                count *= mpz_class(std::to_string(dimension), 10);
+            for (const auto& dimension : head.sparse_dimensions())
+                count *= dimension;
             return count == 0 ? integer(0L)
                 : rational(mpz_class(head.sparse_entries().size()), std::move(count));
         }
@@ -15192,12 +15340,17 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         && args[0].integer_value() >= mpz_class(std::numeric_limits<std::int64_t>::min())
         && args[0].integer_value() <= mpz_class(std::numeric_limits<std::int64_t>::max()));
     if (function == "Head" && args.size() == 1) return args[0].head();
-    if (function == "Length" && args.size() == 1) return integer(args[0].length());
+    if (function == "Length" && args.size() == 1) {
+        if (args[0].kind() == ExprKind::SparseArray)
+            return args[0].sparse_dimensions().empty()
+                ? integer(0L) : integer(args[0].sparse_dimensions().front());
+        return integer(args[0].length());
+    }
     if (function == "Dimensions") {
         if (args.size() != 1)
             return raw_evaluation_error("Dimensions expects exactly one argument.");
         std::vector<Expr> values;
-        for (const auto dimension : common_array_dimensions(args[0]))
+        for (const auto& dimension : common_array_dimensions(args[0]))
             values.push_back(integer(dimension));
         return list(std::move(values));
     }
@@ -15828,20 +15981,19 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 "ArrayReshape expects an expression, dimensions, and an optional padding value.");
         const auto normalized = normalize_dense_dimensions(args[1], "ArrayReshape");
         if (!normalized.values) return raw_evaluation_error(normalized.error);
-        const auto dimensions = native_sparse_dimensions(*normalized.values);
-        if (!dimensions)
-            return raw_evaluation_error(
-                "ArrayReshape dimensions exceed the native representation limit.");
+        const auto& dimensions = *normalized.values;
 
         const auto padding = args.size() == 3 ? args[2] : integer(0L);
-        const auto old_total = sparse_dimension_product(args[0].dimensions());
+        const auto old_total = sparse_dimension_product(
+            args[0].sparse_dimensions());
         mpz_class new_total = 1;
         for (const auto& dimension : *normalized.values)
             new_total *= dimension;
-        if (dimensions->empty()) {
+        if (dimensions.empty()) {
             if (old_total == 0) return padding;
             return sparse_coordinate_value(args[0],
-                std::vector<std::size_t>(args[0].dimensions().size(), 1));
+                SparsePosition(
+                    args[0].sparse_dimensions().size(), mpz_class(1)));
         }
 
         const bool preserves_sparse = new_total <= old_total
@@ -15860,14 +16012,17 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         entries.reserve(args[0].sparse_entries().size());
         for (const auto& entry : args[0].sparse_entries()) {
             const auto linear = sparse_linear_offset(
-                entry.indices, args[0].dimensions());
+                entry.indices, args[0].sparse_dimensions());
             if (linear >= new_total) continue;
-            const auto indices = sparse_indices_from_offset(linear, *dimensions);
-            if (indices) entries.push_back({*indices, entry.value});
+            const auto indices = sparse_indices_from_offset(linear, dimensions);
+            if (!indices)
+                return raw_evaluation_error(
+                    "ArrayReshape positions exceed the native representation limit.");
+            entries.push_back({*indices, entry.value});
         }
         const auto output_fill = new_total <= old_total
             ? args[0].fill_value() : padding;
-        return sparse_array(*dimensions, std::move(entries), output_fill);
+        return sparse_array(dimensions, std::move(entries), output_fill);
     }
     if (function == "ArrayPad" && evaluated_name
         && *evaluated_name == "ArrayPad" && !args.empty()
@@ -15876,20 +16031,17 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return raw_evaluation_error(
                 "ArrayPad expects an array, padding widths, and an optional padding value.");
         const auto normalized = normalize_dense_padding(
-            args[1], args[0].dimensions().size());
+            args[1], args[0].sparse_dimensions().size());
         if (!normalized.widths)
             return raw_evaluation_error(normalized.error);
         DenseDimensions output_dimensions;
-        output_dimensions.reserve(args[0].dimensions().size());
-        for (std::size_t axis = 0; axis < args[0].dimensions().size(); ++axis)
+        output_dimensions.reserve(args[0].sparse_dimensions().size());
+        for (std::size_t axis = 0;
+             axis < args[0].sparse_dimensions().size(); ++axis)
             output_dimensions.push_back(
-                mpz_class(std::to_string(args[0].dimensions()[axis]), 10)
+                args[0].sparse_dimensions()[axis]
                 + (*normalized.widths)[axis].first
                 + (*normalized.widths)[axis].second);
-        const auto dimensions = native_sparse_dimensions(output_dimensions);
-        if (!dimensions)
-            return raw_evaluation_error(
-                "ArrayPad dimensions exceed the native representation limit.");
         const auto padding = args.size() == 3 ? args[2] : integer(0L);
         if (padding != args[0].fill_value()) {
             const auto dense = sparse_dense_value(args[0]);
@@ -15905,19 +16057,13 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         entries.reserve(args[0].sparse_entries().size());
         for (const auto& entry : args[0].sparse_entries()) {
             auto indices = entry.indices;
-            for (std::size_t axis = 0; axis < indices.size(); ++axis) {
-                const auto offset = nonnegative_size_t(
-                    (*normalized.widths)[axis].first);
-                if (!offset || indices[axis]
-                    > std::numeric_limits<std::size_t>::max() - *offset)
-                    return raw_evaluation_error(
-                        "ArrayPad dimensions exceed the native representation limit.");
-                indices[axis] += *offset;
-            }
+            for (std::size_t axis = 0; axis < indices.size(); ++axis)
+                indices[axis] += (*normalized.widths)[axis].first;
             entries.push_back({std::move(indices), entry.value});
         }
         return sparse_array(
-            *dimensions, std::move(entries), args[0].fill_value());
+            std::move(output_dimensions), std::move(entries),
+            args[0].fill_value());
     }
     if (function == "Transpose" && evaluated_name
         && *evaluated_name == "Transpose" && !args.empty()
@@ -15925,7 +16071,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (args.size() != 1 && args.size() != 2)
             return raw_evaluation_error(
                 "Transpose expects an array and an optional permutation.");
-        const auto rank = args[0].dimensions().size();
+        const auto rank = args[0].sparse_dimensions().size();
         std::vector<std::size_t> permutation(rank);
         std::iota(permutation.begin(), permutation.end(), std::size_t{0});
         if (args.size() == 1) {
@@ -15959,14 +16105,14 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (std::is_sorted(permutation.begin(), permutation.end()))
             return args[0];
 
-        std::vector<std::size_t> dimensions;
+        DenseDimensions dimensions;
         dimensions.reserve(rank);
         for (const auto axis : permutation)
-            dimensions.push_back(args[0].dimensions()[axis]);
+            dimensions.push_back(args[0].sparse_dimensions()[axis]);
         std::vector<SparseEntry> entries;
         entries.reserve(args[0].sparse_entries().size());
         for (const auto& entry : args[0].sparse_entries()) {
-            std::vector<std::size_t> indices;
+            SparsePosition indices;
             indices.reserve(rank);
             for (const auto axis : permutation)
                 indices.push_back(entry.indices[axis]);
@@ -15994,35 +16140,29 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 return raw_evaluation_error(
                     "Flatten level exceeds the native representation limit.");
         }
-        const auto rank = args[0].dimensions().size();
+        const auto rank = args[0].sparse_dimensions().size();
         if ((level && *level == 0) || rank <= 1) return args[0];
         const auto collapse_count = level
             ? (*level >= rank ? rank : *level + 1) : rank;
-        std::vector<std::size_t> collapsed_dimensions(
-            args[0].dimensions().begin(),
-            args[0].dimensions().begin()
+        DenseDimensions collapsed_dimensions(
+            args[0].sparse_dimensions().begin(),
+            args[0].sparse_dimensions().begin()
                 + static_cast<std::ptrdiff_t>(collapse_count));
-        const auto collapsed = checked_dimension_product(collapsed_dimensions);
-        if (!collapsed)
-            return raw_evaluation_error(
-                "Flatten dimensions exceed the native representation limit.");
-        std::vector<std::size_t> dimensions{*collapsed};
+        const auto collapsed = sparse_dimension_product(collapsed_dimensions);
+        DenseDimensions dimensions{collapsed};
         dimensions.insert(dimensions.end(),
-            args[0].dimensions().begin()
+            args[0].sparse_dimensions().begin()
                 + static_cast<std::ptrdiff_t>(collapse_count),
-            args[0].dimensions().end());
+            args[0].sparse_dimensions().end());
         std::vector<SparseEntry> entries;
         entries.reserve(args[0].sparse_entries().size());
         for (const auto& entry : args[0].sparse_entries()) {
-            std::vector<std::size_t> prefix(
+            SparsePosition prefix(
                 entry.indices.begin(), entry.indices.begin()
                     + static_cast<std::ptrdiff_t>(collapse_count));
-            const auto collapsed_index = nonnegative_size_t(
-                sparse_linear_offset(prefix, collapsed_dimensions) + 1);
-            if (!collapsed_index)
-                return raw_evaluation_error(
-                    "Flatten dimensions exceed the native representation limit.");
-            std::vector<std::size_t> indices{*collapsed_index};
+            const mpz_class collapsed_index =
+                sparse_linear_offset(prefix, collapsed_dimensions) + 1;
+            SparsePosition indices{collapsed_index};
             indices.insert(indices.end(),
                 entry.indices.begin()
                     + static_cast<std::ptrdiff_t>(collapse_count),
@@ -16401,7 +16541,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         output_dimensions.reserve(dimensions->size());
         for (std::size_t axis = 0; axis < dimensions->size(); ++axis)
             output_dimensions.push_back(
-                mpz_class(std::to_string((*dimensions)[axis]), 10)
+                (*dimensions)[axis]
                 + (*normalized.widths)[axis].first
                 + (*normalized.widths)[axis].second);
         if (!dense_materialization_within_limit(output_dimensions))
@@ -16417,8 +16557,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                     const auto source_index = indices[axis]
                         - (*normalized.widths)[axis].first;
                     if (source_index < 1
-                        || source_index
-                            > mpz_class(std::to_string((*dimensions)[axis]), 10))
+                        || source_index > (*dimensions)[axis])
                         return padding;
                     source_indices.push_back(source_index);
                 }
@@ -16448,23 +16587,24 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             return raw_evaluation_error(
                 "ArrayFlatten expects a rectangular block matrix.");
 
-        std::vector<std::vector<std::pair<std::size_t, std::size_t>>> shapes;
+        std::vector<std::vector<std::pair<mpz_class, mpz_class>>> shapes;
         shapes.reserve(args[0].args().size());
         bool any_sparse = false;
         bool nonzero_sparse_fill = false;
         for (const auto& block_row : args[0].args()) {
-            std::vector<std::pair<std::size_t, std::size_t>> shape_row;
+            std::vector<std::pair<mpz_class, mpz_class>> shape_row;
             shape_row.reserve(column_count);
             for (const auto& block : block_row.args()) {
                 if (block.kind() == ExprKind::SparseArray) {
-                    if (block.dimensions().size() != 2)
+                    if (block.sparse_dimensions().size() != 2)
                         return raw_evaluation_error(
                             "ArrayFlatten currently expects rank-2 SparseArray blocks.");
                     any_sparse = true;
                     nonzero_sparse_fill = nonzero_sparse_fill
                         || block.fill_value() != integer(0L);
                     shape_row.emplace_back(
-                        block.dimensions()[0], block.dimensions()[1]);
+                        block.sparse_dimensions()[0],
+                        block.sparse_dimensions()[1]);
                     continue;
                 }
                 const auto dimensions = dense_dimensions(block);
@@ -16474,12 +16614,14 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 if (dimensions->size() != 2)
                     return raw_evaluation_error(
                         "ArrayFlatten currently expects rank-2 array blocks.");
-                shape_row.emplace_back((*dimensions)[0], (*dimensions)[1]);
+                shape_row.emplace_back(
+                    exact_size_t((*dimensions)[0]),
+                    exact_size_t((*dimensions)[1]));
             }
             shapes.push_back(std::move(shape_row));
         }
 
-        std::vector<std::size_t> row_heights;
+        DenseDimensions row_heights;
         row_heights.reserve(shapes.size());
         for (std::size_t row = 0; row < shapes.size(); ++row) {
             const auto height = shapes[row][0].first;
@@ -16490,7 +16632,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                         + " has inconsistent heights.");
             row_heights.push_back(height);
         }
-        std::vector<std::size_t> column_widths;
+        DenseDimensions column_widths;
         column_widths.reserve(column_count);
         for (std::size_t column = 0; column < column_count; ++column) {
             const auto width = shapes[0][column].second;
@@ -16504,16 +16646,10 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
             column_widths.push_back(width);
         }
 
-        const auto row_total = std::accumulate(row_heights.begin(),
-            row_heights.end(), mpz_class(0),
-            [](mpz_class total, std::size_t value) -> mpz_class {
-                return total + mpz_class(std::to_string(value), 10);
-            });
-        const auto column_total = std::accumulate(column_widths.begin(),
-            column_widths.end(), mpz_class(0),
-            [](mpz_class total, std::size_t value) -> mpz_class {
-                return total + mpz_class(std::to_string(value), 10);
-            });
+        const auto row_total = std::accumulate(
+            row_heights.begin(), row_heights.end(), mpz_class(0));
+        const auto column_total = std::accumulate(
+            column_widths.begin(), column_widths.end(), mpz_class(0));
         if (nonzero_sparse_fill) {
             std::vector<Expr> dense_rows;
             dense_rows.reserve(args[0].args().size());
@@ -16534,39 +16670,41 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 evaluated_list_expr(std::move(dense_rows))}));
         }
         if (any_sparse) {
-            const auto output_rows = nonnegative_size_t(row_total);
-            const auto output_columns = nonnegative_size_t(column_total);
-            if (!output_rows || !output_columns)
-                return raw_evaluation_error(
-                    "ArrayFlatten dimensions exceed the native representation limit.");
             std::vector<SparseEntry> entries;
-            std::size_t row_offset = 0;
+            mpz_class row_offset = 0;
             for (std::size_t block_row = 0;
                  block_row < args[0].args().size(); ++block_row) {
-                std::size_t column_offset = 0;
+                mpz_class column_offset = 0;
                 for (std::size_t block_column = 0;
                      block_column < column_count; ++block_column) {
                     const auto& block =
                         args[0].args()[block_row].args()[block_column];
                     if (block.kind() == ExprKind::SparseArray) {
-                        for (const auto& entry : block.sparse_entries())
+                        for (const auto& entry : block.sparse_entries()) {
                             entries.push_back({
                                 {row_offset + entry.indices[0],
                                     column_offset + entry.indices[1]},
                                 entry.value});
+                        }
                     } else {
                         const auto [height, width] =
                             shapes[block_row][block_column];
-                        for (std::size_t row = 0; row < height; ++row)
-                            for (std::size_t column = 0; column < width;
+                        const auto native_height = nonnegative_size_t(height);
+                        const auto native_width = nonnegative_size_t(width);
+                        if (!native_height || !native_width)
+                            return raw_evaluation_error(
+                                "ArrayFlatten dense block dimensions exceed the native representation limit.");
+                        for (std::size_t row = 0; row < *native_height; ++row)
+                            for (std::size_t column = 0; column < *native_width;
                                  ++column) {
                                 const auto& value =
                                     block.args()[row].args()[column];
-                                if (value != integer(0L))
+                                if (value != integer(0L)) {
                                     entries.push_back({
-                                        {row_offset + row + 1,
-                                            column_offset + column + 1},
+                                        {row_offset + exact_size_t(row + 1),
+                                            column_offset + exact_size_t(column + 1)},
                                         value});
+                                }
                             }
                     }
                     column_offset += column_widths[block_column];
@@ -16574,7 +16712,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
                 row_offset += row_heights[block_row];
             }
             return sparse_array(
-                {*output_rows, *output_columns}, std::move(entries),
+                {row_total, column_total}, std::move(entries),
                 integer(0L));
         }
         if (!dense_materialization_within_limit({row_total, column_total}))
@@ -16586,8 +16724,10 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         rows.reserve(row_count);
         for (std::size_t block_row = 0;
              block_row < args[0].args().size(); ++block_row) {
+            const auto native_height = nonnegative_size_t(
+                row_heights[block_row]);
             for (std::size_t local_row = 0;
-                 local_row < row_heights[block_row]; ++local_row) {
+                 local_row < *native_height; ++local_row) {
                 std::vector<Expr> values;
                 for (const auto& block : args[0].args()[block_row].args()) {
                     const auto& block_values = block.args()[local_row].args();
@@ -16646,8 +16786,7 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         DenseDimensions output_dimensions;
         output_dimensions.reserve(dimensions->size());
         for (const auto axis : permutation)
-            output_dimensions.emplace_back(
-                std::to_string((*dimensions)[axis]), 10);
+            output_dimensions.push_back((*dimensions)[axis]);
         if (!dense_materialization_within_limit(output_dimensions))
             return raw_evaluation_error(
                 "Transpose output exceeds the native materialization limit.");
@@ -16670,24 +16809,19 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
         if (args.size() != 3)
             return invalid_insert("Insert expects exactly three arguments.");
         if (args[0].kind() == ExprKind::SparseArray
-            && args[0].dimensions().size() == 1
+            && args[0].sparse_dimensions().size() == 1
             && args[2].kind() == ExprKind::Integer) {
-            const auto length = args[0].dimensions().front();
-            if (length == std::numeric_limits<std::size_t>::max())
-                return invalid_insert(
-                    "SparseArray length exceeds the native representation limit.");
-            const mpz_class length_value(std::to_string(length), 10);
+            const auto& length = args[0].sparse_dimensions().front();
             const auto& raw_index = args[2].integer_value();
             mpz_class offset;
             if (raw_index == 0) offset = 0;
             else if (raw_index > 0) offset = raw_index - 1;
-            else offset = length_value + raw_index + 1;
-            const auto native_offset = nonnegative_size_t(offset);
-            if (!native_offset || *native_offset > length)
+            else offset = length + raw_index + 1;
+            if (offset < 0 || offset > length)
                 return invalid_insert(
                     "Insert position is invalid for SparseArray.");
 
-            const auto inserted_index = *native_offset + 1;
+            const mpz_class inserted_index = offset + 1;
             std::vector<SparseEntry> entries;
             entries.reserve(args[0].sparse_entries().size() + 1);
             for (const auto& entry : args[0].sparse_entries()) {
@@ -19013,10 +19147,11 @@ Expr Evaluator::evaluate_call(const Expr& raw_head, const std::vector<Expr>& raw
     if (function == "ArrayRules" && args.size() == 1 && args[0].kind() == ExprKind::SparseArray) {
         std::vector<Expr> rules;
         for (const auto& entry : args[0].sparse_entries()) {
-            std::vector<Expr> indices; for (const auto index : entry.indices) indices.push_back(integer(index));
+            std::vector<Expr> indices; for (const auto& index : entry.indices) indices.push_back(integer(index));
             rules.push_back(call("Rule", {list(std::move(indices)), entry.value}));
         }
-        std::vector<Expr> blanks(args[0].dimensions().size(), call("Blank", {}));
+        std::vector<Expr> blanks(
+            args[0].sparse_dimensions().size(), call("Blank", {}));
         rules.push_back(call("Rule", {list(std::move(blanks)), args[0].fill_value()})); return list(std::move(rules));
     }
     if ((function == "KeyExistsQ" || function == "KeyMemberQ") && args.size() == 2) {

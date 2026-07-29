@@ -190,6 +190,21 @@ bool unicode_is_decimal(std::uint32_t value) noexcept {
     return has_unicode_property(value, unicode_decimal_ranges);
 }
 
+std::optional<unsigned> unicode_decimal_value(std::uint32_t value) noexcept {
+    const auto found = std::lower_bound(
+        std::begin(unicode_decimal_ranges), std::end(unicode_decimal_ranges),
+        value, [](const UnicodePropertyRange& range, std::uint32_t target) {
+            return range.last < target;
+        });
+    if (found == std::end(unicode_decimal_ranges) || value < found->first)
+        return std::nullopt;
+
+    // Every Unicode Nd run consists of one or more adjacent 0..9 blocks.
+    // The generated table coalesces adjacent blocks (notably the mathematical
+    // styled digits), so the offset modulo ten is the decimal value.
+    return static_cast<unsigned>((value - found->first) % 10U);
+}
+
 bool unicode_is_punctuation(std::uint32_t value) noexcept {
     return has_unicode_property(value, unicode_punctuation_ranges);
 }

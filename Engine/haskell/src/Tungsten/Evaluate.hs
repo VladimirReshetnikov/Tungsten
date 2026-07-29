@@ -8,6 +8,7 @@
 module Tungsten.Evaluate
   ( EvaluationError (..)
   , LevelBounds (..)
+  , TrEvaluationPlan (..)
   , PathSelector (..)
   , PatternPathRecord (..)
   , PatternRecord (..)
@@ -30,6 +31,7 @@ module Tungsten.Evaluate
   , normalizeEvaluatedCall
   , normalizeLevelSpec
   , operationPositionPaths
+  , outerTraversalPlan
   , pathExpression
   , rebuildWithSplicing
   , reduceEvaluatedCall
@@ -38,14 +40,16 @@ module Tungsten.Evaluate
   , selectionLimit
   , sortOperationPaths
   , substituteNamedSymbols
+  , trEvaluationPlan
   ) where
 
 import Control.Monad ((<=<), foldM)
 import Data.Bits ((.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
-import Data.Char (chr, isDigit, ord, toUpper)
+import Data.Char (chr, isDigit, isLetter, ord, toUpper)
 import Data.Functor.Identity (Identity (..))
-import Data.List (permutations, sort, sortBy, transpose)
+import Data.List (findIndex, permutations, sort, sortBy, transpose)
+import qualified Data.List as List
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
@@ -53,9 +57,13 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Word (Word8)
+import Foreign.C.Types (CDouble (..))
 import Text.Read (readMaybe)
+import qualified Tungsten.AlgebraicRoots as AlgebraicRoots
 import Tungsten.Expression
 import qualified Tungsten.NumericAlgebra as NumericAlgebra
+import qualified Tungsten.NumericPrecision as NumericPrecision
+import qualified Tungsten.PolynomialAlgebra as PolynomialAlgebra
 import qualified Tungsten.StringPatterns as SP
 import Tungsten.SystemSymbols
   ( SymbolAttribute (..)
@@ -64,6 +72,35 @@ import Tungsten.SystemSymbols
   , systemSymbolAttributes
   )
 import qualified Tungsten.TextualForms as TextualForms
+
+algebraicRootContext :: AlgebraicRoots.AlgebraicRootContext
+algebraicRootContext =
+  AlgebraicRoots.defaultAlgebraicRootContext
+    { AlgebraicRoots.simplifyAlgebraicExpression = simplifyGeneratedAlgebraic
+    }
+ where
+  simplifyGeneratedAlgebraic expression =
+    case evaluate expression of
+      Left _ -> expression
+      Right result -> result
+
+-- GHC's pure Double atan2 differs from CPython's C-library result by up to a
+-- few ulps on some quadrants.  Tungsten's JSON contract preserves the exact
+-- machine-real spelling, so use the same C ABI operation as the reference.
+foreign import ccall unsafe "atan2" cAtan2 :: CDouble -> CDouble -> CDouble
+
+-- Precision and accuracy metadata are serialized as exact machine-real text.
+-- Use the C-library logarithm chosen by CPython so boundary results retain the
+-- same final ulp instead of drifting through Haskell's generic logBase path.
+foreign import ccall unsafe "log10" cLog10 :: CDouble -> CDouble
+
+pythonAtan2 :: Double -> Double -> Double
+pythonAtan2 imaginaryPart realPart =
+  realToFrac
+    (cAtan2 (realToFrac imaginaryPart) (realToFrac realPart))
+
+pythonLog10 :: Double -> Double
+pythonLog10 value = realToFrac (cLog10 (realToFrac value))
 
 newtype EvaluationError = EvaluationError {evaluationErrorMessage :: Text}
   deriving (Eq, Show)
@@ -80,6 +117,15 @@ evaluateAt :: Int -> Expr -> Either EvaluationError Expr
 evaluateAt depth expression
   | depth > 1024 = Left (EvaluationError "the evaluation recursion limit was exceeded")
   | otherwise = case expression of
+      Symbol name
+        | systemHeadIn ["I"] name ->
+            Right (Complex (Integer 0) (Integer 1))
+        | systemHeadIn ["$MaxMachineNumber"] name ->
+            Right (Real "1.7976931348623157*^+308")
+        | systemHeadIn ["$MinMachineNumber"] name ->
+            Right (Real "2.2250738585072014*^-308")
+        | systemHeadIn ["$MachineEpsilon"] name ->
+            Right (Real "2.220446049250313*^-16")
       Call (Symbol headName) _
         | systemHeadIn ["HoldComplete", "Unevaluated"] headName ->
             Right expression
@@ -166,16 +212,110 @@ evaluateAt depth expression
                   )
           _ -> do
             evaluatedArguments <- traverse (evaluateAt (depth + 1)) arguments'
-            let evaluatedCall = normalizeEvaluatedCall evaluatedHead evaluatedArguments
-            reduced <- reducePureCallForDispatch evaluatedCall
-            -- Some Python reducers deliberately return a final structural value:
-            -- Sqrt preserves its raw nested Times shape for negative composite
-            -- radicands, while Level exposes selected held subexpressions without
-            -- evaluating them again.
-            if reduced == evaluatedCall || preservesFinalReducerResult evaluatedHead
-              then Right reduced
-              else evaluateAt (depth + 1) reduced
+            let transparentArguments =
+                  stripPureTransparentUnevaluatedArguments
+                    evaluatedHead
+                    evaluatedArguments
+                evaluatedCall = normalizeEvaluatedCall evaluatedHead transparentArguments
+            threaded <- threadPureListableCall depth evaluatedCall
+            case threaded of
+              Just result -> Right result
+              Nothing -> do
+                reduced <- reducePureCallForDispatch evaluatedCall
+                -- Some Python reducers deliberately return a final structural value:
+                -- Sqrt preserves its raw nested Times shape for negative composite
+                -- radicands, while Level exposes selected held subexpressions without
+                -- evaluating them again.
+                if reduced == evaluatedCall || preservesFinalReducerResult evaluatedHead
+                  then Right reduced
+                  else evaluateAt (depth + 1) reduced
       _ -> Right expression
+
+threadPureListableCall :: Int -> Expr -> Either EvaluationError (Maybe Expr)
+threadPureListableCall depth (Call expressionHead values)
+  | staticSystemHeadHasAttribute Listable expressionHead = do
+      rows <- pureListableArgumentRows values
+      case rows of
+        Nothing -> Right Nothing
+        Just argumentRows -> do
+          results <-
+            traverse
+              (evaluateAt (depth + 1) . Call expressionHead)
+              argumentRows
+          Right (Just (evaluatedList results))
+threadPureListableCall _ _ = Right Nothing
+
+stripPureTransparentUnevaluatedArguments :: Expr -> [Expr] -> [Expr]
+stripPureTransparentUnevaluatedArguments expressionHead
+  | pureHeadExpressionIsAny
+      [ "Composition"
+      , "Head"
+      , "Length"
+      , "Part"
+      , "Accuracy"
+      , "ExactNumberQ"
+      , "InexactNumberQ"
+      , "MachineIntegerQ"
+      , "MachineNumberQ"
+      , "NumberQ"
+      , "N"
+      , "Outer"
+      , "Plus"
+      , "Precision"
+      , "SetAccuracy"
+      , "SetPrecision"
+      , "RealValuedNumberQ"
+      , "RightComposition"
+      , "Operate"
+      , "Thread"
+      , "Through"
+      , "Tr"
+      ]
+      expressionHead =
+      map stripDirectUnevaluated
+  | otherwise = id
+ where
+  pureHeadExpressionIsAny expected = \case
+    Symbol actual -> systemHeadIn expected actual
+    _ -> False
+  stripDirectUnevaluated = \case
+    Call (Symbol unevaluatedHead) [value]
+      | systemHeadIn ["Unevaluated"] unevaluatedHead -> value
+    value -> value
+
+staticSystemHeadHasAttribute :: SymbolAttribute -> Expr -> Bool
+staticSystemHeadHasAttribute attribute (Symbol name) =
+  isSystemSymbol name
+    && maybe False (Set.member attribute) (systemSymbolAttributes name)
+staticSystemHeadHasAttribute _ _ = False
+
+pureListableArgumentRows :: [Expr] -> Either EvaluationError (Maybe [[Expr]])
+pureListableArgumentRows values = case listLengths of
+  [] -> Right Nothing
+  firstLength : remainingLengths
+    | all (== firstLength) remainingLengths ->
+        Right
+          ( Just
+              [ [ case value of
+                    Call (Symbol listHead) elements
+                      | systemHeadIn ["List"] listHead -> elements !! index
+                    scalar -> scalar
+                | value <- values
+                ]
+              | index <- [0 .. firstLength - 1]
+              ]
+          )
+    | otherwise ->
+        Left
+          ( EvaluationError
+              "Listable Function arguments have incompatible list lengths."
+          )
+ where
+  listLengths =
+    [ length elements
+    | Call (Symbol listHead) elements <- values
+    , systemHeadIn ["List"] listHead
+    ]
 
 -- | Construct an ordinary evaluated call after applying the transparent
 -- argument normalization shared by Wolfram heads.  Each enclosing call gets
@@ -423,7 +563,9 @@ evaluateIf depth = \case
       Symbol "False" -> case remaining of
         falseBranch : _ -> evaluateAt (depth + 1) falseBranch
         [] -> Right (Symbol "Null")
-      _ -> Right (Call (Symbol "If") (evaluatedCondition : trueBranch : remaining))
+      _ -> case remaining of
+        _falseBranch : unknownBranch : _ -> evaluateAt (depth + 1) unknownBranch
+        _ -> Right (Call (Symbol "If") (evaluatedCondition : trueBranch : remaining))
   arguments' -> Right (Call (Symbol "If") arguments')
 
 evaluateAnd :: Int -> [Expr] -> Either EvaluationError Expr
@@ -456,6 +598,8 @@ evaluateOr depth = go []
 
 reduceCall :: Expr -> Either EvaluationError Expr
 reduceCall expression = case expression of
+  Call (Symbol "System`Array") values ->
+    Right (Call (Symbol "System`Array") values)
   Call sparse@SparseArray {} values ->
     reduceSparseArrayProperty sparse values
   Call failure@(Call (Symbol failureHead) _) values
@@ -470,6 +614,34 @@ reduceCall expression = case expression of
     reduceBuiltin "SortBy" [subject, function]
   Call (Call (Symbol "ReverseSortBy") [function]) [subject] ->
     reduceBuiltin "ReverseSortBy" [subject, function]
+  Call (Call (Symbol "Comap") [functions]) values -> case values of
+    [subject] -> reduceComap False [functions, subject]
+    _ ->
+      Left
+        ( EvaluationError
+            "Comap[functions] expects exactly one argument when used as an operator."
+        )
+  Call (Call (Symbol "ComapApply") [functions]) values -> case values of
+    [subject] -> reduceComap True [functions, subject]
+    _ ->
+      Left
+        ( EvaluationError
+            "ComapApply[functions] expects exactly one argument when used as an operator."
+        )
+  Call (Call (Symbol "MapAll") [function]) values -> case values of
+    [subject] -> reduceMapAll [function, subject]
+    _ ->
+      Left
+        ( EvaluationError
+            "MapAll[f] expects exactly one argument when used as an operator."
+        )
+  Call (Call (Symbol "MapApply") [function]) values -> case values of
+    [subject] -> reduceMapApply [function, subject]
+    _ ->
+      Left
+        ( EvaluationError
+            "MapApply[f] expects exactly one argument when used as an operator."
+        )
   Call (Call (Symbol "Select") [criterion]) [subject] ->
     reduceBuiltin "Select" [subject, criterion]
   Call (Call (Symbol "Discard") [criterion]) [subject] ->
@@ -503,7 +675,9 @@ pureReducerDispatchView expression = case expression of
   Call (Symbol originalHead) values
     | isSystemSymbol originalHead
     , Just shortName <- normalizeSystemSymbolName originalHead
-    , originalHead /= shortName ->
+    , originalHead /= shortName
+    , shortName
+        `notElem` ["Distribute", "Inner", "Operate", "Outer", "Thread", "Through", "Tr"] ->
         let barrierName = pureReducerBarrierName shortName expression
             dispatchedValues =
               map (shieldPureReducerArgument shortName barrierName) values
@@ -595,7 +769,10 @@ restorePureQualifiedOperatorHead qualifiedName shortName = \case
 
 preservesFinalReducerResult :: Expr -> Bool
 preservesFinalReducerResult = \case
-  Symbol headName -> systemHeadIn ["Sqrt", "Level"] headName
+  Symbol headName ->
+    systemHeadIn
+      ["ComplexExpand", "Sqrt", "Distribute", "Inner", "Level", "Operate", "Outer", "Thread", "Through", "Tr"]
+      headName
   _ -> False
 
 -- | Reduce one call whose head and arguments have already been evaluated and
@@ -606,9 +783,71 @@ reduceEvaluatedCall = reduceCall
 
 reduceBuiltin :: Text -> [Expr] -> Either EvaluationError Expr
 reduceBuiltin headName values = case headName of
+  "Rational" -> Right (reduceRationalConstructor values)
+  "Complex" -> Right (reduceComplexConstructor values)
+  "Overflow" -> Right (reduceSpecialRealConstructor OverflowReal values)
+  "Underflow" -> Right (reduceSpecialRealConstructor UnderflowReal values)
+  "Precision" -> Right (reducePrecision values)
+  "Accuracy" -> Right (reduceAccuracy values)
+  "N" -> Right (numericPrecisionResult headName values)
+  "SetPrecision" -> Right (numericPrecisionResult headName values)
+  "SetAccuracy" -> Right (numericPrecisionResult headName values)
+  "Exp" -> Right (numericTranscendentalResult headName values)
+  "Log" -> Right (numericTranscendentalResult headName values)
+  "Sin" -> Right (numericTranscendentalResult headName values)
+  "Cos" -> Right (numericTranscendentalResult headName values)
+  "Tan" -> Right (numericTranscendentalResult headName values)
+  "Cot" -> Right (numericTranscendentalResult headName values)
+  "Sec" -> Right (numericTranscendentalResult headName values)
+  "Csc" -> Right (numericTranscendentalResult headName values)
+  "ArcSin" -> Right (numericTranscendentalResult headName values)
+  "ArcCos" -> Right (numericTranscendentalResult headName values)
+  "ArcTan" -> Right (numericTranscendentalResult headName values)
+  "ArcCot" -> Right (numericTranscendentalResult headName values)
+  "ArcSec" -> Right (numericTranscendentalResult headName values)
+  "ArcCsc" -> Right (numericTranscendentalResult headName values)
+  "Sinh" -> Right (numericTranscendentalResult headName values)
+  "Cosh" -> Right (numericTranscendentalResult headName values)
+  "Tanh" -> Right (numericTranscendentalResult headName values)
+  "Coth" -> Right (numericTranscendentalResult headName values)
+  "Sech" -> Right (numericTranscendentalResult headName values)
+  "Csch" -> Right (numericTranscendentalResult headName values)
+  "ArcSinh" -> Right (numericTranscendentalResult headName values)
+  "ArcCosh" -> Right (numericTranscendentalResult headName values)
+  "ArcTanh" -> Right (numericTranscendentalResult headName values)
+  "ArcCoth" -> Right (numericTranscendentalResult headName values)
+  "ArcSech" -> Right (numericTranscendentalResult headName values)
+  "ArcCsch" -> Right (numericTranscendentalResult headName values)
+  "Haversine" -> Right (numericTranscendentalResult headName values)
+  "InverseHaversine" -> Right (numericTranscendentalResult headName values)
+  "Gudermannian" -> Right (numericTranscendentalResult headName values)
+  "InverseGudermannian" -> Right (numericTranscendentalResult headName values)
+  "SinDegrees" -> Right (numericTranscendentalResult headName values)
+  "CosDegrees" -> Right (numericTranscendentalResult headName values)
+  "TanDegrees" -> Right (numericTranscendentalResult headName values)
+  "CotDegrees" -> Right (numericTranscendentalResult headName values)
+  "SecDegrees" -> Right (numericTranscendentalResult headName values)
+  "CscDegrees" -> Right (numericTranscendentalResult headName values)
+  "ArcSinDegrees" -> Right (numericTranscendentalResult headName values)
+  "ArcCosDegrees" -> Right (numericTranscendentalResult headName values)
+  "ArcTanDegrees" -> Right (numericTranscendentalResult headName values)
+  "ArcCotDegrees" -> Right (numericTranscendentalResult headName values)
+  "ArcSecDegrees" -> Right (numericTranscendentalResult headName values)
+  "ArcCscDegrees" -> Right (numericTranscendentalResult headName values)
+  "Distribute" -> reduceDistribute values
+  "Inner" -> reduceInner values
+  "Outer" -> reduceOuter values
+  "Re" -> Right (reduceComplexComponent "Re" values)
+  "Im" -> Right (reduceComplexComponent "Im" values)
+  "ReIm" -> Right (reduceReIm values)
+  "Arg" -> Right (reduceArg values)
+  "Conjugate" -> Right (reduceConjugate values)
+  "ComplexExpand" -> Right (reduceComplexExpand values)
   "Plus" -> reduceSparseArithmetic "Plus" values
   "Times" -> reduceSparseArithmetic "Times" values
   "Power" -> Right (reducePower values)
+  "Simplify" -> Right (reduceNumericSimplify headName values)
+  "FullSimplify" -> Right (reduceNumericSimplify headName values)
   "Factorial" -> Right (reduceFactorial values)
   "Factorial2" -> Right (reduceFactorial2 values)
   "Abs" -> Right (reduceAbs values)
@@ -618,6 +857,7 @@ reduceBuiltin headName values = case headName of
   "Round" -> Right (reduceRounding RoundNearest headName values)
   "IntegerPart" -> Right (reduceRounding RoundIntegerPart headName values)
   "FractionalPart" -> Right (reduceRounding RoundFractionalPart headName values)
+  "Mod" -> Right (reduceNumericMod values)
   "Clip" -> reduceClip values
   "Sqrt" -> Right (reduceSqrt values)
   "Not" -> Right (reduceNot values)
@@ -625,13 +865,15 @@ reduceBuiltin headName values = case headName of
   "Unequal" -> Right (reduceEquality False values)
   "SameQ" -> Right (boolean (allEqual values))
   "UnsameQ" -> Right (boolean (allDistinct values))
-  "Less" -> Right (reduceOrdering (<) headName values)
-  "LessEqual" -> Right (reduceOrdering (<=) headName values)
-  "Greater" -> Right (reduceOrdering (>) headName values)
-  "GreaterEqual" -> Right (reduceOrdering (>=) headName values)
+  "Less" -> Right (reduceOrdering (== LT) headName values)
+  "LessEqual" -> Right (reduceOrdering (/= GT) headName values)
+  "Greater" -> Right (reduceOrdering (== GT) headName values)
+  "GreaterEqual" -> Right (reduceOrdering (/= LT) headName values)
   "Inequality" -> Right (reduceInequality values)
   "Head" -> Right (unary headName headExpr values)
-  "Length" -> Right (unary headName expressionLength values)
+  "Length" -> case values of
+    [value] -> Right (expressionLength value)
+    _ -> Left (EvaluationError "Length expects exactly one argument.")
   "Depth" -> Right (unary headName (Integer . fromIntegral . expressionDepth) values)
   "Dimensions" -> reduceDimensions values
   "ArrayDepth" -> reduceArrayDepth values
@@ -645,8 +887,17 @@ reduceBuiltin headName values = case headName of
   "AssociationQ" -> Right (unary headName (boolean . isAssociation) values)
   "Identity" -> Right (unary headName id values)
   "IntegerQ" -> Right (unary headName (boolean . isInteger) values)
-  "NumberQ" -> Right (unary headName (boolean . isNumber) values)
+  "MachineIntegerQ" -> Right (transparentUnaryPredicate headName isMachineInteger values)
+  "MachineNumberQ" -> Right (transparentUnaryPredicate headName isMachineNumber values)
+  "NumberQ" -> Right (transparentUnaryPredicate headName isNumericValue values)
+  "NumericQ" -> Right (unary headName (boolean . isNumericValue) values)
+  "ExactNumberQ" -> Right (transparentUnaryPredicate headName isExactNumber values)
+  "InexactNumberQ" -> Right (transparentUnaryPredicate headName isInexactNumber values)
+  "RealValuedNumberQ" -> Right (transparentUnaryPredicate headName isRealValuedNumber values)
+  "TrueQ" -> Right (unary headName (boolean . isTrueSymbol) values)
   "StringQ" -> Right (unary headName (boolean . isString) values)
+  "DigitQ" -> Right (unary headName (boolean . textSatisfies isDigit) values)
+  "LetterQ" -> Right (unary headName (boolean . textSatisfies isLetter) values)
   "FailureQ" -> Right (unary headName (boolean . isFailureQValue) values)
   "MissingQ" -> Right (unary headName (boolean . isMissingValue) values)
   "ByteArray" -> reduceByteArray values
@@ -696,10 +947,10 @@ reduceBuiltin headName values = case headName of
   "StringReplace" -> reduceStringReplace values
   "EvenQ" -> Right (reduceParity True headName values)
   "OddQ" -> Right (reduceParity False headName values)
-  "First" -> Right (reduceFirstLast True headName values)
-  "Last" -> Right (reduceFirstLast False headName values)
-  "Rest" -> Right (reduceRestMost True headName values)
-  "Most" -> Right (reduceRestMost False headName values)
+  "First" -> reduceFirstLast True headName values
+  "Last" -> reduceFirstLast False headName values
+  "Rest" -> reduceRestMost True headName values
+  "Most" -> reduceRestMost False headName values
   "Part" -> reducePart values
   "Extract" -> reduceExtract values
   "Level" -> reduceLevel values
@@ -755,6 +1006,7 @@ reduceBuiltin headName values = case headName of
   "PadRight" -> reducePad False values
   "Min" -> Right (reduceMinMax True headName values)
   "Max" -> Right (reduceMinMax False headName values)
+  "UnitStep" -> Right (reduceUnitStep values)
   "Mean" -> reduceMean values
   "Median" -> reduceMedian values
   "Variance" -> reduceVariance values
@@ -771,7 +1023,7 @@ reduceBuiltin headName values = case headName of
   "Quartiles" -> reduceQuartiles values
   "BinCounts" -> reduceBins False values
   "BinLists" -> reduceBins True values
-  "Order" -> Right (reduceOrder values)
+  "Order" -> reduceOrder values
   "OrderedQ" -> reduceOrderedQ values
   "Ordering" -> reduceOrderingIndices values
   "Sort" -> reduceSort False values
@@ -810,8 +1062,8 @@ reduceBuiltin headName values = case headName of
   "PositionIndex" -> reducePositionIndex values
   "Range" -> Right (reduceRange values)
   "Total" -> Right (reduceTotal values)
-  "Accumulate" -> Right (reduceAccumulate values)
-  "Reverse" -> Right (unaryCallArguments headName reverse values)
+  "Accumulate" -> reduceAccumulate values
+  "Reverse" -> reduceReverse values
   "RotateLeft" -> Right (reduceRotate True headName values)
   "RotateRight" -> Right (reduceRotate False headName values)
   "Take" -> reduceTakeDrop True values
@@ -839,28 +1091,85 @@ reduceBuiltin headName values = case headName of
   "SequenceCount" -> reduceSequenceSearch SequenceCount values
   "Dot" -> reduceDot values
   "Cross" -> reduceCross values
+  "Tr" -> reduceTr values
   "Det" -> reduceDet values
   "Inverse" -> reduceInverse values
   "MatrixPower" -> reduceMatrixPower values
-  "Append" -> Right (reduceAppendPrepend False headName values)
-  "Prepend" -> Right (reduceAppendPrepend True headName values)
-  "Join" -> Right (reduceJoin values)
+  "Append" -> reduceAppendPrepend False headName values
+  "Prepend" -> reduceAppendPrepend True headName values
+  "Join" -> reduceJoin values
   "Flatten" -> reduceFlatten values
   "Delete" -> reduceDelete values
   "Insert" -> reduceInsert values
-  "ReplacePart" -> Right (reduceReplacePart values)
+  "ReplacePart" -> reduceReplacePart values
   "Map" -> Right (reduceMap values)
+  "Operate" -> reduceOperate values
+  "Thread" -> reduceThread values
+  "Through" -> reduceThrough values
+  "MapAll" -> reduceMapAll values
+  "MapApply" -> reduceMapApply values
   "MapAt" -> Right (reduceMapAt values)
   "Apply" -> Right (reduceApply values)
+  "Construct" -> reduceConstruct values
+  "ComposeList" -> reduceComposeList values
+  "Comap" -> reduceComap False values
+  "ComapApply" -> reduceComap True values
+  "Nest" -> reduceNest False values
+  "NestList" -> reduceNest True values
+  "NestWhile" -> reduceNestWhile False values
+  "NestWhileList" -> reduceNestWhile True values
+  "FixedPoint" -> reduceFixedPoint False values
+  "FixedPointList" -> reduceFixedPoint True values
+  "Fold" -> reduceFold False values
+  "FoldList" -> reduceFold True values
+  "FoldWhile" -> reduceFoldWhile False values
+  "FoldWhileList" -> reduceFoldWhile True values
+  "FoldPair" -> reduceFoldPair False values
+  "FoldPairList" -> reduceFoldPair True values
   "Replace" -> reduceReplace values
   "ReplaceAt" -> reduceReplaceAt values
   "ReplaceAll" -> reduceReplaceAll values
   "ReplaceRepeated" -> reduceReplaceRepeated values
   "CompoundExpression" -> Right (if null values then Symbol "Null" else last values)
-  _ -> case NumericAlgebra.reduceNumericBuiltin headName values of
-    Left message -> Left (EvaluationError message)
-    Right (Just result) -> Right result
-    Right Nothing -> Right (Call (Symbol headName) values)
+  _ -> case NumericPrecision.exactNumericCallReduction headName values of
+    Just result -> Right result
+    Nothing -> case NumericPrecision.approximateInexactNumericCall headName values of
+      Just result -> Right result
+      Nothing -> case NumericAlgebra.reduceNumericBuiltin headName values of
+        Left message -> Left (EvaluationError message)
+        Right (Just result) -> Right result
+        Right Nothing ->
+          Right
+            ( maybe
+                ( maybe
+                    (Call (Symbol headName) values)
+                    id
+                    ( AlgebraicRoots.reduceAlgebraicRootBuiltin
+                        algebraicRootContext
+                        headName
+                        values
+                    )
+                )
+                id
+                (PolynomialAlgebra.reducePolynomialBuiltin canonicalCompare headName values)
+            )
+
+numericPrecisionResult :: Text -> [Expr] -> Expr
+numericPrecisionResult headName values =
+  maybe
+    (Call (Symbol headName) values)
+    id
+    (NumericPrecision.reduceNumericPrecisionBuiltin headName values)
+
+numericTranscendentalResult :: Text -> [Expr] -> Expr
+numericTranscendentalResult headName values =
+  case NumericPrecision.exactNumericCallReduction headName values of
+    Just result -> result
+    Nothing ->
+      maybe
+        (Call (Symbol headName) values)
+        id
+        (NumericPrecision.approximateInexactNumericCall headName values)
 
 data Exact = Exact !Integer !Integer
   deriving (Eq, Ord, Show)
@@ -875,10 +1184,17 @@ data RoundingOperation
 
 data RealKind
   = MachineReal
-  | MarkedReal !Integer
+  | PrecisionReal !Integer
+  | AccuracyReal !Integer
   deriving (Eq, Show)
 
 data RealInfo = RealInfo !Exact !RealKind !Int !Bool !Text
+  deriving (Eq, Show)
+
+data PrecisionValue
+  = InfinitePrecision
+  | MachinePrecisionValue
+  | FinitePrecision !Double
   deriving (Eq, Show)
 
 -- | Expand an inclusive exact integer/rational range.  Iterator evaluation
@@ -943,16 +1259,34 @@ reduceRounding operation headName values =
       | Just result <- roundScalar operation value -> result
     [value, multiple]
       | operation `elem` [RoundFloor, RoundCeiling, RoundNearest]
-      , Just exactValue <- toExact value
-      , Just exactMultiple@(Exact multipleNumerator _) <- toExact multiple ->
-          if multipleNumerator == 0
+      , Just multipleValue <- explicitRealExact multiple ->
+          if multipleValue == Exact 0 1
             then Symbol "Indeterminate"
-            else case divideExact exactValue exactMultiple of
-              Just quotient ->
-                fromExact
-                  (multiplyExact exactMultiple (Exact (roundExact operation quotient) 1))
+            else case roundingQuotient operation value multiple of
+              Just rounded -> reduceExplicitRealTimes [multiple, Integer rounded]
               Nothing -> Call (Symbol headName) values
     _ -> Call (Symbol headName) values
+
+roundingQuotient :: RoundingOperation -> Expr -> Expr -> Maybe Integer
+roundingQuotient operation value multiple
+  | Just exactValue <- toExact value
+  , Just exactMultiple <- toExact multiple =
+      roundExact operation <$> divideExact exactValue exactMultiple
+  | otherwise = do
+      valueDouble <- explicitRealDouble value
+      multipleDouble <- explicitRealDouble multiple
+      let quotient = valueDouble / multipleDouble
+      if isNaN quotient || isInfinite quotient
+        then Nothing
+        else
+          Just
+            ( case operation of
+                RoundFloor -> floor quotient
+                RoundCeiling -> ceiling quotient
+                RoundNearest -> round quotient
+                RoundIntegerPart -> truncate quotient
+                RoundFractionalPart -> truncate quotient
+            )
 
 reduceClip :: [Expr] -> Either EvaluationError Expr
 reduceClip arguments' = case arguments' of
@@ -972,32 +1306,30 @@ reduceClip arguments' = case arguments' of
           "Clip currently expects bounds of the form {min, max}."
       )
   clip value lower upper replacements = do
-    exactValue <-
-      maybe
-        ( Left
-            ( EvaluationError
-                "Clip currently evaluates only for explicit real numeric arguments."
-            )
-        )
-        Right
-        (explicitRealExact value)
-    exactLower <- explicitBound lower
-    exactUpper <- explicitBound upper
-    if compareExact exactValue exactLower == LT
+    if isOrderableReal value
+      then Right ()
+      else Left (EvaluationError valueError)
+    _ <- explicitBound lower
+    _ <- explicitBound upper
+    lowerOrdering <- realOrdering value lower valueError
+    upperOrdering <- realOrdering value upper valueError
+    if lowerOrdering == LT
       then replacementAt 0 replacements lower
       else
-        if compareExact exactValue exactUpper == GT
+        if upperOrdering == GT
           then replacementAt 1 replacements upper
           else Right value
-  explicitBound value =
-    maybe
-      ( Left
-          ( EvaluationError
-              "Clip currently evaluates only for explicit real numeric bounds."
-          )
-      )
-      Right
-      (explicitRealExact value)
+  valueError =
+    "Clip currently evaluates only for explicit real numeric arguments."
+  realOrdering left right message =
+    maybe (Left (EvaluationError message)) Right (compareOrderableReal left right)
+  explicitBound value
+    | isOrderableReal value = Right ()
+    | otherwise =
+      Left
+        ( EvaluationError
+            "Clip currently evaluates only for explicit real numeric bounds."
+        )
   replacementAt :: Int -> Maybe Expr -> Expr -> Either EvaluationError Expr
   replacementAt _ Nothing boundary = Right boundary
   replacementAt index (Just (Call (Symbol "List") [lowerReplacement, upperReplacement])) _ =
@@ -1023,34 +1355,101 @@ roundScalar _ _ = Nothing
 
 explicitComplexParts :: Expr -> Maybe (Expr, Expr)
 explicitComplexParts (Complex realPart imaginaryPart) = Just (realPart, imaginaryPart)
-explicitComplexParts (Symbol "I") = Just (Integer 0, Integer 1)
+explicitComplexParts (Symbol name)
+  | systemHeadIn ["I"] name = Just (Integer 0, Integer 1)
 explicitComplexParts expression
-  | Just coefficient <- imaginaryCoefficient expression = Just (Integer 0, coefficient)
-explicitComplexParts (Call (Symbol "Plus") [left, right])
-  | isExplicitReal left
-  , Just coefficient <- imaginaryCoefficient right = Just (left, coefficient)
-  | Just coefficient <- imaginaryCoefficient left
-  , isExplicitReal right = Just (right, coefficient)
+  | isExplicitReal expression || isSpecialRealValue expression =
+      Just (expression, Integer 0)
+explicitComplexParts (Call (Symbol headName) values)
+  | systemHeadIn ["Plus"] headName = do
+      components <- traverse explicitComplexParts values
+      pure (foldl' addComplexComponents (Integer 0, Integer 0) components)
+  | systemHeadIn ["Times"] headName = do
+      components <- traverse explicitComplexParts values
+      pure (foldl' multiplyComplexComponents (Integer 1, Integer 0) components)
+explicitComplexParts (Call (Symbol headName) [base, Integer powerValue])
+  | systemHeadIn ["Power"] headName
+  , powerValue >= 0
+  , powerValue <= 1024 = do
+      components <- explicitComplexParts base
+      pure (powerComplexComponents components powerValue)
 explicitComplexParts _ = Nothing
 
-imaginaryCoefficient :: Expr -> Maybe Expr
-imaginaryCoefficient (Symbol "I") = Just (Integer 1)
-imaginaryCoefficient (Call (Symbol "Times") [coefficient, Symbol "I"])
-  | isExplicitReal coefficient = Just coefficient
-imaginaryCoefficient (Call (Symbol "Times") [Symbol "I", coefficient])
-  | isExplicitReal coefficient = Just coefficient
-imaginaryCoefficient (Call (Symbol "Times") [coefficient, imaginaryUnit])
-  | isExplicitReal coefficient
-  , isExplicitImaginaryUnit imaginaryUnit = Just coefficient
-imaginaryCoefficient (Call (Symbol "Times") [imaginaryUnit, coefficient])
-  | isExplicitImaginaryUnit imaginaryUnit
-  , isExplicitReal coefficient = Just coefficient
-imaginaryCoefficient _ = Nothing
+addComplexComponents :: (Expr, Expr) -> (Expr, Expr) -> (Expr, Expr)
+addComplexComponents (leftReal, leftImaginary) (rightReal, rightImaginary) =
+  ( reduceExplicitRealPlus [leftReal, rightReal]
+  , reduceExplicitRealPlus [leftImaginary, rightImaginary]
+  )
 
-isExplicitImaginaryUnit :: Expr -> Bool
-isExplicitImaginaryUnit (Complex realPart imaginaryPart) =
-  exactZero realPart && exactOne imaginaryPart
-isExplicitImaginaryUnit _ = False
+multiplyComplexComponents :: (Expr, Expr) -> (Expr, Expr) -> (Expr, Expr)
+multiplyComplexComponents (leftReal, leftImaginary) (rightReal, rightImaginary) =
+  ( reduceExplicitRealPlus
+      [ reduceExplicitRealTimes [leftReal, rightReal]
+      , negateExplicitReal
+          (reduceExplicitRealTimes [leftImaginary, rightImaginary])
+      ]
+  , reduceExplicitRealPlus
+      [ reduceExplicitRealTimes [leftReal, rightImaginary]
+      , reduceExplicitRealTimes [leftImaginary, rightReal]
+      ]
+  )
+
+powerComplexComponents :: (Expr, Expr) -> Integer -> (Expr, Expr)
+powerComplexComponents base powerValue = go (Integer 1, Integer 0) base powerValue
+ where
+  go result _ 0 = result
+  go result factor 1 = multiplyComplexComponents result factor
+  go result factor remaining
+    | odd remaining =
+        go
+          (multiplyComplexComponents result factor)
+          (multiplyComplexComponents factor factor)
+          (remaining `div` 2)
+    | otherwise =
+        go result (multiplyComplexComponents factor factor) (remaining `div` 2)
+
+reduceExplicitRealPlus :: [Expr] -> Expr
+reduceExplicitRealPlus values
+  | any isMachineReal values
+  , Just machineValues <- traverse explicitRealDouble values =
+      Real (formatMachineReal (sum machineValues))
+  | otherwise = reducePlus values
+
+reduceExplicitRealTimes :: [Expr] -> Expr
+reduceExplicitRealTimes values
+  | any isMachineReal values
+  , Just machineValues <- traverse explicitRealDouble values =
+      Real (formatMachineReal (product machineValues))
+  | otherwise = reduceTimes values
+
+explicitRealDouble :: Expr -> Maybe Double
+explicitRealDouble value
+  | Just (Exact numerator denominator) <- toExact value =
+      Just (fromInteger numerator / fromInteger denominator)
+explicitRealDouble (Real source) = do
+  RealInfo _ _ _ _ machineSource <- parseRealInfo source
+  readMaybe (T.unpack machineSource)
+explicitRealDouble _ = Nothing
+
+negateExplicitReal :: Expr -> Expr
+negateExplicitReal value
+  | Just exactValue <- toExact value = fromExact (negateExact exactValue)
+negateExplicitReal value@(Real source)
+  | explicitRealExact value == Just (Exact 0 1) = Real (positiveRealZeroSource source)
+  | otherwise = Real (negateRealSource source)
+negateExplicitReal value = reduceTimes [Integer (-1), value]
+
+positiveRealZeroSource :: Text -> Text
+positiveRealZeroSource source = case T.uncons source of
+  Just ('-', rest) -> rest
+  Just ('+', rest) -> rest
+  _ -> source
+
+negateRealSource :: Text -> Text
+negateRealSource source = case T.uncons source of
+  Just ('-', rest) -> rest
+  Just ('+', rest) -> "-" <> rest
+  _ -> "-" <> source
 
 isExplicitReal :: Expr -> Bool
 isExplicitReal value
@@ -1067,6 +1466,1272 @@ makeComplex realPart imaginaryPart
       Complex (toMachineReal realPart) (toMachineReal imaginaryPart)
   | otherwise = Complex realPart imaginaryPart
 
+reduceComplexComponent :: Text -> [Expr] -> Expr
+reduceComplexComponent component values = case values of
+  [value]
+    | Just (realPart, imaginaryPart) <- explicitComplexParts value ->
+        if component == "Re" then realPart else imaginaryPart
+  _ -> Call (Symbol component) values
+
+reduceReIm :: [Expr] -> Expr
+reduceReIm values = case values of
+  [value]
+    | Just (realPart, imaginaryPart) <- broadComplexParts value ->
+        evaluatedList [realPart, imaginaryPart]
+  _ -> Call (Symbol "ReIm") values
+
+reduceConjugate :: [Expr] -> Expr
+reduceConjugate values = case values of
+  [value]
+    | Just (realPart, imaginaryPart) <- explicitComplexParts value ->
+        makeComplex realPart (negateExplicitReal imaginaryPart)
+  [value]
+    | Just reduced <-
+        AlgebraicRoots.reduceAlgebraicRootBuiltin
+          algebraicRootContext
+          "RootReduce"
+          [Call (Symbol "Conjugate") [value]] ->
+        reduced
+  _ -> Call (Symbol "Conjugate") values
+
+reduceArg :: [Expr] -> Expr
+reduceArg values = case values of
+  [value]
+    | Just (realPart, imaginaryPart) <- broadComplexParts value
+    , Just result <- argFromComponents realPart imaginaryPart -> result
+  _ -> Call (Symbol "Arg") values
+
+reduceComplexExpand :: [Expr] -> Expr
+reduceComplexExpand values = case values of
+  [value] ->
+    maybe
+      (Call (Symbol "ComplexExpand") values)
+      id
+      (complexExpandScalar value)
+  _ -> Call (Symbol "ComplexExpand") values
+
+complexExpandScalar :: Expr -> Maybe Expr
+complexExpandScalar (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead =
+      evaluatedList <$> traverse complexExpandScalar values
+complexExpandScalar value@(Call (Symbol headName) [argument])
+  | systemHeadIn ["ArcSin"] headName
+  , Just exactArgument <- explicitRealExact argument
+  , compareExact exactArgument (Exact (-1) 1) == LT = do
+      (realPart, imaginaryPart) <- complexExpandComponents value
+      pure
+        ( Call
+            (Symbol "Plus")
+            [ complexExpandSimplify realPart
+            , complexExpandImaginaryTerm
+                (complexExpandSimplify imaginaryPart)
+            ]
+        )
+complexExpandScalar value = do
+  (realPart, imaginaryPart) <- complexExpandComponents value
+  pure (complexExpandFromComponents realPart imaginaryPart)
+
+complexExpandComponents :: Expr -> Maybe (Expr, Expr)
+complexExpandComponents value
+  | Just components <- explicitComplexParts value = Just components
+complexExpandComponents rootValue@Root {} =
+  complexExpandRootComponents rootValue
+complexExpandComponents callValue@(Call (Symbol originalHead) values)
+  | numericValueReality callValue == Just True
+  , dispatchedHead
+      `notElem` ["Abs", "Arg", "Conjugate", "Im", "Re"] =
+      Just (callValue, Integer 0)
+  | otherwise = case dispatchedHead of
+    "Plus" -> do
+      components <- traverse complexExpandComponents values
+      pure
+        ( complexExpandSimplify
+            (Call (Symbol "Plus") (map fst components))
+        , complexExpandSimplify
+            (Call (Symbol "Plus") (map snd components))
+        )
+    "Times" -> do
+      components <- traverse complexExpandComponents values
+      pure
+        ( foldl'
+            complexExpandMultiplyComponents
+            (Integer 1, Integer 0)
+            components
+        )
+    "Power" -> case values of
+      [base, exponentValue] ->
+        complexExpandPowerComponents base exponentValue
+      _ -> Nothing
+    "Sqrt" -> case values of
+      [argument] -> do
+        (realPart, imaginaryPart) <- complexExpandComponents argument
+        pure (complexExpandSqrtComponents realPart imaginaryPart)
+      _ -> Nothing
+    "Re" -> case values of
+      [argument] -> do
+        (realPart, _) <- complexExpandComponents argument
+        pure (realPart, Integer 0)
+      _ -> Nothing
+    "Im" -> case values of
+      [argument] -> do
+        (_, imaginaryPart) <- complexExpandComponents argument
+        pure (imaginaryPart, Integer 0)
+      _ -> Nothing
+    "Conjugate" -> case values of
+      [argument] -> do
+        (realPart, imaginaryPart) <- complexExpandComponents argument
+        pure (realPart, complexExpandNegate imaginaryPart)
+      _ -> Nothing
+    "Abs" -> case values of
+      [argument] -> do
+        (realPart, imaginaryPart) <- complexExpandComponents argument
+        pure (complexExpandAbsFromComponents realPart imaginaryPart, Integer 0)
+      _ -> Nothing
+    "Arg" -> case values of
+      [argument] -> do
+        (realPart, imaginaryPart) <- complexExpandComponents argument
+        argumentValue <- argFromComponents realPart imaginaryPart
+        pure (argumentValue, Integer 0)
+      _ -> Nothing
+    "Exp" -> case values of
+      [argument] -> complexExpandExponentialComponents argument
+      _ -> Nothing
+    "Log" -> complexExpandLogComponents values
+    "ArcSin" -> case values of
+      [argument]
+        | Just components <- complexExpandArcSinRealComponents argument ->
+            Just components
+      _ -> do
+        rewritten <- complexExpandRewriteElementaryCall dispatchedHead values
+        complexExpandComponents rewritten
+    "Tan"
+      | "System`" `T.isPrefixOf` originalHead -> case values of
+          [argument] -> do
+            (_, imaginaryPart) <- complexExpandComponents argument
+            rewritten <-
+              complexExpandRewriteElementaryCall dispatchedHead values
+            if complexExpandIsZero imaginaryPart
+              then Just (rewritten, Integer 0)
+              else complexExpandComponents rewritten
+          _ -> Nothing
+    directHead
+      | directHead `elem` ["Sin", "Cos", "Tan", "Sinh", "Cosh"] ->
+          case values of
+            [argument] -> complexExpandDirectFunctionComponents directHead argument
+            _ -> Nothing
+    headName -> do
+      rewritten <- complexExpandRewriteElementaryCall headName values
+      complexExpandComponents rewritten
+ where
+  dispatchedHead = complexExpandDispatchHead originalHead
+complexExpandComponents value
+  | numericValueReality value == Just True = Just (value, Integer 0)
+complexExpandComponents _ = Nothing
+
+complexExpandDispatchHead :: Text -> Text
+complexExpandDispatchHead originalHead
+  | isSystemSymbol originalHead =
+      maybe originalHead id (normalizeSystemSymbolName originalHead)
+  | otherwise = originalHead
+
+complexExpandRootComponents :: Expr -> Maybe (Expr, Expr)
+complexExpandRootComponents rootValue@(Root coefficients rootIndex _)
+  | rootValueIsReal rootValue = Just (rootValue, Integer 0)
+  | length coefficients == 3
+  , rootIndex `elem` [0, 1]
+  , let constant = coefficients !! 0
+        linear = coefficients !! 1
+        quadratic = coefficients !! 2
+        discriminant = linear * linear - 4 * quadratic * constant
+  , quadratic /= 0
+  , discriminant < 0 =
+      let realPart =
+            fromExact (normalizeExact (negate linear) (2 * quadratic))
+          imaginaryMagnitude =
+            complexExpandSimplify
+              ( Call
+                  (Symbol "Times")
+                  [ fromExact
+                      ( normalizeExact
+                          1
+                          (2 * abs quadratic)
+                      )
+                  , Call
+                      (Symbol "Power")
+                      [ Integer (negate discriminant)
+                      , Rational 1 2
+                      ]
+                  ]
+              )
+          imaginaryPart =
+            if rootIndex == 0
+              then complexExpandNegate imaginaryMagnitude
+              else imaginaryMagnitude
+       in Just (realPart, imaginaryPart)
+  | otherwise = Nothing
+complexExpandRootComponents _ = Nothing
+
+complexExpandPowerComponents :: Expr -> Expr -> Maybe (Expr, Expr)
+complexExpandPowerComponents base@(Symbol baseName) exponentValue
+  | systemHeadIn ["E"] baseName
+  , pureImaginaryIntegralPiMultiple exponentValue =
+      Just
+        ( Call (Symbol "Power") [base, exponentValue]
+        , Integer 0
+        )
+complexExpandPowerComponents base (Integer exponentValue)
+  | exponentValue == 0 = Just (Integer 1, Integer 0)
+  | exponentValue < 0 = do
+      positive <- complexExpandPowerComponents base (Integer (negate exponentValue))
+      pure
+        ( complexExpandDivideComponents
+            (Integer 1, Integer 0)
+            positive
+        )
+  | otherwise = do
+      factor <- complexExpandComponents base
+      pure (raise (Integer 1, Integer 0) factor exponentValue)
+ where
+  raise result _ 0 = result
+  raise result factor remaining
+    | odd remaining =
+        raise
+          (complexExpandMultiplyComponents result factor)
+          (complexExpandMultiplyComponents factor factor)
+          (remaining `div` 2)
+    | otherwise =
+        raise
+          result
+          (complexExpandMultiplyComponents factor factor)
+          (remaining `div` 2)
+complexExpandPowerComponents base (Rational 1 2) = do
+  (realPart, imaginaryPart) <- complexExpandComponents base
+  pure (complexExpandSqrtComponents realPart imaginaryPart)
+complexExpandPowerComponents base exponentValue = do
+  (exponentReal, exponentImaginary) <- complexExpandComponents exponentValue
+  if complexExpandIsZero exponentImaginary
+    then
+      complexExpandComponents
+        ( Call
+            (Symbol "Exp")
+            [ Call
+                (Symbol "Times")
+                [ exponentReal
+                , Call (Symbol "Log") [base]
+                ]
+            ]
+        )
+    else Nothing
+
+pureImaginaryIntegralPiMultiple :: Expr -> Bool
+pureImaginaryIntegralPiMultiple (Call (Symbol timesHead) factors)
+  | systemHeadIn ["Times"] timesHead =
+      case factors of
+        [ Complex (Integer 0) (Integer _)
+          , Symbol constantName
+          ] -> systemHeadIn ["Pi"] constantName
+        _ -> False
+pureImaginaryIntegralPiMultiple _ = False
+
+complexExpandExponentialComponents :: Expr -> Maybe (Expr, Expr)
+complexExpandExponentialComponents argument = do
+  (realPart, imaginaryPart) <- complexExpandComponents argument
+  let scale =
+        case explicitRealExact realPart of
+          Just (Exact 0 _) -> Integer 1
+          Just (Exact 1 1) -> Symbol "E"
+          _ -> complexExpandSimplify (Call (Symbol "Exp") [realPart])
+  pure
+    ( complexExpandSimplify
+        ( Call
+            (Symbol "Times")
+            [scale, Call (Symbol "Cos") [imaginaryPart]]
+        )
+    , complexExpandSimplify
+        ( Call
+            (Symbol "Times")
+            [scale, Call (Symbol "Sin") [imaginaryPart]]
+        )
+    )
+
+complexExpandLogComponents :: [Expr] -> Maybe (Expr, Expr)
+complexExpandLogComponents [argument] = do
+  (realPart, imaginaryPart) <- complexExpandComponents argument
+  argumentValue <- complexExpandArgFromComponents realPart imaginaryPart
+  pure
+    ( complexExpandSimplify
+        ( Call
+            (Symbol "Log")
+            [complexExpandAbsFromComponents realPart imaginaryPart]
+        )
+    , argumentValue
+    )
+complexExpandLogComponents [base, argument] = do
+  numerator <- complexExpandLogComponents [argument]
+  denominator <- complexExpandLogComponents [base]
+  pure (complexExpandDivideComponents numerator denominator)
+complexExpandLogComponents _ = Nothing
+
+complexExpandDirectFunctionComponents
+  :: Text
+  -> Expr
+  -> Maybe (Expr, Expr)
+complexExpandDirectFunctionComponents functionName argument = do
+  (realPart, imaginaryPart) <- complexExpandComponents argument
+  pure $ case functionName of
+    "Sin" ->
+      ( productOf [callOne "Sin" realPart, callOne "Cosh" imaginaryPart]
+      , productOf [callOne "Cos" realPart, callOne "Sinh" imaginaryPart]
+      )
+    "Cos" ->
+      ( productOf [callOne "Cos" realPart, callOne "Cosh" imaginaryPart]
+      , productOf
+          [ Integer (-1)
+          , callOne "Sin" realPart
+          , callOne "Sinh" imaginaryPart
+          ]
+      )
+    "Tan" ->
+      let denominator =
+            sumOf
+              [ callOne "Cos" (twice realPart)
+              , callOne "Cosh" (twice imaginaryPart)
+              ]
+       in ( quotient (callOne "Sin" (twice realPart)) denominator
+          , quotient (callOne "Sinh" (twice imaginaryPart)) denominator
+          )
+    "Sinh" ->
+      ( productOf [callOne "Sinh" realPart, callOne "Cos" imaginaryPart]
+      , productOf [callOne "Cosh" realPart, callOne "Sin" imaginaryPart]
+      )
+    "Cosh" ->
+      ( productOf [callOne "Cosh" realPart, callOne "Cos" imaginaryPart]
+      , productOf [callOne "Sinh" realPart, callOne "Sin" imaginaryPart]
+      )
+    _ -> (Call (Symbol functionName) [argument], Integer 0)
+ where
+  callOne headName value = Call (Symbol headName) [value]
+  productOf = complexExpandSimplify . Call (Symbol "Times")
+  sumOf = complexExpandSimplify . Call (Symbol "Plus")
+  twice value = productOf [Integer 2, value]
+  quotient numerator denominator =
+    productOf
+      [ numerator
+      , Call (Symbol "Power") [denominator, Integer (-1)]
+      ]
+
+complexExpandArcSinRealComponents :: Expr -> Maybe (Expr, Expr)
+complexExpandArcSinRealComponents argument = do
+  exactArgument <- explicitRealExact argument
+  let sign = compareExact exactArgument (Exact 0 1)
+      magnitude =
+        if sign == LT
+          then complexExpandNegate argument
+          else argument
+  if compareExact (absoluteExact exactArgument) (Exact 1 1) /= GT
+    then Nothing
+    else
+      let logarithm =
+            complexExpandSimplify
+              ( Call
+                  (Symbol "Log")
+                  [ Call
+                      (Symbol "Plus")
+                      [ magnitude
+                      , if sign == LT
+                          then complexExpandNegate radical
+                          else radical
+                      ]
+                  ]
+              )
+          radical =
+            complexExpandRealSqrt
+              ( complexExpandSimplify
+                  ( Call
+                      (Symbol "Plus")
+                      [ Call (Symbol "Power") [magnitude, Integer 2]
+                      , Integer (-1)
+                      ]
+                  )
+              )
+          realPart =
+            complexExpandSimplify
+              ( Call
+                  (Symbol "Times")
+                  [ Rational (if sign == LT then -1 else 1) 2
+                  , Symbol "Pi"
+                  ]
+              )
+          imaginaryPart = complexExpandNegate logarithm
+       in Just (realPart, imaginaryPart)
+ where
+  absoluteExact exactValue
+    | compareExact exactValue (Exact 0 1) == LT = negateExact exactValue
+    | otherwise = exactValue
+
+complexExpandSqrtComponents :: Expr -> Expr -> (Expr, Expr)
+complexExpandSqrtComponents rawReal rawImaginary =
+  case (knownRealSign imaginaryPart, knownRealSign realPart) of
+    (Just EQ, Just realSign)
+      | realSign /= LT ->
+          (complexExpandRealSqrt realPart, Integer 0)
+      | otherwise ->
+          (Integer 0, complexExpandRealSqrt (complexExpandNegate realPart))
+    (imaginarySign, _) ->
+      let magnitude = complexExpandAbsFromComponents realPart imaginaryPart
+          realResult =
+            complexExpandRealSqrt
+              ( halfOf
+                  ( Call
+                      (Symbol "Plus")
+                      [magnitude, realPart]
+                  )
+              )
+          imaginaryMagnitude =
+            complexExpandRealSqrt
+              ( halfOf
+                  ( Call
+                      (Symbol "Plus")
+                      [magnitude, complexExpandNegate realPart]
+                  )
+              )
+          signValue = case imaginarySign of
+            Just GT -> Integer 1
+            Just _ -> Integer (-1)
+            Nothing -> Call (Symbol "Sign") [imaginaryPart]
+       in ( realResult
+          , complexExpandSimplify
+              ( Call
+                  (Symbol "Times")
+                  [signValue, imaginaryMagnitude]
+              )
+          )
+ where
+  realPart = complexExpandSimplify rawReal
+  imaginaryPart = complexExpandSimplify rawImaginary
+  halfOf value =
+    complexExpandSimplify
+      (Call (Symbol "Times") [Rational 1 2, value])
+
+complexExpandMultiplyComponents
+  :: (Expr, Expr)
+  -> (Expr, Expr)
+  -> (Expr, Expr)
+complexExpandMultiplyComponents
+  (leftReal, leftImaginary)
+  (rightReal, rightImaginary) =
+    ( complexExpandSimplify
+        ( Call
+            (Symbol "Plus")
+            [ Call (Symbol "Times") [leftReal, rightReal]
+            , Call
+                (Symbol "Times")
+                [Integer (-1), leftImaginary, rightImaginary]
+            ]
+        )
+    , complexExpandSimplify
+        ( Call
+            (Symbol "Plus")
+            [ Call (Symbol "Times") [leftReal, rightImaginary]
+            , Call (Symbol "Times") [leftImaginary, rightReal]
+            ]
+        )
+    )
+
+complexExpandDivideComponents
+  :: (Expr, Expr)
+  -> (Expr, Expr)
+  -> (Expr, Expr)
+complexExpandDivideComponents
+  (leftReal, leftImaginary)
+  (rightReal, rightImaginary) =
+    ( quotient realNumerator
+    , quotient imaginaryNumerator
+    )
+ where
+  denominator =
+    complexExpandSimplify
+      ( Call
+          (Symbol "Plus")
+          [ powerTwo rightReal
+          , powerTwo rightImaginary
+          ]
+      )
+  realNumerator =
+    complexExpandSimplify
+      ( Call
+          (Symbol "Plus")
+          [ Call (Symbol "Times") [leftReal, rightReal]
+          , Call (Symbol "Times") [leftImaginary, rightImaginary]
+          ]
+      )
+  imaginaryNumerator =
+    complexExpandSimplify
+      ( Call
+          (Symbol "Plus")
+          [ Call (Symbol "Times") [leftImaginary, rightReal]
+          , Call
+              (Symbol "Times")
+              [Integer (-1), leftReal, rightImaginary]
+          ]
+      )
+  quotient numerator =
+    complexExpandSimplify
+      ( Call
+          (Symbol "Times")
+          [ numerator
+          , Call (Symbol "Power") [denominator, Integer (-1)]
+          ]
+      )
+  powerTwo value = Call (Symbol "Power") [value, Integer 2]
+
+complexExpandAbsFromComponents :: Expr -> Expr -> Expr
+complexExpandAbsFromComponents realPart imaginaryPart =
+  complexExpandRealSqrt
+    ( complexExpandSimplify
+        ( Call
+            (Symbol "Plus")
+            [ Call (Symbol "Power") [realPart, Integer 2]
+            , Call (Symbol "Power") [imaginaryPart, Integer 2]
+            ]
+        )
+    )
+
+complexExpandArgFromComponents :: Expr -> Expr -> Maybe Expr
+complexExpandArgFromComponents realPart imaginaryPart
+  | Just exactReal <- explicitRealExact realPart
+  , Just exactImaginary <- explicitRealExact imaginaryPart
+  , let realSign = compareExact exactReal (Exact 0 1)
+        imaginarySign = compareExact exactImaginary (Exact 0 1)
+  , realSign /= EQ
+  , imaginarySign /= EQ
+  , Just ratio <-
+      divideExact
+        (absoluteExactValue exactImaginary)
+        (absoluteExactValue exactReal) =
+      let angle = Call (Symbol "ArcTan") [fromExact ratio]
+       in Just
+            ( complexExpandSimplify
+                ( case (realSign, imaginarySign) of
+                    (GT, GT) -> angle
+                    (GT, LT) -> Call (Symbol "Times") [Integer (-1), angle]
+                    (LT, GT) ->
+                      Call
+                        (Symbol "Plus")
+                        [ Symbol "Pi"
+                        , Call (Symbol "Times") [Integer (-1), angle]
+                        ]
+                    _ ->
+                      Call
+                        (Symbol "Plus")
+                        [ angle
+                        , Call (Symbol "Times") [Integer (-1), Symbol "Pi"]
+                        ]
+                )
+            )
+  | otherwise = argFromComponents realPart imaginaryPart
+
+absoluteExactValue :: Exact -> Exact
+absoluteExactValue value
+  | compareExact value (Exact 0 1) == LT = negateExact value
+  | otherwise = value
+
+complexExpandFromComponents :: Expr -> Expr -> Expr
+complexExpandFromComponents rawReal rawImaginary
+  | complexExpandIsZero imaginaryPart = realPart
+  | otherwise =
+      complexExpandSimplify
+        ( Call
+            (Symbol "Plus")
+            [ realPart
+            , complexExpandImaginaryTerm imaginaryPart
+            ]
+        )
+ where
+  realPart = complexExpandSimplify rawReal
+  imaginaryPart = complexExpandSimplify rawImaginary
+
+complexExpandImaginaryTerm :: Expr -> Expr
+complexExpandImaginaryTerm = \case
+  Integer coefficient -> Complex (Integer 0) (Integer coefficient)
+  Rational numerator denominator ->
+    Complex (Integer 0) (Rational numerator denominator)
+  Call (Symbol timesHead) (Integer coefficient : factors)
+    | systemHeadIn ["Times"] timesHead ->
+        complexExpandSimplify
+          ( Call
+              (Symbol "Times")
+              (Complex (Integer 0) (Integer coefficient) : factors)
+          )
+  Call (Symbol timesHead) (Rational numerator denominator : factors)
+    | systemHeadIn ["Times"] timesHead ->
+        complexExpandSimplify
+          ( Call
+              (Symbol "Times")
+              (Complex (Integer 0) (Rational numerator denominator) : factors)
+          )
+  value ->
+    complexExpandSimplify
+      (Call (Symbol "Times") [Complex (Integer 0) (Integer 1), value])
+
+complexExpandRealSqrt :: Expr -> Expr
+complexExpandRealSqrt value =
+  complexExpandSimplify
+    (Call (Symbol "Power") [value, Rational 1 2])
+
+complexExpandNegate :: Expr -> Expr
+complexExpandNegate value =
+  complexExpandSimplify
+    (Call (Symbol "Times") [Integer (-1), value])
+
+complexExpandIsZero :: Expr -> Bool
+complexExpandIsZero value =
+  case explicitRealExact (complexExpandSimplify value) of
+    Just (Exact numerator _) -> numerator == 0
+    Nothing -> False
+
+complexExpandSimplify :: Expr -> Expr
+complexExpandSimplify (Call (Symbol headName) [Integer 0])
+  | systemHeadIn ["Exp"] headName = Integer 1
+complexExpandSimplify (Call (Symbol headName) [Integer 1])
+  | systemHeadIn ["Exp"] headName = Symbol "E"
+  | systemHeadIn ["Log"] headName = Integer 0
+complexExpandSimplify (Call (Symbol headName) [Symbol constantName])
+  | systemHeadIn ["Log"] headName
+  , systemHeadIn ["E"] constantName = Integer 1
+complexExpandSimplify expression =
+  either (const expression) id (evaluate expression)
+
+complexExpandRewriteElementaryCall :: Text -> [Expr] -> Maybe Expr
+complexExpandRewriteElementaryCall headName [argument] =
+  case headName of
+    "Tan" -> Just (ratio "Sin" "Cos")
+    "Cot" -> Just (ratio "Cos" "Sin")
+    "Sec" -> Just (reciprocal "Cos")
+    "Csc" -> Just (reciprocal "Sin")
+    "Tanh" -> Just (ratio "Sinh" "Cosh")
+    "Coth" -> Just (ratio "Cosh" "Sinh")
+    "Sech" -> Just (reciprocal "Cosh")
+    "Csch" -> Just (reciprocal "Sinh")
+    "ArcSin" ->
+      Just
+        ( Call
+            (Symbol "Times")
+            [ Integer (-1)
+            , Symbol "I"
+            , Call
+                (Symbol "Log")
+                [ Call
+                    (Symbol "Plus")
+                    [ Call (Symbol "Times") [Symbol "I", argument]
+                    , Call
+                        (Symbol "Sqrt")
+                        [ Call
+                            (Symbol "Plus")
+                            [ Integer 1
+                            , Call
+                                (Symbol "Times")
+                                [ Integer (-1)
+                                , Call (Symbol "Power") [argument, Integer 2]
+                                ]
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        )
+    "ArcCos" ->
+      Just
+        ( Call
+            (Symbol "Plus")
+            [ Call (Symbol "Times") [Rational 1 2, Symbol "Pi"]
+            , Call
+                (Symbol "Times")
+                [Integer (-1), Call (Symbol "ArcSin") [argument]]
+            ]
+        )
+    "ArcTan" ->
+      Just
+        ( Call
+            (Symbol "Times")
+            [ Rational 1 2
+            , Symbol "I"
+            , Call
+                (Symbol "Plus")
+                [ Call
+                    (Symbol "Log")
+                    [ Call
+                        (Symbol "Plus")
+                        [ Integer 1
+                        , Call
+                            (Symbol "Times")
+                            [Integer (-1), Symbol "I", argument]
+                        ]
+                    ]
+                , Call
+                    (Symbol "Times")
+                    [ Integer (-1)
+                    , Call
+                        (Symbol "Log")
+                        [ Call
+                            (Symbol "Plus")
+                            [ Integer 1
+                            , Call (Symbol "Times") [Symbol "I", argument]
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        )
+    "ArcCot" ->
+      Just
+        ( Call
+            (Symbol "Plus")
+            [ Call (Symbol "Times") [Rational 1 2, Symbol "Pi"]
+            , Call
+                (Symbol "Times")
+                [Integer (-1), Call (Symbol "ArcTan") [argument]]
+            ]
+        )
+    "ArcSec" -> Just (inverseCall "ArcCos")
+    "ArcCsc" -> Just (inverseCall "ArcSin")
+    "ArcSinh" ->
+      Just
+        ( Call
+            (Symbol "Log")
+            [ Call
+                (Symbol "Plus")
+                [ argument
+                , Call
+                    (Symbol "Sqrt")
+                    [ Call
+                        (Symbol "Plus")
+                        [ Call (Symbol "Power") [argument, Integer 2]
+                        , Integer 1
+                        ]
+                    ]
+                ]
+            ]
+        )
+    "ArcCosh" ->
+      Just
+        ( Call
+            (Symbol "Log")
+            [ Call
+                (Symbol "Plus")
+                [ argument
+                , Call
+                    (Symbol "Times")
+                    [ Call
+                        (Symbol "Sqrt")
+                        [Call (Symbol "Plus") [argument, Integer 1]]
+                    , Call
+                        (Symbol "Sqrt")
+                        [Call (Symbol "Plus") [argument, Integer (-1)]]
+                    ]
+                ]
+            ]
+        )
+    "ArcTanh" ->
+      Just
+        ( Call
+            (Symbol "Times")
+            [ Rational 1 2
+            , Call
+                (Symbol "Plus")
+                [ Call
+                    (Symbol "Log")
+                    [Call (Symbol "Plus") [Integer 1, argument]]
+                , Call
+                    (Symbol "Times")
+                    [ Integer (-1)
+                    , Call
+                        (Symbol "Log")
+                        [ Call
+                            (Symbol "Plus")
+                            [ Integer 1
+                            , Call (Symbol "Times") [Integer (-1), argument]
+                            ]
+                        ]
+                    ]
+                ]
+            ]
+        )
+    "ArcCoth" -> Just (inverseCall "ArcTanh")
+    "ArcSech" -> Just (inverseCall "ArcCosh")
+    "ArcCsch" -> Just (inverseCall "ArcSinh")
+    "Haversine" ->
+      Just
+        ( Call
+            (Symbol "Times")
+            [ Rational 1 2
+            , Call
+                (Symbol "Plus")
+                [ Integer 1
+                , Call
+                    (Symbol "Times")
+                    [Integer (-1), Call (Symbol "Cos") [argument]]
+                ]
+            ]
+        )
+    "InverseHaversine" ->
+      Just
+        ( Call
+            (Symbol "Times")
+            [ Integer 2
+            , Call
+                (Symbol "ArcSin")
+                [Call (Symbol "Sqrt") [argument]]
+            ]
+        )
+    "Gudermannian" ->
+      Just
+        ( Call
+            (Symbol "Times")
+            [ Integer 2
+            , Call
+                (Symbol "ArcTan")
+                [ Call
+                    (Symbol "Tanh")
+                    [Call (Symbol "Times") [Rational 1 2, argument]]
+                ]
+            ]
+        )
+    "InverseGudermannian" ->
+      Just
+        ( Call
+            (Symbol "Log")
+            [ Call
+                (Symbol "Tan")
+                [ Call
+                    (Symbol "Plus")
+                    [ Call (Symbol "Times") [Rational 1 4, Symbol "Pi"]
+                    , Call (Symbol "Times") [Rational 1 2, argument]
+                    ]
+                ]
+            ]
+        )
+    degreeHead
+      | Just baseHead <- complexExpandDegreeBase degreeHead ->
+          Just
+            ( if "Arc" `T.isPrefixOf` baseHead
+                then
+                  Call
+                    (Symbol "Times")
+                    [ Call (Symbol baseHead) [argument]
+                    , Integer 180
+                    , Call (Symbol "Power") [Symbol "Pi", Integer (-1)]
+                    ]
+                else
+                  Call
+                    (Symbol baseHead)
+                    [Call (Symbol "Times") [argument, Symbol "Degree"]]
+            )
+    _ -> Nothing
+ where
+  functionCall functionName = Call (Symbol functionName) [argument]
+  reciprocal functionName =
+    Call (Symbol "Power") [functionCall functionName, Integer (-1)]
+  ratio numerator denominator =
+    Call
+      (Symbol "Times")
+      [ functionCall numerator
+      , reciprocal denominator
+      ]
+  inverseCall functionName =
+    Call
+      (Symbol functionName)
+      [Call (Symbol "Power") [argument, Integer (-1)]]
+complexExpandRewriteElementaryCall _ _ = Nothing
+
+complexExpandDegreeBase :: Text -> Maybe Text
+complexExpandDegreeBase headName = do
+  baseName <- T.stripSuffix "Degrees" headName
+  if
+      baseName
+        `elem` [ "Sin"
+               , "Cos"
+               , "Tan"
+               , "Cot"
+               , "Sec"
+               , "Csc"
+               , "ArcSin"
+               , "ArcCos"
+               , "ArcTan"
+               , "ArcCot"
+               , "ArcSec"
+               , "ArcCsc"
+               ]
+    then Just baseName
+    else Nothing
+
+broadComplexParts :: Expr -> Maybe (Expr, Expr)
+broadComplexParts value
+  | Just components <- explicitComplexParts value = Just components
+  | rootValue@Root {} <- value
+  , Just components <- complexExpandRootComponents rootValue = Just components
+  | numericValueReality value == Just True = Just (value, Integer 0)
+broadComplexParts (Call (Symbol headName) values)
+  | systemHeadIn ["Plus"] headName = do
+      components <- traverse broadComplexParts values
+      pure (foldl' addComplexComponents (Integer 0, Integer 0) components)
+  | systemHeadIn ["Times"] headName = do
+      components <- traverse broadComplexParts values
+      pure (foldl' multiplyComplexComponents (Integer 1, Integer 0) components)
+broadComplexParts _ = Nothing
+
+argFromComponents :: Expr -> Expr -> Maybe Expr
+argFromComponents realPart imaginaryPart = do
+  realSign <- knownRealSign realPart
+  imaginarySign <- knownRealSign imaginaryPart
+  case (realSign, imaginarySign) of
+    (EQ, EQ) -> Just (Integer 0)
+    (_, EQ) ->
+      Just (if realSign == LT then Symbol "Pi" else Integer 0)
+    (EQ, _) ->
+      Just
+        ( piMultiple
+            (if imaginarySign == LT then Exact (-1) 2 else Exact 1 2)
+        )
+    _
+      | isMachineReal realPart || isMachineReal imaginaryPart -> do
+          realValue <- explicitRealDouble realPart
+          imaginaryValue <- explicitRealDouble imaginaryPart
+          pure (Real (formatMachineReal (pythonAtan2 imaginaryValue realValue)))
+      | isSpecialRealValue realPart || isSpecialRealValue imaginaryPart ->
+          Just (Call (Symbol "ArcTan") [realPart, imaginaryPart])
+      | containsInexactReal realPart || containsInexactReal imaginaryPart -> Nothing
+      | equalExplicitMagnitude realPart imaginaryPart ->
+          Just
+            ( piMultiple
+                ( case (realSign, imaginarySign) of
+                    (GT, GT) -> Exact 1 4
+                    (LT, GT) -> Exact 3 4
+                    (LT, LT) -> Exact (-3) 4
+                    _ -> Exact (-1) 4
+                )
+            )
+      | isNumericValue realPart && isNumericValue imaginaryPart ->
+          Just (Call (Symbol "ArcTan") [realPart, imaginaryPart])
+      | otherwise -> Nothing
+
+knownRealSign :: Expr -> Maybe Ordering
+knownRealSign value
+  | Just exactValue <- explicitRealExact value =
+      Just (compareExact exactValue (Exact 0 1))
+  | isSpecialRealValue value = Just GT
+  | knownPositive value = Just GT
+knownRealSign (Call (Symbol headName) values)
+  | systemHeadIn ["Times"] headName = do
+      signs <- traverse knownRealSign values
+      pure
+        ( if EQ `elem` signs
+            then EQ
+            else if odd (length (filter (== LT) signs)) then LT else GT
+        )
+knownRealSign _ = Nothing
+
+equalExplicitMagnitude :: Expr -> Expr -> Bool
+equalExplicitMagnitude left right = case (explicitRealExact left, explicitRealExact right) of
+  (Just (Exact leftNumerator leftDenominator), Just (Exact rightNumerator rightDenominator)) ->
+    abs leftNumerator * rightDenominator
+      == abs rightNumerator * leftDenominator
+  _ -> False
+
+piMultiple :: Exact -> Expr
+piMultiple coefficient = reduceTimes [fromExact coefficient, Symbol "Pi"]
+
+-- Explicit numeric constructors remain ordinary calls in the parser.  They
+-- become numeric atoms only after their arguments have evaluated, matching
+-- the Python reference and Wolfram's distinction between held syntax and an
+-- evaluated numeric value.
+reduceRationalConstructor :: [Expr] -> Expr
+reduceRationalConstructor values = case values of
+  [Integer numerator, Integer denominator]
+    | denominator == 0 ->
+        if numerator == 0
+          then Symbol "Indeterminate"
+          else Symbol "ComplexInfinity"
+    | otherwise -> fromExact (normalizeExact numerator denominator)
+  _ -> Call (Symbol "Rational") values
+
+reduceSpecialRealConstructor :: SpecialRealKind -> [Expr] -> Expr
+reduceSpecialRealConstructor kind = \case
+  [] -> SpecialReal kind
+  values -> Call (Symbol (specialRealName kind)) values
+
+reducePrecision :: [Expr] -> Expr
+reducePrecision = \case
+  [value] -> case precisionValue value of
+    InfinitePrecision -> Symbol "Infinity"
+    MachinePrecisionValue -> Symbol "MachinePrecision"
+    FinitePrecision precision -> machineRealExpr precision
+  values -> Call (Symbol "Precision") values
+
+reduceAccuracy :: [Expr] -> Expr
+reduceAccuracy = \case
+  [value] -> case accuracyValue value of
+    Nothing -> Symbol "Infinity"
+    Just accuracy
+      | isInfinite accuracy ->
+          Symbol (if accuracy > 0 then "Infinity" else "-Infinity")
+      | otherwise -> machineRealExpr accuracy
+  values -> Call (Symbol "Accuracy") values
+
+reduceDistribute :: [Expr] -> Either EvaluationError Expr
+reduceDistribute = \case
+  [expression] ->
+    Right (distributeExpression expression (Symbol "Plus") Nothing Nothing Nothing)
+  [expression, distributedHead] ->
+    Right (distributeExpression expression distributedHead Nothing Nothing Nothing)
+  [expression, distributedHead, outerHead] ->
+    Right
+      ( distributeExpression
+          expression
+          distributedHead
+          (Just outerHead)
+          Nothing
+          Nothing
+      )
+  [expression, distributedHead, outerHead, distributedReplacement, outerReplacement] ->
+    Right
+      ( distributeExpression
+          expression
+          distributedHead
+          (Just outerHead)
+          (Just distributedReplacement)
+          (Just outerReplacement)
+      )
+  _ ->
+    Left
+      ( EvaluationError
+          "Distribute expects an expression, optional distributed/outer heads, and an optional ``gp, fp`` replacement pair."
+      )
+
+distributeExpression
+  :: Expr
+  -> Expr
+  -> Maybe Expr
+  -> Maybe Expr
+  -> Maybe Expr
+  -> Expr
+distributeExpression
+  expression@(Call expressionHead values)
+  distributedHead
+  requiredOuterHead
+  distributedReplacement
+  outerReplacement
+    | maybe False (/= expressionHead) requiredOuterHead = expression
+    | not foundDistributedHead = expression
+    | otherwise =
+        Call
+          resultHead
+          [Call productHead factors | factors <- products]
+   where
+    productHead = maybe expressionHead id distributedReplacement
+    resultHead = maybe distributedHead id outerReplacement
+    (foundDistributedHead, products) = foldl extendProducts (False, [[]]) values
+    extendProducts (found, prefixes) value = case value of
+      Call argumentHead choices
+        | argumentHead == distributedHead ->
+            ( True
+            , [prefix <> [choice] | prefix <- prefixes, choice <- choices]
+            )
+      _ -> (found, [prefix <> [value] | prefix <- prefixes])
+distributeExpression expression _ _ _ _ = expression
+
+reduceInner :: [Expr] -> Either EvaluationError Expr
+reduceInner = \case
+  [function, Call _ leftValues, Call _ rightValues, combiner]
+    | length leftValues /= length rightValues ->
+        Left (EvaluationError "Inner expects expressions with the same length.")
+    | otherwise -> do
+        combined <-
+          traverse
+            (\(left, right) -> applyTraversalCallable function [left, right])
+            (zip leftValues rightValues)
+        applyTraversalCallable combiner combined
+  [_, _, _, _] ->
+    Left (EvaluationError "Inner expects a nonatomic expression.")
+  _ -> Left (EvaluationError "Inner expects exactly four arguments.")
+
+reduceOuter :: [Expr] -> Either EvaluationError Expr
+reduceOuter values = do
+  (function, sequences) <- outerTraversalPlan values
+  outerTraversePure function sequences []
+
+outerTraversalPlan
+  :: [Expr]
+  -> Either EvaluationError (Expr, [(Expr, Maybe Integer)])
+outerTraversalPlan = \case
+  function : operands@(_ : _) -> do
+    let (sequences, levels) = splitTrailingLevels operands []
+    if all isCall sequences
+      then Right (function, zip sequences (broadcastLevels (length sequences) levels))
+      else Left (EvaluationError "Outer expects a nonatomic expression.")
+  _ ->
+    Left
+      ( EvaluationError
+          "Outer expects a function and at least one sequence."
+      )
+ where
+  isCall Call {} = True
+  isCall _ = False
+  splitTrailingLevels sequences levels
+    | _ : _ <- sequences
+    , Integer level <- last sequences =
+        splitTrailingLevels (init sequences) (level : levels)
+    | otherwise = (sequences, levels)
+  broadcastLevels count [] = replicate count Nothing
+  broadcastLevels count levels =
+    map Just (take count (levels <> repeat (last levels)))
+
+outerTraversePure
+  :: Expr
+  -> [(Expr, Maybe Integer)]
+  -> [Expr]
+  -> Either EvaluationError Expr
+outerTraversePure function = recurse
+ where
+  recurse [] chosen = applyTraversalCallable function (reverse chosen)
+  recurse ((node, remainingDepth) : rest) chosen =
+    descend node remainingDepth rest chosen
+  descend node (Just 0) rest chosen = recurse rest (node : chosen)
+  descend (Call expressionHead values) remainingDepth rest chosen = do
+    descended <-
+      traverse
+        (\value -> descend value (fmap (subtract 1) remainingDepth) rest chosen)
+        values
+    Right (rebuildOuterCall expressionHead descended)
+  descend node _ rest chosen = recurse rest (node : chosen)
+
+rebuildOuterCall :: Expr -> [Expr] -> Expr
+rebuildOuterCall expressionHead@Symbol {} = rebuildWithSplicing expressionHead
+rebuildOuterCall expressionHead = Call expressionHead
+
+precisionValue :: Expr -> PrecisionValue
+precisionValue = \case
+  Integer {} -> InfinitePrecision
+  Rational {} -> InfinitePrecision
+  Root {} -> InfinitePrecision
+  SpecialReal {} -> FinitePrecision 0
+  Real source -> case parseRealInfo source of
+    Nothing -> MachinePrecisionValue
+    Just info@(RealInfo _ kind _ _ _) -> case kind of
+      MachineReal -> MachinePrecisionValue
+      PrecisionReal precision -> FinitePrecision (fromInteger precision)
+      AccuracyReal accuracy ->
+        FinitePrecision
+          ( case decimalLog10Abs info of
+              Nothing -> 0
+              Just logarithm -> fromInteger accuracy + logarithm
+          )
+  Complex realPart imaginaryPart ->
+    combinePrecisionValues
+      [precisionValue realPart, precisionValue imaginaryPart]
+  Call _ values -> combinePrecisionValues (map precisionValue values)
+  _ -> InfinitePrecision
+
+combinePrecisionValues :: [PrecisionValue] -> PrecisionValue
+combinePrecisionValues values
+  | any isMachine values = MachinePrecisionValue
+  | finiteValues@(_ : _) <- [value | FinitePrecision value <- values] =
+      FinitePrecision (minimum finiteValues)
+  | otherwise = InfinitePrecision
+ where
+  isMachine MachinePrecisionValue = True
+  isMachine _ = False
+
+accuracyValue :: Expr -> Maybe Double
+accuracyValue = \case
+  Integer {} -> Nothing
+  Rational {} -> Nothing
+  Root {} -> Nothing
+  SpecialReal OverflowReal -> Just (negate (1 / 0))
+  SpecialReal UnderflowReal -> Just (1 / 0)
+  Real source -> do
+    info@(RealInfo _ kind _ _ _) <- parseRealInfo source
+    case kind of
+      AccuracyReal accuracy -> Just (fromInteger accuracy)
+      PrecisionReal precision ->
+        Just
+          ( case decimalLog10Abs info of
+              Nothing -> fromInteger precision
+              Just logarithm -> fromInteger precision - logarithm
+          )
+      MachineReal ->
+        let logarithm =
+              case decimalLog10Abs info of
+                Just value -> value
+                Nothing -> pythonLog10 (encodeFloat 1 (-1022))
+         in Just (53 * pythonLog10 2 - logarithm)
+  Complex realPart imaginaryPart ->
+    minimumAccuracy [accuracyValue realPart, accuracyValue imaginaryPart]
+  Call _ values -> minimumAccuracy (map accuracyValue values)
+  _ -> Nothing
+
+minimumAccuracy :: [Maybe Double] -> Maybe Double
+minimumAccuracy values = case [value | Just value <- values] of
+  [] -> Nothing
+  explicit -> Just (minimum explicit)
+
+decimalLog10Abs :: RealInfo -> Maybe Double
+decimalLog10Abs (RealInfo exactValue _ _ _ machineSource)
+  | exactValue == Exact 0 1 = Nothing
+  | otherwise =
+      case readMaybe (T.unpack machineSource) :: Maybe Double of
+        Just machineValue
+          | machineValue /= 0 -> Just (pythonLog10 (abs machineValue))
+        _ -> decimalLog10Fallback machineSource
+
+decimalLog10Fallback :: Text -> Maybe Double
+decimalLog10Fallback source = do
+  let (mantissaSource, exponentSuffix) =
+        T.break (`elem` ("eE" :: String)) source
+      exponentSource = T.drop 1 exponentSuffix
+  magnitudePower <-
+    if T.null exponentSuffix
+      then Just 0
+      else readMaybe (T.unpack exponentSource)
+  let unsignedMantissa = case T.uncons mantissaSource of
+        Just ('-', rest) -> rest
+        Just ('+', rest) -> rest
+        _ -> mantissaSource
+      (whole, fractionWithPoint) = T.breakOn "." unsignedMantissa
+      fraction =
+        if T.null fractionWithPoint
+          then ""
+          else T.drop 1 fractionWithPoint
+      digits = whole <> fraction
+  firstNonzero <- findIndex (/= '0') (T.unpack digits)
+  let significant = T.drop firstNonzero digits
+      remainingDigits = T.drop 1 significant
+      scaledSource =
+        T.take 1 significant
+          <> "."
+          <> if T.null remainingDigits then "0" else remainingDigits
+      adjusted =
+        magnitudePower
+          + toInteger (T.length whole - firstNonzero - 1)
+  scaled <- readMaybe (T.unpack scaledSource)
+  Just (fromInteger adjusted + pythonLog10 scaled)
+
+machineRealExpr :: Double -> Expr
+machineRealExpr value
+  | isNaN value = Symbol "Indeterminate"
+  | isInfinite value = SpecialReal OverflowReal
+  | otherwise = Real (formatMachineReal value)
+
+reduceComplexConstructor :: [Expr] -> Expr
+reduceComplexConstructor values = case values of
+  [realPart, imaginaryPart]
+    | isRealNumberAtom realPart
+    , isRealNumberAtom imaginaryPart -> makeComplex realPart imaginaryPart
+  _ -> Call (Symbol "Complex") values
+
+isRealNumberAtom :: Expr -> Bool
+isRealNumberAtom value = isExplicitReal value || isSpecialRealValue value
+
 isMachineReal :: Expr -> Bool
 isMachineReal (Real source) = case parseRealInfo source of
   Just (RealInfo _ MachineReal _ _ _) -> True
@@ -1076,7 +2741,9 @@ isMachineReal _ = False
 toMachineReal :: Expr -> Expr
 toMachineReal value@(Real source) = case parseRealInfo source of
   Just (RealInfo _ MachineReal _ _ _) -> value
-  Just (RealInfo exactValue _ _ _ _) -> exactToMachineReal exactValue
+  Just (RealInfo _ (AccuracyReal _) _ _ _) -> value
+  Just (RealInfo _ (PrecisionReal _) _ _ machineSource) ->
+    maybe value machineRealExpr (readMaybe (T.unpack machineSource))
   Nothing -> value
 toMachineReal value
   | Just exactValue <- toExact value = exactToMachineReal exactValue
@@ -1084,7 +2751,7 @@ toMachineReal value = value
 
 exactToMachineReal :: Exact -> Expr
 exactToMachineReal (Exact numerator denominator) =
-  Real (formatMachineReal (fromInteger numerator / fromInteger denominator))
+  machineRealExpr (fromInteger numerator / fromInteger denominator)
 
 roundExactExpr :: RoundingOperation -> Exact -> Expr
 roundExactExpr RoundFractionalPart value = fromExact (fractionalExact value)
@@ -1116,11 +2783,18 @@ roundReal RoundFractionalPart (RealInfo _ MachineReal _ _ machineSource) = do
     else
       let remainder = machineValue - fromInteger (truncate machineValue)
        in Just (Real (formatMachineReal remainder))
-roundReal RoundFractionalPart (RealInfo value (MarkedReal precision) scale negativeZero _) =
+roundReal RoundFractionalPart (RealInfo value (PrecisionReal precision) scale negativeZero _) =
   Just
     ( Real
         ( formatFixedExact (fractionalExact value) scale negativeZero
             <> "`" <> T.pack (show precision) <> "."
+        )
+    )
+roundReal RoundFractionalPart (RealInfo value (AccuracyReal _) scale negativeZero _) =
+  Just
+    ( Real
+        ( formatFixedExact (fractionalExact value) scale negativeZero
+            <> "`0."
         )
     )
 roundReal operation (RealInfo value _ _ _ _) = Just (Integer (roundExact operation value))
@@ -1186,8 +2860,8 @@ parseRealKind :: Text -> RealKind
 parseRealKind markerSource
   | T.null markerSource = MachineReal
   | T.null specification = MachineReal
-  | isAccuracy = MarkedReal 0
-  | otherwise = MarkedReal (parseMarkerValue specification)
+  | isAccuracy = AccuracyReal (parseMarkerValue specification)
+  | otherwise = PrecisionReal (parseMarkerValue specification)
  where
   afterFirst = T.drop 1 markerSource
   isAccuracy = T.isPrefixOf "`" afterFirst
@@ -1276,16 +2950,32 @@ formatFixedExact (Exact numerator denominator) scale negativeZero =
 
 reducePlus :: [Expr] -> Expr
 reducePlus originalValues =
-  let values = concatMap (flattenHead "Plus") originalValues
-      exactSum = foldl' addExact (Exact 0 1) (mapMaybe toExact values)
-      symbolic = filter (not . isExact) values
-      collected = collectLikeTerms symbolic
-      combined = (if exactSum == Exact 0 1 then [] else [fromExact exactSum]) <> collected
-   in case combined of
-        [] -> Integer 0
-        [single] -> single
-        _ -> Call (Symbol "Plus") combined
+  case
+      if any isExplicitComplexExpression originalValues
+        then Nothing
+        else NumericPrecision.approximateInexactNumericCall "Plus" originalValues
+    of
+    Just approximated -> approximated
+    Nothing ->
+      let values = concatMap (flattenHead "Plus") originalValues
+       in case reduceExplicitComplexValues addComplexComponents (Integer 0, Integer 0) values of
+        Just complexResult -> complexResult
+        Nothing ->
+          let exactSum = foldl' addExact (Exact 0 1) (mapMaybe toExact values)
+              symbolic = sortBy canonicalCompare (filter (not . isExact) values)
+              collected = collectLikeTerms symbolic
+              combined = (if exactSum == Exact 0 1 then [] else [fromExact exactSum]) <> collected
+           in case combined of
+                [] -> Integer 0
+                [single] -> single
+                _ ->
+                  case factorCommonAdditiveTerms combined of
+                    Just factored -> factored
+                    Nothing -> Call (Symbol "Plus") combined
  where
+  isExplicitComplexExpression Complex {} = True
+  isExplicitComplexExpression _ = False
+
   collectLikeTerms terms = retainFirst Set.empty decomposed
    where
     decomposed = map termCoefficient terms
@@ -1312,22 +3002,169 @@ reducePlus originalValues =
      in (coefficient, reduceTimes symbolicFactors)
   termCoefficient term = (Exact 1 1, term)
 
+factorCommonAdditiveTerms :: [Expr] -> Maybe Expr
+factorCommonAdditiveTerms values =
+  case bestCandidate of
+    ([], _) -> Nothing
+    (_, []) -> Nothing
+    (selectedIndices, commonFactors) ->
+      let selected = Set.fromList selectedIndices
+          quotients =
+            [ reduceTimes
+                ( (if exactOne coefficient then [] else [coefficient])
+                    <> removeCommonFactors factors commonFactors
+                )
+            | index <- selectedIndices
+            , let (coefficient, factors) = decomposed !! index
+            ]
+          commonExpression = reduceTimes commonFactors
+          factoredTerm =
+            reduceTimes [commonExpression, reducePlus quotients]
+          rebuilt = rebuildFactored selected factoredTerm 0 False values
+       in if rebuilt == values
+            then Nothing
+            else Just (reducePlus rebuilt)
+ where
+  decomposed = map decomposeAdditiveFactors values
+  uniqueFactors = foldl' retainUnique [] (concatMap snd decomposed)
+  candidates =
+    [ let indices =
+              [ index
+              | (index, (_, factors)) <- zip [0 ..] decomposed
+              , factor `elem` factors
+              ]
+          common
+            | length indices < 2 = []
+            | otherwise =
+                commonFactorList
+                  [ factors
+                  | (index, (_, factors)) <- zip [0 ..] decomposed
+                  , index `elem` indices
+                  ]
+       in (indices, common)
+    | factor <- uniqueFactors
+    ]
+  bestCandidate = foldl' chooseBetter ([], []) candidates
+
+  retainUnique retained value
+    | value `elem` retained = retained
+    | otherwise = retained <> [value]
+
+  chooseBetter current candidate
+    | candidateScore candidate > candidateScore current = candidate
+    | otherwise = current
+  candidateScore (indices, factors) = (length indices, length factors)
+
+decomposeAdditiveFactors :: Expr -> (Expr, [Expr])
+decomposeAdditiveFactors expression
+  | isExplicitNumberAtom expression = (expression, [])
+decomposeAdditiveFactors (Call (Symbol timesHead) factors)
+  | systemHeadIn ["Times"] timesHead =
+      ( reduceTimes (filter isExplicitNumberAtom factors)
+      , filter (not . isExplicitNumberAtom) factors
+      )
+decomposeAdditiveFactors expression = (Integer 1, [expression])
+
+isExplicitNumberAtom :: Expr -> Bool
+isExplicitNumberAtom = \case
+  Integer _ -> True
+  Rational _ _ -> True
+  Real _ -> True
+  SpecialReal _ -> True
+  Complex _ _ -> True
+  _ -> False
+
+commonFactorList :: [[Expr]] -> [Expr]
+commonFactorList [] = []
+commonFactorList (first : remaining) =
+  foldl' intersectFactorLists first remaining
+
+intersectFactorLists :: [Expr] -> [Expr] -> [Expr]
+intersectFactorLists [] _ = []
+intersectFactorLists (factor : rest) available
+  | factor `elem` available =
+      factor : intersectFactorLists rest (List.delete factor available)
+  | otherwise = intersectFactorLists rest available
+
+removeCommonFactors :: [Expr] -> [Expr] -> [Expr]
+removeCommonFactors = foldl' (flip List.delete)
+
+rebuildFactored
+  :: Set.Set Int
+  -> Expr
+  -> Int
+  -> Bool
+  -> [Expr]
+  -> [Expr]
+rebuildFactored _ _ _ _ [] = []
+rebuildFactored selected replacement index inserted (value : rest)
+  | Set.member index selected =
+      (if inserted then id else (replacement :))
+        (rebuildFactored selected replacement (index + 1) True rest)
+  | otherwise =
+      value
+        : rebuildFactored selected replacement (index + 1) inserted rest
+
 reduceTimes :: [Expr] -> Expr
 reduceTimes originalValues =
-  let values = concatMap (flattenHead "Times") originalValues
-      exactProduct = foldl' multiplyExact (Exact 1 1) (mapMaybe toExact values)
-      symbolic = sortBy canonicalCompare (filter (not . isExact) values)
-      collected = collectRepeated collectFactor symbolic
-      combined
-        | exactProduct == Exact 0 1 = [Integer 0]
-        | exactProduct == Exact 1 1 && not (null collected) = collected
-        | otherwise = fromExact exactProduct : collected
-   in case combined of
-        [] -> Integer 1
-        [single] -> single
-        _ -> Call (Symbol "Times") combined
+  case NumericPrecision.approximateInexactNumericCall "Times" originalValues of
+    Just approximated -> approximated
+    Nothing ->
+      let values = concatMap (flattenHead "Times") originalValues
+       in if any isExplicitZero values && any isComplexInfinity values
+        then Symbol "Indeterminate"
+        else
+          case reduceExplicitComplexValues multiplyComplexComponents (Integer 1, Integer 0) values of
+            Just complexResult -> complexResult
+            Nothing ->
+              let exactProduct = foldl' multiplyExact (Exact 1 1) (mapMaybe toExact values)
+                  symbolic = filter (not . isExact) values
+                  collected = sortBy canonicalCompare (collectPowerFactors symbolic)
+                  combined
+                    | exactProduct == Exact 0 1 = [Integer 0]
+                    | exactProduct == Exact 1 1 && not (null collected) = collected
+                    | otherwise = fromExact exactProduct : collected
+               in case combined of
+                    [] -> Integer 1
+                    [single] -> single
+                    _ -> Call (Symbol "Times") combined
  where
- collectFactor factor count = reducePower [factor, Integer count]
+  collectPowerFactors factors =
+    [ reducePower [base, exponentValue]
+    | (_key, (base, exponentParts)) <- Map.toAscList accumulated
+    , let exponentValue = reducePlus exponentParts
+    , exponentValue /= Integer 0
+    ]
+   where
+    accumulated = foldl' insertFactor Map.empty factors
+    insertFactor retained factor =
+      let (base, exponentValue) = powerFactor factor
+          key = fullForm base
+       in Map.insertWith
+            (\(_newBase, newExponents) (oldBase, oldExponents) ->
+                (oldBase, oldExponents <> newExponents)
+            )
+            key
+            (base, [exponentValue])
+            retained
+    powerFactor (Call (Symbol powerHead) [base, exponentValue])
+      | systemHeadIn ["Power"] powerHead = (base, exponentValue)
+    powerFactor factor = (factor, Integer 1)
+  isComplexInfinity (Symbol name) = systemHeadIn ["ComplexInfinity"] name
+  isComplexInfinity _ = False
+
+reduceExplicitComplexValues
+  :: ((Expr, Expr) -> (Expr, Expr) -> (Expr, Expr))
+  -> (Expr, Expr)
+  -> [Expr]
+  -> Maybe Expr
+reduceExplicitComplexValues combine identity values = do
+  components <- traverse explicitComplexParts values
+  if any (not . exactZero . snd) components
+    then
+      let (realPart, imaginaryPart) = foldl' combine identity components
+       in Just (makeComplex realPart imaginaryPart)
+    else Nothing
 
 reduceSparseArithmetic
   :: Text
@@ -1413,27 +3250,15 @@ evaluateSparseScalar "Plus" left right =
 evaluateSparseScalar functionName left right =
   evaluate (Call (Symbol functionName) [left, right])
 
-collectRepeated :: (Expr -> Integer -> Expr) -> [Expr] -> [Expr]
-collectRepeated combine values = retainFirst Set.empty values
- where
-  counts =
-    foldl'
-      (\retained value -> Map.insertWith (+) (fullForm value) (1 :: Integer) retained)
-      Map.empty
-      values
-  retainFirst _ [] = []
-  retainFirst seen (value : rest)
-    | Set.member key seen = retainFirst seen rest
-    | otherwise =
-        let count = Map.findWithDefault 1 key counts
-            collected = if count == 1 then value else combine value count
-         in collected : retainFirst (Set.insert key seen) rest
-   where
-    key = fullForm value
-
 reducePower :: [Expr] -> Expr
 reducePower [] = Integer 1
 reducePower [base] = base
+reducePower [SpecialReal OverflowReal, Integer exponentValue]
+  | exponentValue < 0 = SpecialReal UnderflowReal
+  | exponentValue > 0 = SpecialReal OverflowReal
+reducePower [SpecialReal UnderflowReal, Integer exponentValue]
+  | exponentValue < 0 = SpecialReal OverflowReal
+  | exponentValue > 0 = SpecialReal UnderflowReal
 reducePower [base, Integer exponentValue]
   | exponentValue == 0
   , isExplicitZero base = Symbol "Indeterminate"
@@ -1451,8 +3276,29 @@ reducePower [base, Integer exponentValue]
                     (denominator ^ abs exponentValue)
                     (numerator ^ abs exponentValue)
                 )
+  | Just approximated <-
+      NumericPrecision.approximateInexactNumericCall
+        "Power"
+        [base, Integer exponentValue] = approximated
+  | Call (Symbol powerHead) [nestedBase, Integer nestedExponent] <- base
+  , systemHeadIn ["Power"] powerHead =
+      reducePower [nestedBase, Integer (nestedExponent * exponentValue)]
+  | Call (Symbol powerHead) [nestedBase, nestedExponent] <- base
+  , systemHeadIn ["Power"] powerHead
+  , exponentValue > 0 =
+      reducePower [nestedBase, reduceTimes [Integer exponentValue, nestedExponent]]
+  | Call (Symbol timesHead) factors <- base
+  , systemHeadIn ["Times"] timesHead
+  , exponentValue > 0 =
+      reduceTimes [reducePower [factor, Integer exponentValue] | factor <- factors]
 reducePower [base, exponentValue]
+  | Symbol baseName <- base
+  , systemHeadIn ["E"] baseName
+  , Call (Symbol logHead) [value] <- exponentValue
+  , systemHeadIn ["Log"] logHead = value
   | Just result <- reduceExactFractionalPower base exponentValue = result
+  | Just result <-
+      NumericPrecision.approximateInexactNumericCall "Power" [base, exponentValue] = result
   | Just (Exact 1 1) <- toExact base = Integer 1
 reducePower values = Call (Symbol "Power") values
 
@@ -1609,12 +3455,137 @@ reduceAbs :: [Expr] -> Expr
 reduceAbs [value]
   | Just (Exact numerator denominator) <- toExact value =
       fromExact (Exact (abs numerator) denominator)
+reduceAbs [Real source]
+  | Just (RealInfo (Exact numerator _) kind _ negativeZero machineSource) <- parseRealInfo source =
+      case kind of
+        MachineReal ->
+          maybe
+            (Real source)
+            (machineRealExpr . abs)
+            (readMaybe (T.unpack machineSource))
+        _ ->
+          Real
+            ( if numerator < 0
+                then negateRealSource source
+                else if negativeZero then positiveRealZeroSource source else source
+            )
+reduceAbs [value@(SpecialReal _)] = value
+reduceAbs [value]
+  | Just (realPart, imaginaryPart) <- explicitComplexParts value
+  , not (isExplicitReal value)
+  , Just realSquare <- multiplyExplicitReals realPart realPart
+  , Just imaginarySquare <- multiplyExplicitReals imaginaryPart imaginaryPart
+  , Just squareSum <- addExplicitReals realSquare imaginarySquare =
+      reduceSqrt [squareSum]
+reduceAbs [Call (Symbol "Times") factors]
+  | (numericFactors, symbolicFactors) <- List.partition isExplicitNumericFactor factors
+  , not (null numericFactors)
+  , not (null symbolicFactors) =
+      let numericMagnitude = reduceAbs [foldl' multiplyNumericFactor (Integer 1) numericFactors]
+          symbolicValue = case symbolicFactors of
+            [single] -> single
+            _ -> Call (Symbol "Times") symbolicFactors
+          symbolicMagnitude = Call (Symbol "Abs") [symbolicValue]
+       in if numericMagnitude == Integer 1
+            then symbolicMagnitude
+            else reduceTimes [numericMagnitude, symbolicMagnitude]
+reduceAbs [Call (Symbol "Power") [base, exponentValue]]
+  | Just (Exact numerator 1) <- toExact exponentValue
+  , numerator >= 0 =
+      reducePower [Call (Symbol "Abs") [base], exponentValue]
 reduceAbs values = Call (Symbol "Abs") values
 
 reduceSign :: [Expr] -> Expr
 reduceSign [value]
   | Just (Exact numerator _) <- toExact value = Integer (signum numerator)
+reduceSign [Real source]
+  | Just (RealInfo (Exact numerator _) _ _ _ _) <- parseRealInfo source =
+      Integer (signum numerator)
+reduceSign [SpecialReal _] = Integer 1
+reduceSign [value]
+  | Just (realPart, imaginaryPart) <- explicitComplexParts value
+  , not (isExplicitReal value) =
+      let magnitude = reduceAbs [value]
+       in if magnitude == Integer 0
+            then Integer 0
+            else case explicitRealExact magnitude of
+              Just magnitudeExact ->
+                makeComplex
+                  (divideRealPart realPart magnitudeExact)
+                  (divideRealPart imaginaryPart magnitudeExact)
+              Nothing -> reduceTimes [value, reciprocalExpression magnitude]
 reduceSign values = Call (Symbol "Sign") values
+
+reciprocalExpression :: Expr -> Expr
+reciprocalExpression (Call (Symbol "Power") [base, exponentValue])
+  | Just exponentExact <- toExact exponentValue =
+      reducePower [base, fromExact (negateExact exponentExact)]
+reciprocalExpression value = reducePower [value, Integer (-1)]
+
+isExplicitNumericFactor :: Expr -> Bool
+isExplicitNumericFactor value =
+  isExplicitReal value
+    || case explicitComplexParts value of
+      Just _ -> True
+      Nothing -> False
+
+multiplyNumericFactor :: Expr -> Expr -> Expr
+multiplyNumericFactor left right =
+  case (explicitComplexParts left, explicitComplexParts right) of
+    (Just leftParts, Just rightParts) ->
+      let (realPart, imaginaryPart) = multiplyComplexComponents leftParts rightParts
+       in makeComplex realPart imaginaryPart
+    _ -> reduceTimes [left, right]
+
+multiplyExplicitReals :: Expr -> Expr -> Maybe Expr
+multiplyExplicitReals left right
+  | isExplicitReal left
+  , isExplicitReal right = Just (reduceExplicitRealTimes [left, right])
+  | otherwise = Nothing
+
+addExplicitReals :: Expr -> Expr -> Maybe Expr
+addExplicitReals left right
+  | isExplicitReal left
+  , isExplicitReal right = Just (reduceExplicitRealPlus [left, right])
+  | otherwise = Nothing
+
+divideRealPart :: Expr -> Exact -> Expr
+divideRealPart value divisor
+  | Just exactValue <- toExact value
+  , Just quotient <- divideExact exactValue divisor = fromExact quotient
+divideRealPart value divisor =
+  reduceExplicitRealTimes [value, fromExact (reciprocalExact divisor)]
+
+reduceNumericMod :: [Expr] -> Expr
+reduceNumericMod [_dividend, divisor]
+  | explicitRealExact divisor == Just (Exact 0 1) = Symbol "Indeterminate"
+reduceNumericMod [_dividend, divisor, _offset]
+  | explicitRealExact divisor == Just (Exact 0 1) = Symbol "Indeterminate"
+reduceNumericMod values
+  | [dividend, divisor] <- values = numericMod dividend divisor (Integer 0)
+  | [dividend, divisor, offset] <- values = numericMod dividend divisor offset
+  | otherwise = Call (Symbol "Mod") values
+ where
+  numericMod dividend divisor offset
+    | Just exactDividend <- toExact dividend
+    , Just exactDivisor <- toExact divisor
+    , Just exactOffset <- toExact offset
+    , Just quotient <- divideExact (addExact exactDividend (negateExact exactOffset)) exactDivisor =
+        fromExact
+          ( addExact
+              exactOffset
+              ( addExact
+                  (addExact exactDividend (negateExact exactOffset))
+                  (negateExact (multiplyExact exactDivisor (Exact (roundExact RoundFloor quotient) 1)))
+              )
+          )
+    | Just dividendDouble <- explicitRealDouble dividend
+    , Just divisorDouble <- explicitRealDouble divisor
+    , Just offsetDouble <- explicitRealDouble offset =
+        let shifted = dividendDouble - offsetDouble
+            result = offsetDouble + shifted - divisorDouble * fromInteger (floor (shifted / divisorDouble))
+         in machineRealExpr result
+    | otherwise = Call (Symbol "Mod") values
 
 reduceNot :: [Expr] -> Expr
 reduceNot [Symbol "True"] = Symbol "False"
@@ -2077,12 +4048,12 @@ reduceStringTakeDrop takeMode = \case
 stringSelectorIndices :: Text -> Int -> Expr -> Either EvaluationError [Int]
 stringSelectorIndices operation count specification = case specification of
   Integer amount
-    | amount >= 0
-    , amount <= fromIntegral count -> Right [0 .. fromIntegral amount - 1]
-    | amount < 0
-    , abs amount <= fromIntegral count ->
-        Right [count - fromIntegral (abs amount) .. count - 1]
-    | otherwise -> invalid
+    | amount >= 0 ->
+        traverse resolveStringPosition [1 .. amount]
+    | otherwise ->
+        traverse
+          resolveStringPosition
+          [fromIntegral count + amount + 1 .. fromIntegral count]
   Symbol "All" -> Right [0 .. count - 1]
   Call (Symbol "UpTo") [Integer amount]
     | amount >= 0 -> Right [0 .. min count (fromIntegral amount) - 1]
@@ -2091,7 +4062,7 @@ stringSelectorIndices operation count specification = case specification of
          in Right [count - retained .. count - 1]
   spanSpecification@(Call (Symbol "Span") _) -> spanIndices spanSpecification
   Call (Symbol "List") [Integer position] ->
-    maybe invalid (Right . pure) (resolvePosition count position)
+    pure <$> resolveStringPosition position
   Call (Symbol "List") [Symbol "All"] -> Right [0 .. count - 1]
   Call (Symbol "List") [upTo@(Call (Symbol "UpTo") _)] ->
     stringSelectorIndices operation count upTo
@@ -2107,7 +4078,27 @@ stringSelectorIndices operation count specification = case specification of
       )
   spanIndices spanSpecification = do
     positions <- expandPartSpan count spanSpecification
-    maybe invalid Right (traverse (resolvePosition count) positions)
+    traverse resolveStringPosition positions
+  resolveStringPosition position
+    | position == 0 =
+        Left
+          ( EvaluationError
+              "Only top-level Part specifications may use index 0."
+          )
+    | otherwise =
+        maybe
+          ( Left
+              ( EvaluationError
+                  ( "Part index "
+                      <> T.pack (show position)
+                      <> " is out of range for length "
+                      <> T.pack (show count)
+                      <> "."
+                  )
+              )
+          )
+          Right
+          (resolvePosition count position)
 
 reduceStringJoin :: [Expr] -> Either EvaluationError Expr
 reduceStringJoin values = String . T.concat <$> (concat <$> traverse flatten values)
@@ -2739,13 +4730,16 @@ replaceStringPatternMatches source specifications limit = go 0 0 []
         Nothing -> tryMatches matches
 
 stringExpressionFromPieces :: [Expr] -> Expr
-stringExpressionFromPieces pieces = case merge pieces of
+stringExpressionFromPieces pieces = case removeNeutralEmpty (merge pieces) of
   [] -> String ""
   [single] -> single
   merged
     | all isString merged -> String (T.concat [value | String value <- merged])
     | otherwise -> Call (Symbol "StringExpression") merged
  where
+  removeNeutralEmpty merged
+    | any (not . isString) merged = filter (/= String "") merged
+    | otherwise = merged
   merge = foldl append [] . concatMap flatten
   flatten (Call (Symbol stringExpressionHead) values)
     | systemHeadIn ["StringExpression"] stringExpressionHead = concatMap flatten values
@@ -2755,26 +4749,59 @@ stringExpressionFromPieces pieces = case merge pieces of
     _ -> retained <> [String value]
   append retained value = retained <> [value]
 
+textSatisfies :: (Char -> Bool) -> Expr -> Bool
+textSatisfies predicate (String value) =
+  not (T.null value) && T.all predicate value
+textSatisfies _ _ = False
+
 reduceEquality :: Bool -> [Expr] -> Expr
 reduceEquality True values
   | length values < 2 = Symbol "True"
   | allEqual values = Symbol "True"
   | Just numericValues <- traverse explicitRealExact values =
       boolean (allEqual numericValues)
+  | Just orderings <- numericAdjacentOrderings values =
+      boolean (all (== EQ) orderings)
   | otherwise = Call (Symbol "Equal") values
 reduceEquality False values
   | length values < 2 = Symbol "True"
   | not (allDistinct values) = Symbol "False"
   | Just numericValues <- traverse explicitRealExact values =
       boolean (allDistinct numericValues)
+  | Just orderings <- numericPairwiseOrderings values =
+      boolean (all (/= EQ) orderings)
   | otherwise = Call (Symbol "Unequal") values
 
-reduceOrdering :: (Exact -> Exact -> Bool) -> Text -> [Expr] -> Expr
+reduceOrdering :: (Ordering -> Bool) -> Text -> [Expr] -> Expr
 reduceOrdering relation headName values
   | length values < 2 = Symbol "True"
   | Just exactValues <- traverse toExact values =
-      boolean (and (zipWith relation exactValues (drop 1 exactValues)))
+      boolean
+        ( and
+            ( zipWith
+                (\left right -> relation (compareExact left right))
+                exactValues
+                (drop 1 exactValues)
+            )
+        )
+  | Just orderings <- numericAdjacentOrderings values =
+      boolean (all relation orderings)
   | otherwise = Call (Symbol headName) values
+
+numericAdjacentOrderings :: [Expr] -> Maybe [Ordering]
+numericAdjacentOrderings values =
+  traverse
+    (uncurry compareOrderableReal)
+    (zip values (drop 1 values))
+
+numericPairwiseOrderings :: [Expr] -> Maybe [Ordering]
+numericPairwiseOrderings values =
+  traverse
+    (uncurry compareOrderableReal)
+    [ (left, right)
+    | (index, left) <- zip [0 :: Int ..] values
+    , right <- drop (index + 1) values
+    ]
 
 reduceInequality :: [Expr] -> Expr
 reduceInequality values
@@ -2796,43 +4823,79 @@ reduceInequality values
     exactLeft <- toExact left
     exactRight <- toExact right
     relation <- case comparison of
-      "Less" -> Just (<)
-      "LessEqual" -> Just (<=)
-      "Greater" -> Just (>)
-      "GreaterEqual" -> Just (>=)
-      "Equal" -> Just (==)
-      "Unequal" -> Just (/=)
+      "Less" -> Just (== LT)
+      "LessEqual" -> Just (/= GT)
+      "Greater" -> Just (== GT)
+      "GreaterEqual" -> Just (/= LT)
+      "Equal" -> Just (== EQ)
+      "Unequal" -> Just (/= EQ)
       _ -> Nothing
-    pure (relation exactLeft exactRight)
+    pure (relation (compareExact exactLeft exactRight))
 
 unary :: Text -> (Expr -> Expr) -> [Expr] -> Expr
 unary _ function [value] = function value
 unary headName _ values = Call (Symbol headName) values
 
-unaryCallArguments :: Text -> ([Expr] -> [Expr]) -> [Expr] -> Expr
-unaryCallArguments _ function [Call expressionHead values] = Call expressionHead (function values)
-unaryCallArguments headName _ values = Call (Symbol headName) values
-
 reduceParity :: Bool -> Text -> [Expr] -> Expr
 reduceParity evenMode _ [Integer value] = boolean (even value == evenMode)
 reduceParity _ headName values = Call (Symbol headName) values
 
-reduceFirstLast :: Bool -> Text -> [Expr] -> Expr
-reduceFirstLast first _ [association]
-  | Just entries <- associationEntries association
-  , AssociationEntry _ _ value : remaining <- entries =
-      if first then value else foldl' (\_ (AssociationEntry _ _ next) -> next) value remaining
-reduceFirstLast first _ [Call _ (value : remaining)] =
-  if first then value else foldl' (\_ next -> next) value remaining
-reduceFirstLast _ headName values = Call (Symbol headName) values
+reduceFirstLast :: Bool -> Text -> [Expr] -> Either EvaluationError Expr
+reduceFirstLast first headName values = case values of
+  [expression] -> select expression Nothing
+  [expression, defaultValue] -> select expression (Just defaultValue)
+  _ -> Left (EvaluationError (headName <> " expects one or two arguments."))
+ where
+  select expression defaultValue
+    | Just entries <- associationEntries expression = case entries of
+        [] -> missing expression defaultValue
+        firstEntry : remaining ->
+          let AssociationEntry _ _ value =
+                if first then firstEntry else foldl' (\_ next -> next) firstEntry remaining
+           in Right value
+  select expression@(Call _ arguments') defaultValue = case arguments' of
+    [] -> missing expression defaultValue
+    firstArgument : remaining ->
+      Right (if first then firstArgument else foldl' (\_ next -> next) firstArgument remaining)
+  select expression defaultValue = missing expression defaultValue
+  missing _ (Just defaultValue) = Right defaultValue
+  missing expression Nothing =
+    Left
+      ( EvaluationError
+          ("Cannot take " <> headName <> " of " <> inputForm expression <> ".")
+      )
 
-reduceRestMost :: Bool -> Text -> [Expr] -> Expr
-reduceRestMost rest _ [association]
-  | Just entries@(_ : _) <- associationEntries association =
-      associationExpr (if rest then drop 1 entries else reverse (drop 1 (reverse entries)))
-reduceRestMost rest _ [Call expressionHead values@(_ : _)] =
-  Call expressionHead (if rest then drop 1 values else reverse (drop 1 (reverse values)))
-reduceRestMost _ headName values = Call (Symbol headName) values
+reduceRestMost :: Bool -> Text -> [Expr] -> Either EvaluationError Expr
+reduceRestMost restMode headName = \case
+  [expression]
+    | Just entries <- associationEntries expression -> case entries of
+        [] -> emptyError expression
+        _ ->
+          Right
+            ( associationExpr
+                (if restMode then drop 1 entries else reverse (drop 1 (reverse entries)))
+            )
+  [expression@(Call expressionHead arguments')] -> case arguments' of
+    [] -> emptyError expression
+    _ ->
+      Right
+        ( normalizeEvaluatedCall
+            expressionHead
+            (if restMode then drop 1 arguments' else reverse (drop 1 (reverse arguments')))
+        )
+  [_] -> Left (EvaluationError (headName <> " expects a nonatomic expression."))
+  _ -> Left (EvaluationError (headName <> " expects exactly one argument."))
+ where
+  emptyError expression =
+    Left
+      ( EvaluationError
+          ( "Cannot take "
+              <> headName
+              <> " of "
+              <> inputForm expression
+              <> " with length zero."
+          )
+      )
 
 reducePart :: [Expr] -> Either EvaluationError Expr
 reducePart values@[] = invalidPartArity values
@@ -3276,19 +5339,28 @@ reduceExtract [sparse@SparseArray {}, positions] = case sparseExtractPaths posit
         Right (if multiple then evaluatedList selected else firstSelected)
       [] -> Left (EvaluationError "Extract received an empty internal position set")
 reduceExtract [subject, positions] = do
-  let paths = positionPaths positions
-  if null paths
-    then Left (EvaluationError "Extract received an invalid position specification")
-    else do
-      selected <- traverse extractPath paths
-      case selected of
-        firstSelected : _ ->
-          pure (if hasMultiplePositionPaths positions then evaluatedList selected else firstSelected)
-        [] -> Left (EvaluationError "Extract received an empty internal position set")
+  paths <-
+    maybe
+      ( Left
+          ( EvaluationError
+              "Extract positions must be a position list or a list of position lists."
+          )
+      )
+      Right
+      (operationPositionPaths positions)
+  selected <- traverse extractPath paths
+  case selected of
+    firstSelected : _ ->
+      pure (if hasMultiplePositionPaths positions then evaluatedList selected else firstSelected)
+    [] -> Left (EvaluationError "Extract received an empty internal position set")
  where
   extractPath path =
     maybe
-      (Left (EvaluationError "Extract received an invalid position"))
+      ( Left
+          ( EvaluationError
+              ("Part specifications are invalid for " <> inputForm subject <> ".")
+          )
+      )
       Right
       (selectAtPath path subject)
 reduceExtract values = Right (Call (Symbol "Extract") values)
@@ -3337,7 +5409,8 @@ data PathSelector
   deriving (Eq, Show)
 
 keySelectorValue :: Expr -> Maybe Expr
-keySelectorValue (Call (Symbol "Key") [key]) = Just key
+keySelectorValue (Call (Symbol keyHead) [key])
+  | systemHeadIn ["Key"] keyHead = Just key
 keySelectorValue _ = Nothing
 
 associationPartSelector :: Expr -> Maybe PathSelector
@@ -3497,6 +5570,10 @@ reduceValues values = Right (Call (Symbol "Values") values)
 
 reduceNormal :: [Expr] -> Either EvaluationError Expr
 reduceNormal [sparse@SparseArray {}] = sparseArrayNormal sparse
+reduceNormal [expression]
+  | Just expanded <-
+      AlgebraicRoots.expandRootSumForNormal algebraicRootContext expression =
+      Right expanded
 reduceNormal [association] = case associationEntries association of
   Just entries ->
     pure
@@ -3665,10 +5742,14 @@ valueGroupIndex key = go 0
     | otherwise = go (index + 1) rest
 
 listOrAssociationValues :: Text -> Expr -> Either EvaluationError [Expr]
-listOrAssociationValues _ (Call (Symbol "List") values) = Right values
-listOrAssociationValues operation association = do
-  entries <- requireAssociation operation association
-  pure [value | AssociationEntry _ _ value <- entries]
+listOrAssociationValues _ (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead = Right values
+listOrAssociationValues operation association =
+  case associationEntries association of
+    Just entries -> Right [value | AssociationEntry _ _ value <- entries]
+    Nothing ->
+      Left
+        (EvaluationError (operation <> " expects a list or association."))
 
 groupValuesBy :: Expr -> [Expr] -> Either EvaluationError [ValueGroup]
 groupValuesBy keyFunction = foldM add []
@@ -3699,7 +5780,7 @@ reduceGatherBy [dataExpression, keyFunction] = do
   values <- listOrAssociationValues "GatherBy" dataExpression
   groups <- groupValuesBy keyFunction values
   pure (list [list groupedValues | ValueGroup _ groupedValues <- groups])
-reduceGatherBy values = Right (Call (Symbol "GatherBy") values)
+reduceGatherBy _ = Left (EvaluationError "GatherBy currently expects two arguments.")
 
 reduceGather :: [Expr] -> Either EvaluationError Expr
 reduceGather [dataExpression] = do
@@ -3771,28 +5852,64 @@ reduceKeyIntersection [associations] = do
 reduceKeyIntersection values = Right (Call (Symbol "KeyIntersection") values)
 
 reduceTally :: [Expr] -> Either EvaluationError Expr
-reduceTally [dataExpression] = do
+reduceTally [dataExpression] = tallyValues dataExpression Nothing
+reduceTally [dataExpression, test] = tallyValues dataExpression (Just test)
+reduceTally _ =
+  Left
+    ( EvaluationError
+        "Tally expects a list and an optional binary test."
+    )
+
+tallyValues :: Expr -> Maybe Expr -> Either EvaluationError Expr
+tallyValues dataExpression test = do
   values <- listOrAssociationValues "Tally" dataExpression
-  let groups = foldl' (\retained value -> addValueGroup value value retained) [] values
+  groups <- foldM (addValueGroupBy test) [] values
   pure
     ( list
         [ list [key, Integer (fromIntegral (length groupedValues))]
         | ValueGroup key groupedValues <- groups
         ]
     )
-reduceTally values = Right (Call (Symbol "Tally") values)
+
+addValueGroupBy
+  :: Maybe Expr
+  -> [ValueGroup]
+  -> Expr
+  -> Either EvaluationError [ValueGroup]
+addValueGroupBy test groups value = do
+  matching <- matchingGroup 0 groups
+  pure $ case matching of
+    Nothing -> groups <> [ValueGroup value [value]]
+    Just index -> case groups !! index of
+      ValueGroup key groupedValues ->
+        replaceListIndex index (ValueGroup key (groupedValues <> [value])) groups
+ where
+  matchingGroup _ [] = Right Nothing
+  matchingGroup index (ValueGroup key _ : remaining) = do
+    matches <- equivalentBy test key value
+    if matches
+      then Right (Just index)
+      else matchingGroup (index + 1) remaining
 
 reduceCounts :: [Expr] -> Either EvaluationError Expr
-reduceCounts [dataExpression] = do
+reduceCounts [dataExpression] = countValues dataExpression Nothing
+reduceCounts [dataExpression, test] = countValues dataExpression (Just test)
+reduceCounts _ =
+  Left
+    ( EvaluationError
+        "Counts expects a list or association and an optional binary test."
+    )
+
+countValues :: Expr -> Maybe Expr -> Either EvaluationError Expr
+countValues dataExpression test = do
   values <- listOrAssociationValues "Counts" dataExpression
-  let groups = foldl' (\retained value -> addValueGroup value value retained) [] values
+  groups <- foldM (addValueGroupBy test) [] values
   pure
     ( associationExpr
         [ AssociationEntry "Rule" key (Integer (fromIntegral (length groupedValues)))
         | ValueGroup key groupedValues <- groups
         ]
     )
-reduceCounts values = Right (Call (Symbol "Counts") values)
 
 reduceCatenate :: [Expr] -> Either EvaluationError Expr
 reduceCatenate [dataExpression] = do
@@ -3807,21 +5924,74 @@ reduceCatenate values = Right (Call (Symbol "Catenate") values)
 
 reduceDifferences :: [Expr] -> Either EvaluationError Expr
 reduceDifferences [Call (Symbol "List") values] =
-  Right
-    ( list
-        ( zipWith
-            (\left right -> reducePlus [right, reduceTimes [Integer (-1), left]])
-            values
-            (drop 1 values)
+  Right (differenceAlongAxis 0 (Call (Symbol "List") values))
+reduceDifferences [subject, Integer order]
+  | order >= 0
+  , order <= fromIntegral (maxBound :: Int) =
+      Right (applyDifferenceOrder 0 (fromIntegral order) subject)
+reduceDifferences [subject, Call (Symbol listHead) orders]
+  | systemHeadIn ["List"] listHead
+  , Just integerOrders <- traverse nonnegativeDifferenceOrder orders =
+      Right
+        ( foldl'
+            (\current (axis, order) -> applyDifferenceOrder axis order current)
+            subject
+            (zip [0 :: Int ..] integerOrders)
         )
-    )
 reduceDifferences values = Right (Call (Symbol "Differences") values)
 
+nonnegativeDifferenceOrder :: Expr -> Maybe Int
+nonnegativeDifferenceOrder (Integer value)
+  | value >= 0
+  , value <= fromIntegral (maxBound :: Int) = Just (fromIntegral value)
+nonnegativeDifferenceOrder _ = Nothing
+
+applyDifferenceOrder :: Int -> Int -> Expr -> Expr
+applyDifferenceOrder _ 0 expression = expression
+applyDifferenceOrder axis order expression =
+  applyDifferenceOrder axis (order - 1) (differenceAlongAxis axis expression)
+
+differenceAlongAxis :: Int -> Expr -> Expr
+differenceAlongAxis 0 (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead =
+      list (zipWith subtractArrayValues values (drop 1 values))
+differenceAlongAxis axis (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead
+  , axis > 0 = list (map (differenceAlongAxis (axis - 1)) values)
+differenceAlongAxis _ expression = expression
+
+subtractArrayValues :: Expr -> Expr -> Expr
+subtractArrayValues (Call (Symbol leftHead) left) (Call (Symbol rightHead) right)
+  | systemHeadIn ["List"] leftHead
+  , systemHeadIn ["List"] rightHead
+  , length left == length right = list (zipWith subtractArrayValues left right)
+subtractArrayValues left right =
+  reducePlus [right, reduceTimes [Integer (-1), left]]
+
 reduceRiffle :: [Expr] -> Either EvaluationError Expr
-reduceRiffle [Call (Symbol "List") values, separator] = case separator of
-  Call (Symbol "List") [] -> Left (EvaluationError "Riffle expects a non-empty separator list")
-  Call (Symbol "List") separators -> Right (list (interleave separators values))
-  _ -> Right (list (interleave [separator] values))
+reduceRiffle = \case
+  [Call (Symbol "List") [], _separator] -> Right (list [])
+  [Call (Symbol "List") [], _separator, _spanExpression] -> Right (list [])
+  [Call (Symbol "List") values, separator] ->
+    Right (list (ordinaryRiffle values separator))
+  [Call (Symbol "List") values, separator, spanExpression] ->
+    list <$> riffleSpan values separator spanExpression
+  [_, _, _] ->
+    Left (EvaluationError "Riffle currently expects a List as the first argument.")
+  [_, _] ->
+    Left (EvaluationError "Riffle currently expects a List as the first argument.")
+  _ ->
+    Left
+      ( EvaluationError
+          "Riffle expects a list, a separator, and an optional ``{a, b, s}`` span."
+      )
+
+ordinaryRiffle :: [Expr] -> Expr -> [Expr]
+ordinaryRiffle [] _ = []
+ordinaryRiffle values separator = case separator of
+  Call (Symbol "List") [] -> values
+  Call (Symbol "List") separators -> interleave separators values
+  _ -> interleave [separator] values
  where
   interleave separators values' = go 0 values'
    where
@@ -3830,21 +6000,48 @@ reduceRiffle [Call (Symbol "List") values, separator] = case separator of
     go _ [single] = [single]
     go index (value : rest) =
       value : separators !! (index `mod` separatorCount) : go (index + 1) rest
-reduceRiffle values = Right (Call (Symbol "Riffle") values)
+
+riffleSpan :: [Expr] -> Expr -> Expr -> Either EvaluationError [Expr]
+riffleSpan values separator = \case
+  Call (Symbol "List") [Integer start, Integer end, Integer step]
+    | step <= 0 ->
+        Left (EvaluationError "Riffle span step must be a positive integer.")
+    | start < 1 ->
+        Left (EvaluationError "Riffle span start position must be a positive integer.")
+    | otherwise -> Right (place start end step 1 0 [])
+  Call (Symbol "List") [_first, _last, _step] ->
+    Left (EvaluationError "Riffle span spec components must be explicit integers.")
+  _ -> Left (EvaluationError "Riffle span spec must be a ``{a, b, s}`` list.")
+ where
+  count = length values
+  place nextPosition end step outputPosition itemIndex retained
+    | end > 0
+    , nextPosition > end =
+        retained <> drop itemIndex values
+    | outputPosition == nextPosition =
+        place (nextPosition + step) end step (outputPosition + 1) itemIndex (retained <> [separator])
+    | itemIndex < count =
+        place nextPosition end step (outputPosition + 1) (itemIndex + 1) (retained <> [values !! itemIndex])
+    | otherwise = retained
 
 reduceTruthCollection :: Text -> ([Bool] -> Bool) -> [Expr] -> Either EvaluationError Expr
 reduceTruthCollection operation combine [dataExpression, test] = do
   values <- listOrAssociationValues operation dataExpression
   outcomes <- traverse (evaluate . Call test . pure) values
   pure (boolean (combine (map (== Symbol "True") outcomes)))
-reduceTruthCollection operation _ values = Right (Call (Symbol operation) values)
+reduceTruthCollection operation _ _ =
+  Left
+    ( EvaluationError
+        (operation <> " expects a list and a test function.")
+    )
 
 reduceContains :: Text -> ([Expr] -> [Expr] -> Bool) -> [Expr] -> Either EvaluationError Expr
 reduceContains operation relation [left, right] = do
   leftValues <- listOrAssociationValues operation left
   rightValues <- listOrAssociationValues operation right
   pure (boolean (relation leftValues rightValues))
-reduceContains operation _ values = Right (Call (Symbol operation) values)
+reduceContains operation _ _ =
+  Left (EvaluationError (operation <> " expects exactly two arguments."))
 
 containsAll :: [Expr] -> [Expr] -> Bool
 containsAll left right = all (`elem` left) right
@@ -3857,7 +6054,7 @@ containsExactly left right = containsAll left right && containsAll right left
 
 reduceContainsOnly :: [Expr] -> Either EvaluationError Expr
 reduceContainsOnly arguments' = do
-  (dataArguments, sameTest) <- splitSameTestOption "ContainsOnly" arguments'
+  (dataArguments, sameTest) <- splitContainsOnlyOptions arguments'
   case dataArguments of
     [left, right] -> do
       leftValues <- listOrAssociationValues "ContainsOnly" left
@@ -3873,17 +6070,30 @@ reduceContainsOnly arguments' = do
             "ContainsOnly expects two arguments and an optional SameTest rule."
         )
 
-splitSameTestOption
-  :: Text
-  -> [Expr]
+splitContainsOnlyOptions
+  :: [Expr]
   -> Either EvaluationError ([Expr], Maybe Expr)
-splitSameTestOption _operation arguments' = case reverse arguments' of
-  Call (Symbol ruleHead) [Symbol optionName, function] : remaining
-    | systemHeadIn ["Rule", "RuleDelayed"] ruleHead
-    , systemHeadIn ["SameTest"] optionName ->
-        Right (reverse remaining, normalizeAutomatic function)
-  _ -> Right (arguments', Nothing)
+splitContainsOnlyOptions arguments'
+  | length arguments' < 2 = Right (arguments', Nothing)
+  | otherwise = do
+      sameTest <- foldM option Nothing (drop 2 arguments')
+      Right (take 2 arguments', sameTest)
  where
+  option _ (Call (Symbol ruleHead) [Symbol optionName, function])
+    | systemHeadIn ["Rule", "RuleDelayed"] ruleHead
+    , systemHeadIn ["SameTest"] optionName =
+        Right (normalizeAutomatic function)
+  option _ (Call (Symbol ruleHead) [Symbol _, _])
+    | systemHeadIn ["Rule", "RuleDelayed"] ruleHead =
+    Left
+      ( EvaluationError
+          "ContainsOnly currently supports only the SameTest option."
+      )
+  option _ _ =
+    Left
+      ( EvaluationError
+          "ContainsOnly expects two arguments and an optional SameTest rule."
+      )
   normalizeAutomatic (Symbol name)
     | systemHeadIn ["Automatic"] name = Nothing
   normalizeAutomatic value = Just value
@@ -4054,7 +6264,8 @@ reduceCountsBy [subject, function] = do
         | ValueGroup key groupedValues <- groups
         ]
     )
-reduceCountsBy _ = Left (EvaluationError "CountsBy expects a collection and a function.")
+reduceCountsBy _ =
+  Left (EvaluationError "CountsBy expects a list and a key function.")
 
 reduceSubsequences :: [Expr] -> Either EvaluationError Expr
 reduceSubsequences arguments' = case arguments' of
@@ -4136,6 +6347,9 @@ collectionSizes operation maximumSize _ (Just specification) = case specificatio
     | size >= 0 -> Right (inBounds [fromIntegral size])
   Call (Symbol "List") [Integer lower, Integer upper]
     | lower >= 0 && upper >= lower -> Right (inBounds [fromIntegral lower .. fromIntegral upper])
+  Call (Symbol "List") [Integer lower, Integer upper, Integer step]
+    | lower >= 0 && upper >= lower && step > 0 ->
+        Right (inBounds (map fromIntegral [lower, lower + step .. upper]))
   Integer upper
     | upper >= 0 -> Right [0 .. min maximumSize (fromIntegral upper)]
   _ -> Left (EvaluationError (operation <> " received an unsupported size specification"))
@@ -4382,10 +6596,20 @@ reducePad :: Bool -> [Expr] -> Either EvaluationError Expr
 reducePad leftMode = \case
   [Call (Symbol "List") values, Integer target] -> pad values target (Integer 0)
   [Call (Symbol "List") values, Integer target, fill] -> pad values target fill
-  values -> Right (Call (Symbol (if leftMode then "PadLeft" else "PadRight")) values)
+  [Call (Symbol "List") _, _, _] ->
+    Left (EvaluationError (operationName <> " expects an integer target length."))
+  [Call (Symbol "List") _, _] ->
+    Left (EvaluationError (operationName <> " expects an integer target length."))
+  [_expression, _target, _fill] ->
+    Left (EvaluationError (operationName <> " currently expects a List as the first argument."))
+  [_expression, _target] ->
+    Left (EvaluationError (operationName <> " currently expects a List as the first argument."))
+  _ -> Left (EvaluationError (operationName <> " expects two or three arguments."))
  where
+  operationName = if leftMode then "PadLeft" else "PadRight"
   pad values target fill
-    | target < 0 = Left (EvaluationError "PadLeft/PadRight expects a non-negative target length")
+    | target < 0 =
+        Left (EvaluationError (operationName <> " expects a non-negative target length."))
     | targetLength <= length values =
         Right
           ( list
@@ -4410,20 +6634,63 @@ reduceMinMax minimumMode headName originalValues =
         then absorbing
         else
           let candidates = filter (/= identity) values
-              numeric = [(value, exactValue) | value <- candidates, Just exactValue <- [explicitRealExact value]]
-              symbolic = [value | value <- candidates, explicitRealExact value == Nothing]
+              numeric = [value | value <- candidates, isNumericMinMaxCandidate value]
+              symbolic = [value | value <- candidates, not (isNumericMinMaxCandidate value)]
               best = foldl' chooseBetter Nothing numeric
-              resultValues = uniqueSortedCanonical (maybe symbolic ((: symbolic) . fst) best)
+              resultValues = uniqueSortedCanonical (maybe symbolic (: symbolic) best)
            in case resultValues of
                 [] -> identity
                 [single] -> single
                 _ -> Call (Symbol headName) resultValues
  where
   chooseBetter Nothing candidate = Just candidate
-  chooseBetter current@(Just (_, bestValue)) candidate@(_, candidateValue)
-    | (minimumMode && compareExact candidateValue bestValue == LT)
-        || (not minimumMode && compareExact candidateValue bestValue == GT) = Just candidate
+  chooseBetter current@(Just bestValue) candidateValue
+    | Just ordering <- compareOrderableReal candidateValue bestValue
+    , (minimumMode && ordering == LT)
+        || (not minimumMode && ordering == GT) = Just candidateValue
     | otherwise = current
+
+  isNumericMinMaxCandidate value =
+    isOrderableReal value
+      || NumericPrecision.compareNumericRealExpressions value value == Just EQ
+
+reduceUnitStep :: [Expr] -> Expr
+reduceUnitStep values
+  | null values = Integer 1
+  | Just orderings <- traverse (`compareOrderableReal` Integer 0) values =
+      Integer (if all (/= LT) orderings then 1 else 0)
+  | otherwise = Call (Symbol "UnitStep") values
+
+reduceNumericSimplify :: Text -> [Expr] -> Expr
+reduceNumericSimplify headName = \case
+  [value]
+    | isNumericPythagoreanIdentity value -> Integer 1
+    | Just reduced <-
+        AlgebraicRoots.reduceAlgebraicRootBuiltin
+          algebraicRootContext
+          "RootReduce"
+          [value]
+    , reduced /= value -> reduced
+    | otherwise -> value
+  values -> Call (Symbol headName) values
+
+isNumericPythagoreanIdentity :: Expr -> Bool
+isNumericPythagoreanIdentity (Call (Symbol plusHead) terms)
+  | systemHeadIn ["Plus"] plusHead
+  , [left, right] <- terms =
+      case (squaredTrig left, squaredTrig right) of
+        (Just (leftName, leftArgument), Just (rightName, rightArgument)) ->
+          leftArgument == rightArgument
+            && Set.fromList [leftName, rightName] == Set.fromList ["Cos", "Sin"]
+            && numericValueReality leftArgument /= Nothing
+        _ -> False
+ where
+  squaredTrig (Call (Symbol powerHead) [Call (Symbol trigHead) [argument], Integer 2])
+    | systemHeadIn ["Power"] powerHead
+    , Just normalizedTrig <- normalizeSystemSymbolName trigHead
+    , normalizedTrig `elem` ["Cos", "Sin"] = Just (normalizedTrig, argument)
+  squaredTrig _ = Nothing
+isNumericPythagoreanIdentity _ = False
 
 flattenMinMaxArgument :: Text -> Expr -> [Expr]
 flattenMinMaxArgument headName (Call (Symbol nestedHead) values)
@@ -5002,6 +7269,12 @@ data OrderedItem = OrderedItem !Int !Expr !(Maybe AssociationEntry) ![Expr]
 canonicalCompare :: Expr -> Expr -> Ordering
 canonicalCompare left right
   | left == right = EQ
+  | Just (leftReal, leftImaginary) <- orderableComplexParts left
+  , Just (rightReal, rightImaginary) <- orderableComplexParts right =
+      case compareOrderableReal leftReal rightReal of
+        Just EQ -> maybe (compare (fullForm leftImaginary) (fullForm rightImaginary)) id (compareOrderableReal leftImaginary rightImaginary)
+        Just ordering -> ordering
+        Nothing -> compare (fullForm left) (fullForm right)
   | Just leftExact <- toExact left
   , Just rightExact <- toExact right =
       case compareExact leftExact rightExact of
@@ -5018,6 +7291,56 @@ canonicalCompare (Call leftHead leftValues) (Call rightHead rightValues) =
     ordering -> ordering
 canonicalCompare left right = compare (fullForm left) (fullForm right)
 
+orderableComplexParts :: Expr -> Maybe (Expr, Expr)
+orderableComplexParts (Complex realPart imaginaryPart)
+  | isOrderableReal realPart
+  , isOrderableReal imaginaryPart = Just (realPart, imaginaryPart)
+orderableComplexParts expression
+  | isOrderableReal expression = Just (expression, Integer 0)
+orderableComplexParts _ = Nothing
+
+isOrderableReal :: Expr -> Bool
+isOrderableReal expression = case expression of
+  Integer {} -> True
+  Rational {} -> True
+  Real {} -> True
+  SpecialReal {} -> True
+  Symbol name -> systemHeadIn ["Infinity", "-Infinity"] name
+  _ -> False
+
+compareOrderableReal :: Expr -> Expr -> Maybe Ordering
+compareOrderableReal left right
+  | left == right = Just EQ
+compareOrderableReal (SpecialReal OverflowReal) _ = Just GT
+compareOrderableReal _ (SpecialReal OverflowReal) = Just LT
+compareOrderableReal (SpecialReal UnderflowReal) right =
+  compareUnderflowRight right
+compareOrderableReal left (SpecialReal UnderflowReal) =
+  invertOrdering <$> compareUnderflowRight left
+compareOrderableReal (Symbol leftName) _right
+  | systemHeadIn ["Infinity"] leftName = Just GT
+  | systemHeadIn ["-Infinity"] leftName = Just LT
+compareOrderableReal _left (Symbol rightName)
+  | systemHeadIn ["Infinity"] rightName = Just LT
+  | systemHeadIn ["-Infinity"] rightName = Just GT
+compareOrderableReal left right
+  | Real {} <- left = compare <$> explicitRealDouble left <*> explicitRealDouble right
+  | Real {} <- right = compare <$> explicitRealDouble left <*> explicitRealDouble right
+  | Just leftExact <- explicitRealExact left
+  , Just rightExact <- explicitRealExact right = Just (compareExact leftExact rightExact)
+compareOrderableReal left right =
+  NumericPrecision.compareNumericRealExpressions left right
+
+compareUnderflowRight :: Expr -> Maybe Ordering
+compareUnderflowRight expression
+  | Symbol name <- expression
+  , systemHeadIn ["Infinity"] name = Just LT
+  | Symbol name <- expression
+  , systemHeadIn ["-Infinity"] name = Just GT
+  | otherwise = do
+      value <- explicitRealDouble expression
+      Just (if value <= 0 then GT else LT)
+
 compareExact :: Exact -> Exact -> Ordering
 compareExact (Exact leftNumerator leftDenominator) (Exact rightNumerator rightDenominator) =
   compare (leftNumerator * rightDenominator) (rightNumerator * leftDenominator)
@@ -5026,6 +7349,7 @@ numericKindRank :: Expr -> Int
 numericKindRank Integer {} = 0
 numericKindRank Rational {} = 1
 numericKindRank Real {} = 2
+numericKindRank SpecialReal {} = 2
 numericKindRank Complex {} = 3
 numericKindRank Root {} = 4
 numericKindRank _ = 5
@@ -5035,6 +7359,7 @@ expressionKindRank expression = case expression of
   Integer {} -> 0
   Rational {} -> 0
   Real {} -> 0
+  SpecialReal {} -> 0
   Complex {} -> 0
   Root {} -> 0
   String {} -> 1
@@ -5084,12 +7409,19 @@ orderingFunctionCompare (Just function) = compareWithFunction
       _ -> EQ
     _ -> canonicalCompare left right
 
-reduceOrder :: [Expr] -> Expr
-reduceOrder [left, right] = Integer $ case canonicalCompare left right of
-  LT -> 1
-  EQ -> 0
-  GT -> -1
-reduceOrder values = Call (Symbol "Order") values
+reduceOrder :: [Expr] -> Either EvaluationError Expr
+reduceOrder [left, right] = Right (Integer result)
+ where
+  ordering
+    | left /= right
+    , compareOrderableReal left right == Just EQ =
+        compare (numericKindRank left, fullForm left) (numericKindRank right, fullForm right)
+    | otherwise = canonicalCompare left right
+  result = case ordering of
+    LT -> 1
+    EQ -> 0
+    GT -> -1
+reduceOrder _ = Left (EvaluationError "Order expects exactly two arguments.")
 
 reduceOrderedQ :: [Expr] -> Either EvaluationError Expr
 reduceOrderedQ = \case
@@ -5194,6 +7526,7 @@ naturalSortParts source = case T.uncons source of
 
 reduceLexicographicOrder :: [Expr] -> Either EvaluationError Expr
 reduceLexicographicOrder arguments' = case arguments' of
+  [function] -> Right (Call (Symbol "LexicographicOrder") [function])
   [left, right] -> Right (orderResult (lexicographicCompare Nothing left right))
   [left, right, function] ->
     Right (orderResult (lexicographicCompare (Just function) left right))
@@ -5591,7 +7924,7 @@ reducePick = \case
   pickSubject subject (Call (Symbol "List") selectors) pattern = do
     items <- orderedItems "Pick" subject
     if length items /= length selectors
-      then Left (EvaluationError "Pick expects one selector per first-level value")
+      then Left (EvaluationError "Pick currently expects selector parts compatible with the data shape.")
       else
         pure
           ( rebuildOrdered
@@ -6657,7 +8990,7 @@ levelInfinity :: Int
 levelInfinity = maxBound `div` 4
 
 normalizeLevelSpec :: Expr -> Either EvaluationError LevelBounds
-normalizeLevelSpec = \case
+normalizeLevelSpec specification = case specification of
   Integer level
     | level >= 0 -> Right (LevelBounds (if level == 0 then 0 else 1) (integerLevel level))
     | otherwise -> Right (LevelBounds 1 (integerLevel level))
@@ -6665,9 +8998,15 @@ normalizeLevelSpec = \case
   Call (Symbol "List") [bound] -> do
     value <- normalizeLevelBound bound
     Right (LevelBounds value value)
-  Call (Symbol "List") [lower, upper] ->
+  Call (Symbol "List") [lower, upper]
+    | isLevelBound lower
+    , isLevelBound upper ->
     LevelBounds <$> normalizeLevelBound lower <*> normalizeLevelBound upper
-  _ -> Left (EvaluationError "an unsupported level specification was provided")
+  _ ->
+    Left
+      ( EvaluationError
+          ("Unsupported Level specification: '" <> inputForm specification <> "'.")
+      )
  where
   integerLevel value
     | value > fromIntegral levelInfinity = levelInfinity
@@ -6680,7 +9019,13 @@ normalizeLevelBound (Integer value)
   | value < fromIntegral (negate levelInfinity) = Right (negate levelInfinity)
   | otherwise = Right (fromIntegral value)
 normalizeLevelBound (Symbol "Infinity") = Right levelInfinity
-normalizeLevelBound _ = Left (EvaluationError "an unsupported level bound was provided")
+normalizeLevelBound value =
+  Left (EvaluationError ("Unsupported level bound: " <> inputForm value <> "."))
+
+isLevelBound :: Expr -> Bool
+isLevelBound Integer {} = True
+isLevelBound (Symbol "Infinity") = True
+isLevelBound _ = False
 
 reduceLevel :: [Expr] -> Either EvaluationError Expr
 reduceLevel arguments' = case map stripUnevaluated arguments' of
@@ -6689,13 +9034,13 @@ reduceLevel arguments' = case map stripUnevaluated arguments' of
   [expression, specification, Symbol "False"] ->
     levelAtSpecification expression specification
   [_, _, Symbol "True"] ->
-    Left (EvaluationError "Level[..., ..., True] is not implemented yet")
+    Left (EvaluationError "Level[..., ..., True] is not implemented yet.")
   [_, _, _] ->
-    Left (EvaluationError "the optional third Level argument must be True or False")
+    Left (EvaluationError "The optional third Level argument must be True or False.")
   _ ->
     Left
       ( EvaluationError
-          "Level expects an expression, a level specification, and an optional heads flag"
+          "Level expects an expression, a level specification, and an optional heads flag."
       )
  where
   stripUnevaluated (Call (Symbol "Unevaluated") [value]) = value
@@ -7060,40 +9405,107 @@ reduceTotal [Call (Symbol "List") values] = reducePlus values
 reduceTotal [association]
   | Just entries <- associationEntries association =
       reducePlus [value | AssociationEntry _ _ value <- entries]
+reduceTotal [subject, Call (Symbol listHead) [Integer level]]
+  | systemHeadIn ["List"] listHead
+  , level >= 1
+  , level <= fromIntegral (maxBound :: Int) =
+      totalAtExactLevel (fromIntegral level) subject
+reduceTotal [subject, Integer level]
+  | level >= 1
+  , level <= fromIntegral (maxBound :: Int) =
+      iterateTotal (fromIntegral level) subject
+reduceTotal [subject, Symbol infinityName]
+  | systemHeadIn ["Infinity"] infinityName = reducePlus (arrayLeaves subject)
 reduceTotal values = Call (Symbol "Total") values
 
-reduceAccumulate :: [Expr] -> Expr
-reduceAccumulate [association]
-  | Just entries@(AssociationEntry _ _ firstValue : remaining) <- associationEntries association =
-      let accumulatedValues =
-            scanl
-              (\accumulator (AssociationEntry _ _ value) -> reducePlus [accumulator, value])
-              firstValue
-              remaining
-       in associationExpr
+totalAtExactLevel :: Int -> Expr -> Expr
+totalAtExactLevel 1 expression = reduceTotal [expression]
+totalAtExactLevel level (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead = list (map (totalAtExactLevel (level - 1)) values)
+totalAtExactLevel _ expression = expression
+
+iterateTotal :: Int -> Expr -> Expr
+iterateTotal 0 expression = expression
+iterateTotal count expression = iterateTotal (count - 1) (reduceTotal [expression])
+
+arrayLeaves :: Expr -> [Expr]
+arrayLeaves (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead = concatMap arrayLeaves values
+arrayLeaves expression = [expression]
+
+reduceAccumulate :: [Expr] -> Either EvaluationError Expr
+reduceAccumulate [subject] = accumulateExpression subject (Symbol "Plus")
+reduceAccumulate [subject, combiner] = accumulateExpression subject combiner
+reduceAccumulate _ =
+  Left
+    ( EvaluationError
+        "Accumulate expects a list and an optional binary combiner."
+    )
+
+accumulateExpression :: Expr -> Expr -> Either EvaluationError Expr
+accumulateExpression association combiner
+  | Just entries <- associationEntries association = do
+      accumulated <- accumulateValues combiner (map associationEntryValue entries)
+      pure
+        ( associationExpr
             ( zipWith
                 (\(AssociationEntry ruleHead key _) value -> AssociationEntry ruleHead key value)
                 entries
-                accumulatedValues
+                accumulated
             )
-reduceAccumulate [Call (Symbol "List") values] =
-  list (drop 1 (scanl (\acc value -> reducePlus [acc, value]) (Integer 0) values))
-reduceAccumulate values = Call (Symbol "Accumulate") values
+        )
+accumulateExpression (Call (Symbol listHead) values) combiner
+  | systemHeadIn ["List"] listHead = list <$> accumulateValues combiner values
+accumulateExpression _ _ =
+  Left (EvaluationError "Accumulate expects a list or association.")
 
-reduceAppendPrepend :: Bool -> Text -> [Expr] -> Expr
+accumulateValues :: Expr -> [Expr] -> Either EvaluationError [Expr]
+accumulateValues _ [] = Right []
+accumulateValues combiner (firstValue : remaining) =
+  scan firstValue [firstValue] remaining
+ where
+  scan _ retained [] = Right retained
+  scan accumulator retained (value : rest) = do
+    next <- evaluate (Call combiner [accumulator, value])
+    scan next (retained <> [next]) rest
+
+reduceAppendPrepend :: Bool -> Text -> [Expr] -> Either EvaluationError Expr
 reduceAppendPrepend prepend _ [association, item]
-  | Just entries <- associationEntries association
-  , Just newEntry@(AssociationEntry _ newKey _) <- ruleEntry item =
-      let retained = [entry | entry@(AssociationEntry _ key _) <- entries, key /= newKey]
-       in associationExpr (if prepend then newEntry : retained else retained <> [newEntry])
+  | Just entries <- associationEntries association = case ruleEntry item of
+      Just newEntry@(AssociationEntry _ newKey _) ->
+        let retained = [entry | entry@(AssociationEntry _ key _) <- entries, key /= newKey]
+         in Right (associationExpr (if prepend then newEntry : retained else retained <> [newEntry]))
+      Nothing ->
+        Left
+          ( EvaluationError
+              ( (if prepend then "Prepend" else "Append")
+                  <> " expects a rule when "
+                  <> (if prepend then "prepending to" else "appending to")
+                  <> " an Association."
+              )
+          )
 reduceAppendPrepend prepend _ [Call expressionHead values, item] =
-  Call expressionHead (if prepend then item : values else values <> [item])
-reduceAppendPrepend _ headName values = Call (Symbol headName) values
+  Right
+    ( normalizeEvaluatedCall
+        expressionHead
+        (if prepend then item : values else values <> [item])
+    )
+reduceAppendPrepend _ headName [_, _] =
+  Left (EvaluationError (headName <> " expects a nonatomic expression."))
+reduceAppendPrepend _ headName _ =
+  Left (EvaluationError (headName <> " expects exactly two arguments."))
 
 reduceRotate :: Bool -> Text -> [Expr] -> Expr
 reduceRotate left headName = \case
   [subject] -> rotate subject 1
   [subject, Integer amount] -> rotate subject amount
+  [subject, Call (Symbol listHead) amounts]
+    | systemHeadIn ["List"] listHead
+    , Just integerAmounts <- traverse integerValue amounts ->
+        foldl'
+          (\current (axis, amount) -> rotateAxis axis amount current)
+          subject
+          (zip [0 :: Int ..] integerAmounts)
   values -> Call (Symbol headName) values
  where
   rotate (Call expressionHead arguments') amount
@@ -7104,6 +9516,11 @@ reduceRotate left headName = \case
             offset = fromIntegral (signed `mod` fromIntegral count)
          in Call expressionHead (drop offset arguments' <> take offset arguments')
   rotate subject amount = Call (Symbol headName) [subject, Integer amount]
+  rotateAxis 0 amount expression = rotate expression amount
+  rotateAxis axis amount (Call (Symbol listHead) values)
+    | systemHeadIn ["List"] listHead
+    , axis > 0 = list (map (rotateAxis (axis - 1) amount) values)
+  rotateAxis _ _ expression = expression
 
 reduceDimensions :: [Expr] -> Either EvaluationError Expr
 reduceDimensions [SparseArray dimensions _ _] =
@@ -7765,6 +10182,8 @@ normalizeArrayOrigins _ (Just _) =
     )
 
 reduceConstantArray :: [Expr] -> Either EvaluationError Expr
+reduceConstantArray [_value, dimensionsExpression]
+  | hasLeadingZeroDenseDimension dimensionsExpression = Right (evaluatedList [])
 reduceConstantArray [value, dimensionsExpression] = do
   dimensions <- normalizeDenseDimensions "ConstantArray" dimensionsExpression
   buildDenseArrayM "ConstantArray" dimensions (const (Right value))
@@ -7788,11 +10207,15 @@ arrayReshape sparse@SparseArray {} dimensionsExpression padding = do
     normalizeArbitraryDimensions "ArrayReshape" dimensionsExpression
   sparseArrayReshape sparse dimensions dimensionsExpression padding
 arrayReshape expression dimensionsExpression padding = do
-  dimensions <- normalizeDenseDimensions "ArrayReshape" dimensionsExpression
-  guardDenseArrayMaterialization "ArrayReshape" dimensions
-  let (result, _) = buildReshaped dimensions (denseLeafValues expression)
-  Right result
+  if hasLeadingZeroDenseDimension dimensionsExpression
+    then Right (evaluatedList [])
+    else reshapeDense
  where
+  reshapeDense = do
+    dimensions <- normalizeDenseDimensions "ArrayReshape" dimensionsExpression
+    guardDenseArrayMaterialization "ArrayReshape" dimensions
+    let (result, _) = buildReshaped dimensions (denseLeafValues expression)
+    Right result
   buildReshaped [] (value : remaining) = (value, remaining)
   buildReshaped [] [] = (padding, [])
   buildReshaped (dimension : remainingDimensions) available =
@@ -7803,6 +10226,20 @@ arrayReshape expression dimensionsExpression padding = do
     buildChildren count rest built =
       let (child, next) = buildReshaped remainingDimensions rest
        in buildChildren (count - 1) next (child : built)
+
+hasLeadingZeroDenseDimension :: Expr -> Bool
+hasLeadingZeroDenseDimension (Integer dimension) = dimension == 0
+hasLeadingZeroDenseDimension (Call (Symbol listHead) dimensions)
+  | systemHeadIn ["List"] listHead
+  , Just values <- traverse explicitNonnegative dimensions =
+      case values of
+        firstDimension : _ -> firstDimension == 0
+        [] -> False
+ where
+  explicitNonnegative (Integer value)
+    | value >= 0 = Just value
+  explicitNonnegative _ = Nothing
+hasLeadingZeroDenseDimension _ = False
 
 sparseArrayReshape
   :: Expr
@@ -8573,7 +11010,7 @@ partitionDense
   -> Maybe Expr
   -> Either EvaluationError Expr
 partitionDense expression sizeExpression offsetExpression alignmentExpression padding = do
-  window <- positivePartitionInteger "block sizes" sizeExpression
+  window <- positivePartitionInteger "block sizes and offsets" sizeExpression
   step <- case offsetExpression of
     Nothing -> Right window
     Just value -> positivePartitionInteger "block sizes and offsets" value
@@ -8643,8 +11080,8 @@ partitionAlignment window value
 
 reduceTakeList :: [Expr] -> Either EvaluationError Expr
 reduceTakeList [expression, Call (Symbol "List") specifications] = do
-  (taken, _) <- foldM consume ([], expression) specifications
-  Right (evaluatedList taken)
+  (taken, _) <- foldM consume ([], stripTakeDropUnevaluated expression) specifications
+  Right (normalizeEvaluatedCall (Symbol "List") taken)
  where
   consume (taken, remaining) (Symbol "All") = do
     let emptied = case requireDenseSequence "TakeList" remaining of
@@ -8663,7 +11100,7 @@ reduceTakeDropPair :: [Expr] -> Either EvaluationError Expr
 reduceTakeDropPair [expression, specification] = do
   taken <- reduceTakeDrop True [expression, specification]
   dropped <- reduceTakeDrop False [expression, specification]
-  Right (evaluatedList [taken, dropped])
+  Right (normalizeEvaluatedCall (Symbol "List") [taken, dropped])
 reduceTakeDropPair _ = Left (EvaluationError "TakeDrop expects exactly two arguments.")
 
 data SequenceSearchMode
@@ -8748,6 +11185,435 @@ sequenceSearchSpans items patternExpression arity = go 0
         patternExpression =
         (start, start + arity) : go (start + arity)
     | otherwise = go (start + 1)
+
+reduceConstruct :: [Expr] -> Either EvaluationError Expr
+reduceConstruct [] =
+  Left (EvaluationError "Construct expects at least one argument.")
+reduceConstruct (function : functionArguments) =
+  evaluate (Call function functionArguments)
+
+reduceComposeList :: [Expr] -> Either EvaluationError Expr
+reduceComposeList [Call _ functions, initial] =
+  compose functions initial [initial]
+ where
+  compose [] _ retained = Right (evaluatedList retained)
+  compose (function : remaining) current retained = do
+    updated <- evaluate (Call function [current])
+    compose remaining updated (retained <> [updated])
+reduceComposeList [_functions, _initial] =
+  Left
+    ( EvaluationError
+        "ComposeList expects a list or other nonatomic expression of functions."
+    )
+reduceComposeList _ =
+  Left (EvaluationError "ComposeList expects exactly two arguments.")
+
+reduceComap :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceComap applyToArguments arguments' = case arguments' of
+  [functions] -> Right (Call (Symbol operation) [functions])
+  [functions, subject] -> mapFunctions functions subject
+  _ -> Left (EvaluationError (operation <> " expects exactly two arguments."))
+ where
+  operation = if applyToArguments then "ComapApply" else "Comap"
+
+  mapFunctions functions subject = case associationEntries functions of
+    Just entries -> associationExpr <$> traverse (mapEntry subject) entries
+    Nothing -> case functions of
+      Call expressionHead values -> do
+        mapped <- traverse (applyFunction subject) values
+        Right (normalizeEvaluatedCall expressionHead mapped)
+      _ -> Right functions
+
+  mapEntry subject (AssociationEntry ruleHead key function) =
+    AssociationEntry ruleHead key <$> applyFunction subject function
+
+  applyFunction subject function
+    | applyToArguments = case comapApplyArguments subject of
+        Nothing -> Right subject
+        Just values -> applyCallable function values
+    | otherwise = applyCallable function [subject]
+
+  applyCallable (Symbol nothingHead) _
+    | systemHeadIn ["Nothing"] nothingHead = Right (Symbol "Nothing")
+  applyCallable function values = evaluate (Call function values)
+
+  comapApplyArguments subject = case associationEntries subject of
+    Just entries ->
+      Just [value | AssociationEntry _ _ value <- entries]
+    Nothing -> case subject of
+      Call _ values -> Just values
+      _ -> Nothing
+
+reduceNest :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceNest returnHistory [function, initial, countExpression] = do
+  iterations <-
+    nonNegativeIterationCount
+      operation
+      "expects a non-negative integer iteration count."
+      countExpression
+  nested <- buildNestHistory function iterations [initial]
+  Right (if returnHistory then evaluatedList nested else last nested)
+ where
+  operation = if returnHistory then "NestList" else "Nest"
+reduceNest returnHistory _ =
+  Left
+    ( EvaluationError
+        ( (if returnHistory then "NestList" else "Nest")
+            <> " expects exactly three arguments."
+        )
+    )
+
+buildNestHistory
+  :: Expr
+  -> Integer
+  -> [Expr]
+  -> Either EvaluationError [Expr]
+buildNestHistory _ 0 retained = Right retained
+buildNestHistory function remaining retained = do
+  updated <- evaluate (Call function [last retained])
+  buildNestHistory function (remaining - 1) (retained <> [updated])
+
+reduceNestWhile :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceNestWhile returnHistory arguments' = case arguments' of
+  [function, initial, test] ->
+    nestWhile function initial test Nothing Nothing
+  [function, initial, test, historyExpression] ->
+    nestWhile function initial test (Just historyExpression) Nothing
+  [function, initial, test, historyExpression, maximumExpression] ->
+    nestWhile
+      function
+      initial
+      test
+      (Just historyExpression)
+      (Just maximumExpression)
+  _ ->
+    Left
+      ( EvaluationError
+          ( operation
+              <> " expects f, expr, test, optional m, optional max."
+          )
+      )
+ where
+  operation = if returnHistory then "NestWhileList" else "NestWhile"
+  nestWhile function initial test historyExpression maximumExpression = do
+    historySize <- normalizeNestWhileHistory historyExpression
+    maximumIterations <- normalizeNestWhileMaximum maximumExpression
+    history <- iterateWhile function test historySize maximumIterations 0 [initial]
+    Right (if returnHistory then evaluatedList history else last history)
+
+  iterateWhile function test historySize maximumIterations iterations history = do
+    predicateResult <- nestWhilePredicate test historySize history
+    if not predicateResult
+      then Right history
+      else
+        if iterations >= iterationSafetyLimit
+          then
+            Left
+              ( EvaluationError
+                  (operation <> " exceeded the Tungsten iteration safety limit.")
+              )
+          else case maximumIterations of
+            Just maximumValue
+              | iterations >= maximumValue -> Right history
+            _ -> do
+              updated <- evaluate (Call function [last history])
+              iterateWhile
+                function
+                test
+                historySize
+                maximumIterations
+                (iterations + 1)
+                (history <> [updated])
+
+normalizeNestWhileHistory
+  :: Maybe Expr
+  -> Either EvaluationError (Maybe Integer)
+normalizeNestWhileHistory Nothing = Right (Just 1)
+normalizeNestWhileHistory (Just (Integer value))
+  | value >= 1 = Right (Just value)
+normalizeNestWhileHistory (Just (Symbol name))
+  | systemHeadIn ["All"] name = Right Nothing
+normalizeNestWhileHistory _ =
+  Left
+    ( EvaluationError
+        "NestWhile history size must be a positive integer or All."
+    )
+
+normalizeNestWhileMaximum
+  :: Maybe Expr
+  -> Either EvaluationError (Maybe Integer)
+normalizeNestWhileMaximum Nothing = Right Nothing
+normalizeNestWhileMaximum (Just (Integer value)) = Right (Just (max 0 value))
+normalizeNestWhileMaximum (Just (Symbol name))
+  | systemHeadIn ["Infinity"] name = Right Nothing
+normalizeNestWhileMaximum _ =
+  Left
+    ( EvaluationError
+        "NestWhile max iterations must be a non-negative integer or Infinity."
+    )
+
+nestWhilePredicate
+  :: Expr
+  -> Maybe Integer
+  -> [Expr]
+  -> Either EvaluationError Bool
+nestWhilePredicate test historySize history = case historySize of
+  Just required
+    | fromIntegral (length history) < required -> Right True
+    | otherwise -> applyPredicate (drop (length history - fromIntegral required) history)
+  Nothing -> applyPredicate history
+ where
+  applyPredicate predicateArguments = do
+    result <- evaluate (Call test predicateArguments)
+    Right (result == Symbol "True")
+
+reduceFixedPoint :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceFixedPoint returnHistory = \case
+  [function, initial] ->
+    findFixedPoint function initial iterationSafetyLimit False
+  [function, initial, countExpression] -> do
+    limit <-
+      nonNegativeIterationCount
+        operation
+        "expects a non-negative maximum iteration count."
+        countExpression
+    findFixedPoint function initial limit True
+  _ ->
+    Left
+      ( EvaluationError
+          ( operation
+              <> " expects a function, an expression, and an optional iteration limit."
+          )
+      )
+ where
+  operation = if returnHistory then "FixedPointList" else "FixedPoint"
+  findFixedPoint function initial limit explicitLimit =
+    iterateUntilStable limit initial [initial]
+   where
+    iterateUntilStable 0 current retained
+      | explicitLimit = finish current retained
+      | otherwise =
+          Left
+            ( EvaluationError
+                (operation <> " exceeded the Tungsten iteration safety limit.")
+            )
+    iterateUntilStable remaining current retained = do
+      updated <- evaluate (Call function [current])
+      let nextRetained = retained <> [updated]
+      if updated == current
+        then finish current nextRetained
+        else iterateUntilStable (remaining - 1) updated nextRetained
+    finish current retained =
+      Right (if returnHistory then evaluatedList retained else current)
+
+reduceFold :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceFold returnHistory = \case
+  [function, subject] -> do
+    values <- sequenceFoldCollectionValues operation subject
+    case values of
+      []
+        | returnHistory -> Right (evaluatedList [])
+        | otherwise ->
+            Left (EvaluationError "Fold[f, expr] expects a nonempty sequence.")
+      initial : remaining -> finish function initial remaining
+  [function, initial, subject] -> do
+    values <- sequenceFoldCollectionValues operation subject
+    finish function initial values
+  _ ->
+    Left
+      ( EvaluationError
+          (operation <> " expects two or three arguments.")
+      )
+ where
+  operation = if returnHistory then "FoldList" else "Fold"
+  finish function initial values = do
+    history <- buildFoldHistory function initial values [initial]
+    Right (if returnHistory then evaluatedList history else last history)
+
+buildFoldHistory
+  :: Expr
+  -> Expr
+  -> [Expr]
+  -> [Expr]
+  -> Either EvaluationError [Expr]
+buildFoldHistory _ _ [] retained = Right retained
+buildFoldHistory function current (value : remaining) retained = do
+  updated <- evaluate (Call function [current, value])
+  buildFoldHistory function updated remaining (retained <> [updated])
+
+reduceFoldWhile :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceFoldWhile returnHistory arguments' = case arguments' of
+  [function, initial, subject, test] ->
+    foldWhile function initial subject test Nothing Nothing
+  [function, initial, subject, test, historyExpression] ->
+    foldWhile function initial subject test (Just historyExpression) Nothing
+  [function, initial, subject, test, historyExpression, trailingExpression] ->
+    foldWhile
+      function
+      initial
+      subject
+      test
+      (Just historyExpression)
+      (Just trailingExpression)
+  _ ->
+    Left
+      ( EvaluationError
+          ( operation
+              <> " currently supports a function, an initial value, inputs, a test, and optional history and trailing counts."
+          )
+      )
+ where
+  operation = if returnHistory then "FoldWhileList" else "FoldWhile"
+
+  foldWhile function initial subject test historyExpression trailingExpression = do
+    inputs <- sequenceFoldCollectionValues "FoldWhileList" subject
+    historySize <- normalizeFoldWhileHistory historyExpression
+    initialSucceeds <- foldWhilePredicate test historySize [initial]
+    if initialSucceeds
+      then foldInputs function test historySize trailingExpression [initial] inputs
+      else finish [initial]
+
+  foldInputs _ _ _ _ results [] = finish results
+  foldInputs function test historySize trailingExpression results (inputValue : remaining) = do
+    updated <- evaluate (Call function [last results, inputValue])
+    let nextResults = results <> [updated]
+    predicateSucceeds <- foldWhilePredicate test historySize nextResults
+    if predicateSucceeds
+      then foldInputs function test historySize trailingExpression nextResults remaining
+      else finishFailure function trailingExpression nextResults remaining
+
+  finishFailure function trailingExpression results remaining =
+    case trailingExpression of
+      Nothing -> finish results
+      Just (Integer trailing)
+        | trailing < 0 ->
+            let retainedCount =
+                  min
+                    (toInteger (length results))
+                    (max 1 (toInteger (length results) + trailing))
+             in finish (take (fromInteger retainedCount) results)
+        | otherwise -> appendTrailing function trailing results remaining
+      Just _ ->
+        Left
+          (EvaluationError "FoldWhileList expects an integer argument.")
+
+  appendTrailing _ 0 results _ = finish results
+  appendTrailing _ _ results [] = finish results
+  appendTrailing function remainingCount results (inputValue : remaining) = do
+    updated <- evaluate (Call function [last results, inputValue])
+    appendTrailing
+      function
+      (remainingCount - 1)
+      (results <> [updated])
+      remaining
+
+  finish results =
+    let retained = filter (/= Symbol "Nothing") results
+     in Right $ case (returnHistory, retained) of
+          (True, _) -> evaluatedList retained
+          (False, []) -> Symbol "Nothing"
+          (False, _) -> last retained
+
+normalizeFoldWhileHistory
+  :: Maybe Expr
+  -> Either EvaluationError (Maybe Integer)
+normalizeFoldWhileHistory Nothing = Right (Just 1)
+normalizeFoldWhileHistory (Just (Integer value))
+  | value > 0 = Right (Just value)
+normalizeFoldWhileHistory (Just (Symbol name))
+  | systemHeadIn ["All"] name = Right Nothing
+normalizeFoldWhileHistory _ =
+  Left
+    ( EvaluationError
+        "FoldWhileList expects a positive history length or All."
+    )
+
+foldWhilePredicate
+  :: Expr
+  -> Maybe Integer
+  -> [Expr]
+  -> Either EvaluationError Bool
+foldWhilePredicate test historySize history = do
+  result <- evaluate (Call test (foldWhileHistoryArguments historySize history))
+  Right (result == Symbol "True")
+
+foldWhileHistoryArguments :: Maybe Integer -> [Expr] -> [Expr]
+foldWhileHistoryArguments Nothing history = history
+foldWhileHistoryArguments (Just required) history
+  | required >= toInteger (length history) = history
+  | otherwise = drop (length history - fromInteger required) history
+
+reduceFoldPair :: Bool -> [Expr] -> Either EvaluationError Expr
+reduceFoldPair returnHistory arguments' = case arguments' of
+  [function, initial, subject] ->
+    foldPairs function initial subject Nothing
+  [function, initial, subject, projection] ->
+    foldPairs function initial subject (Just projection)
+  _ ->
+    Left
+      ( EvaluationError
+          ( operation
+              <> " currently supports a function, an initial value, inputs, and an optional projection."
+          )
+      )
+ where
+  operation = if returnHistory then "FoldPairList" else "FoldPair"
+  foldPairs function initial subject projection = do
+    inputs <- sequenceFoldCollectionValues "FoldPairList" subject
+    projected <- build function projection initial inputs []
+    let retained = filter (/= Symbol "Nothing") projected
+    case retained of
+      []
+        | returnHistory -> Right (evaluatedList [])
+        | otherwise -> Right (Call (Symbol "FoldPair") arguments')
+      _
+        | returnHistory -> Right (evaluatedList retained)
+        | otherwise -> Right (last retained)
+
+  build _ _ _ [] retained = Right retained
+  build function projection current (inputValue : remaining) retained = do
+    pairExpression <- evaluate (Call function [current, inputValue])
+    (projected, next) <- projectPair projection pairExpression
+    build function projection next remaining (retained <> [projected])
+
+  projectPair projection pairExpression = case pairExpression of
+    Call (Symbol listHead) [first, second]
+      | systemHeadIn ["List"] listHead -> do
+          projected <- case projection of
+            Nothing -> Right first
+            Just function ->
+              evaluate (Call function [evaluatedList [first, second]])
+          Right (projected, second)
+    _ ->
+      Left
+        ( EvaluationError
+            ( "FoldPairList expects each function application to return a list of two elements, got "
+                <> inputForm pairExpression
+                <> "."
+            )
+        )
+
+nonNegativeIterationCount
+  :: Text
+  -> Text
+  -> Expr
+  -> Either EvaluationError Integer
+nonNegativeIterationCount operation negativeMessage = \case
+  Integer value
+    | value >= 0 -> Right value
+    | otherwise ->
+        Left
+          ( EvaluationError
+              (operation <> " " <> negativeMessage)
+          )
+  _ ->
+    Left
+      ( EvaluationError
+          (operation <> " expects an integer argument.")
+      )
+
+iterationSafetyLimit :: Integer
+iterationSafetyLimit = 65536
 
 reduceSequenceFold
   :: Bool
@@ -9137,8 +12003,8 @@ expressionDivide numerator denominator
 
 reduceCross :: [Expr] -> Either EvaluationError Expr
 reduceCross [left, right] = do
-  leftValues <- requireDenseVector "Cross" left
-  rightValues <- requireDenseVector "Cross" right
+  leftValues <- requireVectorValues "Cross" left
+  rightValues <- requireVectorValues "Cross" right
   if length leftValues /= length rightValues || length leftValues `notElem` [2, 3]
     then
       Left
@@ -9153,8 +12019,7 @@ reduceCross [left, right] = do
               (expressionProduct [left2, right1])
           )
       ([left1, left2, left3], [right1, right2, right3]) ->
-        Right
-          ( evaluatedList
+        let resultValues =
               [ expressionSubtract
                   (expressionProduct [left2, right3])
                   (expressionProduct [left3, right2])
@@ -9165,7 +12030,13 @@ reduceCross [left, right] = do
                   (expressionProduct [left1, right2])
                   (expressionProduct [left2, right1])
               ]
-          )
+         in if isSparseArray left || isSparseArray right
+              then
+                canonicalSparseArray
+                  [3]
+                  [([index], value) | (index, value) <- zip [1 ..] resultValues]
+                  (Integer 0)
+              else Right (evaluatedList resultValues)
       _ ->
         Left
           ( EvaluationError
@@ -9174,16 +12045,196 @@ reduceCross [left, right] = do
 reduceCross _ =
   Left (EvaluationError "Cross currently expects exactly two vector arguments.")
 
-requireDenseVector :: Text -> Expr -> Either EvaluationError [Expr]
-requireDenseVector _operation (Call (Symbol "List") values) = Right values
-requireDenseVector operation SparseArray {} =
-  Left (EvaluationError (operation <> " currently supports dense vectors only."))
-requireDenseVector operation _ =
+data TrEvaluationPlan
+  = TrTermsPlan !Expr ![Expr]
+  | TrLevelPlan !Expr !Expr !Integer
+  deriving (Eq, Show)
+
+reduceTr :: [Expr] -> Either EvaluationError Expr
+reduceTr values = do
+  plan <- trEvaluationPlan values
+  case plan of
+    TrTermsPlan combiner terms -> combineTrTermsPure combiner terms
+    TrLevelPlan combiner subject level ->
+      contractTrLevelPure combiner subject level
+
+trEvaluationPlan :: [Expr] -> Either EvaluationError TrEvaluationPlan
+trEvaluationPlan = \case
+  [subject] -> ordinary subject (Symbol "Plus")
+  [subject, combiner] -> ordinary subject combiner
+  [subject, combiner, Integer level]
+    | level >= 1 -> Right (TrLevelPlan combiner subject level)
+    | otherwise -> invalidLevel
+  [_, _, _] -> invalidLevel
+  _ ->
+    Left
+      ( EvaluationError
+          "Tr expects an array, an optional combiner, and an optional rank-restriction integer."
+      )
+ where
+  ordinary subject combiner =
+    TrTermsPlan combiner <$> ordinaryTrTerms subject combiner
+  invalidLevel =
+    Left (EvaluationError "Tr level must be a positive integer.")
+
+ordinaryTrTerms :: Expr -> Expr -> Either EvaluationError [Expr]
+ordinaryTrTerms subject combiner = case subject of
+  SparseArray dimensions entries fill ->
+    sparseTerms dimensions entries fill
+  _ -> do
+    dimensions <- trDenseDimensions subject
+    case dimensions of
+      [] -> Left (EvaluationError "Tr expects a rectangular array.")
+      [_] -> maybe invalidArray Right (trListValues subject)
+      [rows, columns] ->
+        traverse
+          (\index -> trDenseArrayValueAt subject [index, index])
+          [0 .. min rows columns - 1]
+      _ -> Left (EvaluationError "Tr currently supports vectors and matrices.")
+ where
+  invalidArray = Left (EvaluationError "Tr expects a rectangular array.")
+  sparseTerms dimensions entries fill = case dimensions of
+    [size]
+      | exactZero fill
+      , trPlusCombiner combiner ->
+          Right [value | SparseEntry _ value <- entries]
+      | otherwise ->
+          materializeSparseTerms size
+            (\index -> sparseValueAt entries fill [index])
+    [rows, columns]
+      | exactZero fill ->
+          Right
+            [ value
+            | SparseEntry [row, column] value <- entries
+            , row == column
+            , row <= min rows columns
+            ]
+      | otherwise ->
+          materializeSparseTerms (min rows columns)
+            (\index -> sparseValueAt entries fill [index, index])
+    _ -> Left (EvaluationError "Tr currently supports vectors and matrices.")
+
+materializeSparseTerms
+  :: Integer
+  -> (Integer -> Expr)
+  -> Either EvaluationError [Expr]
+materializeSparseTerms count build
+  | count > maximumDenseArrayMaterializedNodes =
+      Left
+        ( EvaluationError
+            "SparseArray dimensions exceed the native materialization limit."
+        )
+  | otherwise = Right [build index | index <- [1 .. count]]
+
+trDenseDimensions :: Expr -> Either EvaluationError [Int]
+trDenseDimensions expression = case trListValues expression of
+  Nothing -> Right []
+  Just [] -> Right [0]
+  Just values -> do
+    childDimensions <- traverse trDenseDimensions values
+    case childDimensions of
+      [] -> Right [0]
+      firstDimensions : remaining
+        | all (== firstDimensions) remaining ->
+            Right (length values : firstDimensions)
+        | otherwise ->
+            Left
+              ( EvaluationError
+                  "SparseArray dense input must be rectangular."
+              )
+
+trDenseArrayValueAt :: Expr -> [Int] -> Either EvaluationError Expr
+trDenseArrayValueAt = foldM select
+ where
+  select expression index = case trListValues expression of
+    Just values
+      | index >= 0
+      , index < length values -> Right (values !! index)
+    _ -> Left (EvaluationError "Expected a rectangular List array.")
+
+trListValues :: Expr -> Maybe [Expr]
+trListValues (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead = Just values
+trListValues _ = Nothing
+
+trPlusCombiner :: Expr -> Bool
+trPlusCombiner (Symbol combinerName) =
+  systemHeadIn ["Plus"] combinerName
+trPlusCombiner _ = False
+
+combineTrTermsPure :: Expr -> [Expr] -> Either EvaluationError Expr
+combineTrTermsPure combiner terms
+  | trPlusCombiner combiner = evaluate (Call (Symbol "Plus") terms)
+  | otherwise = do
+      combined <- applyTraversalCallable combiner terms
+      evaluate combined
+
+contractTrLevelPure
+  :: Expr
+  -> Expr
+  -> Integer
+  -> Either EvaluationError Expr
+contractTrLevelPure combiner subject level
+  | level == 1 = do
+      values <- requireTrLevelList subject
+      case equalWidthTrRows values of
+        Just rows -> do
+          columns <- traverse (combineTrTermsPure combiner) (transpose rows)
+          Right (rebuildWithSplicing (Symbol "List") columns)
+        Nothing -> combineTrTermsPure combiner values
+  | otherwise = do
+      values <- requireTrLevelList subject
+      contracted <-
+        traverse
+          (\value -> contractTrLevelPure combiner value (level - 1))
+          values
+      contractTrLevelPure
+        combiner
+        (Call (Symbol "List") contracted)
+        1
+
+requireTrLevelList :: Expr -> Either EvaluationError [Expr]
+requireTrLevelList expression = case trListValues expression of
+  Just values -> Right values
+  Nothing -> case expression of
+    Call {} ->
+      Left
+        ( EvaluationError
+            "Tr expects a List at every contracted level."
+        )
+    _ -> Left (EvaluationError "Tr expects a nonatomic expression.")
+
+equalWidthTrRows :: [Expr] -> Maybe [[Expr]]
+equalWidthTrRows [] = Nothing
+equalWidthTrRows values = do
+  rows <- traverse trListValues values
+  case rows of
+    [] -> Nothing
+    firstRow : remaining
+      | all ((== length firstRow) . length) remaining -> Just rows
+      | otherwise -> Nothing
+
+requireVectorValues :: Text -> Expr -> Either EvaluationError [Expr]
+requireVectorValues _operation (Call (Symbol "List") values) = Right values
+requireVectorValues operation (SparseArray [size] entries fill)
+  | size > maximumDenseArrayMaterializedNodes =
+      Left (EvaluationError (operation <> " vector exceeds the native materialization limit."))
+  | otherwise =
+      Right [sparseValueAt entries fill [index] | index <- [1 .. size]]
+requireVectorValues operation _ =
   Left (EvaluationError (operation <> " expects vectors."))
 
 requireDenseMatrixRows :: Text -> Expr -> Either EvaluationError [[Expr]]
+requireDenseMatrixRows operation (SparseArray [rowCount, columnCount] entries fill)
+  | rowCount * columnCount > maximumDenseArrayMaterializedNodes =
+      Left (EvaluationError (operation <> " matrix exceeds the native materialization limit."))
+  | otherwise =
+      Right
+        [ [sparseValueAt entries fill [row, column] | column <- [1 .. columnCount]]
+        | row <- [1 .. rowCount]
+        ]
 requireDenseMatrixRows operation SparseArray {} =
-  Left (EvaluationError (operation <> " currently supports dense matrices only."))
+  Left (EvaluationError (operation <> " expects a matrix."))
 requireDenseMatrixRows operation expression = case denseListRows expression of
   Nothing -> Left (EvaluationError (operation <> " expects a matrix."))
   Just rows
@@ -9199,6 +12250,17 @@ requireSquareMatrixRows operation expression = do
     else Left (EvaluationError (operation <> " expects a square matrix."))
 
 reduceDet :: [Expr] -> Either EvaluationError Expr
+reduceDet [SparseArray [rowCount, columnCount] entries fill]
+  | rowCount /= columnCount = Left (EvaluationError "Det expects a square matrix.")
+  | exactZero fill =
+      Right
+        ( determinantFromSparseCandidates
+            rowCount
+            [ (row, column, value)
+            | SparseEntry [row, column] value <- entries
+            , not (exactZero value)
+            ]
+        )
 reduceDet [expression] = determinantFromRows <$> requireSquareMatrixRows "Det" expression
 reduceDet _ = Left (EvaluationError "Det expects exactly one matrix argument.")
 
@@ -9285,6 +12347,31 @@ determinantSymbolic rows =
         ]
     )
 
+determinantFromSparseCandidates :: Integer -> [(Integer, Integer, Expr)] -> Expr
+determinantFromSparseCandidates size entries
+  | size == 0 = Integer 1
+  | size > fromIntegral (maxBound :: Int) = Integer 0
+  | otherwise = determinantCandidates 1 Set.empty [] []
+ where
+  candidates row =
+    [(column, value) | (entryRow, column, value) <- entries, entryRow == row]
+  determinantCandidates row used columns factors
+    | row > size =
+        let zeroBasedColumns = map (subtract 1 . fromIntegral) columns
+            signedFactors =
+              (if permutationSign zeroBasedColumns < 0 then [Integer (-1)] else []) <> factors
+         in expressionProduct signedFactors
+    | otherwise =
+        expressionSum
+          [ determinantCandidates
+              (row + 1)
+              (Set.insert column used)
+              (columns <> [column])
+              (factors <> [value])
+          | (column, value) <- candidates row
+          , not (Set.member column used)
+          ]
+
 permutationSign :: [Int] -> Int
 permutationSign values =
   if even inversionCount then 1 else -1
@@ -9299,12 +12386,43 @@ permutationSign values =
 
 reduceInverse :: [Expr] -> Either EvaluationError Expr
 reduceInverse [expression] = do
-  rows <- requireSquareMatrixRows "Inverse" expression
-  case traverse (traverse toExact) rows of
-    Just exactRows -> inverseExact exactRows
-    Nothing -> inverseSymbolic rows
+  case expression of
+    sparse@SparseArray {} ->
+      case sparseDiagonalInverse sparse of
+        Just result -> result
+        Nothing -> inverseFromRows expression
+    _ -> inverseFromRows expression
+ where
+  inverseFromRows value = do
+    rows <- requireSquareMatrixRows "Inverse" value
+    case traverse (traverse toExact) rows of
+      Just exactRows -> inverseExact exactRows
+      Nothing -> inverseSymbolic rows
 reduceInverse _ =
   Left (EvaluationError "Inverse expects exactly one matrix argument.")
+
+sparseDiagonalInverse :: Expr -> Maybe (Either EvaluationError Expr)
+sparseDiagonalInverse (SparseArray [rowCount, columnCount] entries fill)
+  | rowCount /= columnCount || not (exactZero fill) = Nothing
+  | any offDiagonal entries = Nothing
+  | toInteger (length entries) /= rowCount =
+      Just (Left (EvaluationError "Inverse expects a nonsingular matrix."))
+  | any (exactZero . sparseEntryValue) entries =
+      Just (Left (EvaluationError "Inverse expects a nonsingular matrix."))
+  | otherwise =
+      Just
+        ( canonicalSparseArray
+            [rowCount, columnCount]
+            [ (indices, expressionInverse value)
+            | SparseEntry indices value <- entries
+            ]
+            (Integer 0)
+        )
+ where
+  offDiagonal (SparseEntry [row, column] _) = row /= column
+  offDiagonal _ = True
+  sparseEntryValue (SparseEntry _ value) = value
+sparseDiagonalInverse _ = Nothing
 
 inverseExact :: [[Exact]] -> Either EvaluationError Expr
 inverseExact rows = do
@@ -9384,8 +12502,8 @@ reduceMatrixPower _ =
 
 matrixPower :: Expr -> Integer -> Either EvaluationError Expr
 matrixPower expression power = do
-  rows <- requireSquareMatrixRows "MatrixPower" expression
-  identity <- identityMatrix (toInteger (length rows))
+  size <- requireSquareMatrixSize "MatrixPower" expression
+  identity <- matrixIdentityLike expression size
   base <- if power < 0 then reduceInverse [expression] else Right expression
   powerLoop identity base (abs power)
  where
@@ -9402,9 +12520,30 @@ matrixPower expression power = do
         else Right base
     powerLoop nextResult nextBase nextRemaining
 
+requireSquareMatrixSize :: Text -> Expr -> Either EvaluationError Integer
+requireSquareMatrixSize operation (SparseArray [rows, columns] _ _)
+  | rows == columns = Right rows
+  | otherwise = Left (EvaluationError (operation <> " expects a square matrix."))
+requireSquareMatrixSize operation SparseArray {} =
+  Left (EvaluationError (operation <> " expects a square matrix."))
+requireSquareMatrixSize operation expression = do
+  rows <- requireSquareMatrixRows operation expression
+  Right (toInteger (length rows))
+
+matrixIdentityLike :: Expr -> Integer -> Either EvaluationError Expr
+matrixIdentityLike SparseArray {} size
+  | size > maximumDenseArrayMaterializedNodes =
+      Left (EvaluationError "MatrixPower matrix exceeds the native materialization limit.")
+  | otherwise =
+      canonicalSparseArray
+        [size, size]
+        [([index, index], Integer 1) | index <- [1 .. size]]
+        (Integer 0)
+matrixIdentityLike _ size = identityMatrix size
+
 reduceTakeDrop :: Bool -> [Expr] -> Either EvaluationError Expr
 reduceTakeDrop takeMode (subject : specifications@(_ : _)) =
-  applySpecifications subject specifications
+  applySpecifications (stripTakeDropUnevaluated subject) specifications
  where
   operationName = if takeMode then "Take" else "Drop"
   applySpecifications expression [] = Right expression
@@ -9416,73 +12555,110 @@ reduceTakeDrop takeMode (subject : specifications@(_ : _)) =
         Call expressionHead values ->
           Call expressionHead <$> traverse (`applySpecifications` remaining) values
         _ -> Left (EvaluationError (operationName <> " encountered an atom before consuming every specification"))
+  applySpecification expression specification
+    | Just _ <- associationEntries expression
+    , associationKeySelectorList specification =
+        Left
+          ( EvaluationError
+              ( operationName
+                  <> " on associations currently supports only numeric or span selectors; "
+                  <> "key-list selectors such as ``{Key[a], …}`` are not yet implemented."
+              )
+          )
   applySpecification (Call expressionHead values) specification = do
-    selected <- specificationIndices takeMode (length values) specification
-    pure (Call expressionHead [value | (index, value) <- zip [0 ..] values, index `elem` selected])
-  applySpecification _ _ = Left (EvaluationError (operationName <> " expects an expression with arguments"))
+    selected <- specificationIndices operationName (length values) specification
+    pure
+      ( normalizeEvaluatedCall expressionHead
+          ( if takeMode
+              then [values !! index | index <- selected]
+              else [value | (index, value) <- zip [0 ..] values, index `notElem` selected]
+          )
+      )
+  applySpecification _ _ = Left (EvaluationError (operationName <> " expects a nonatomic expression."))
 reduceTakeDrop takeMode values =
   Right (Call (Symbol (if takeMode then "Take" else "Drop")) values)
 
-specificationIndices :: Bool -> Int -> Expr -> Either EvaluationError [Int]
-specificationIndices takeMode count specification = do
-  selected <- case specification of
+stripTakeDropUnevaluated :: Expr -> Expr
+stripTakeDropUnevaluated = \case
+  Call (Symbol headName) [value]
+    | systemHeadIn ["Unevaluated"] headName -> value
+  value -> value
+
+associationKeySelectorList :: Expr -> Bool
+associationKeySelectorList (Call (Symbol "List") selectors) =
+  any isKeySelector selectors
+ where
+  isKeySelector String {} = True
+  isKeySelector (Call (Symbol headName) _values) = systemHeadIn ["Key"] headName
+  isKeySelector _ = False
+associationKeySelectorList _ = False
+
+specificationIndices :: Text -> Int -> Expr -> Either EvaluationError [Int]
+specificationIndices operationName count specification =
+  case specification of
     Symbol "All" -> Right [0 .. count - 1]
     Symbol "None" -> Right []
-    Integer amount
-      | amount >= 0
-      , amount <= toInteger count -> Right [0 .. fromInteger amount - 1]
-      | amount < 0
-      , abs amount <= toInteger count ->
-          Right [count - fromInteger (abs amount) .. count - 1]
-      | otherwise -> Left (oversizedIntegerError amount)
-    Call (Symbol "List") [Integer position] ->
-      maybe (Left invalid) (Right . pure) (resolvePosition count position)
-    Call (Symbol "List") [Integer first, Integer last'] ->
-      rangePositions first last' 1
-    Call (Symbol "List") [Integer first, Integer last', Integer step]
-      | step /= 0 -> rangePositions first last' step
-    _ -> Left invalid
-  pure
-    ( if takeMode
-        then selected
-        else [index | index <- [0 .. count - 1], index `notElem` selected]
-    )
+    Integer amount -> validateSelectors (amountSelectors amount)
+    Call (Symbol "Span") spanArguments -> spanIndices spanArguments
+    Call (Symbol "List") [Integer position] -> validateSelectors [position]
+    Call (Symbol "List") [Symbol "All"] -> Right [0 .. count - 1]
+    Call (Symbol "List") [_] ->
+      Left
+        ( EvaluationError
+            (operationName <> " single-element list specifications must contain an integer or All.")
+        )
+    Call (Symbol "List") [first, last'] -> spanIndices [first, last']
+    Call (Symbol "List") [first, last', step] -> spanIndices [first, last', step]
+    Call (Symbol "List") _ ->
+      Left
+        ( EvaluationError
+            (operationName <> " list specifications must contain one, two, or three items.")
+        )
+    _ ->
+      Left
+        ( EvaluationError
+            ("Unsupported " <> operationName <> " specification: '" <> inputForm specification <> "'.")
+        )
  where
-  invalid = EvaluationError "Take/Drop received an unsupported or out-of-range specification"
-  oversizedIntegerError amount
-    | amount > toInteger count =
-        EvaluationError
-          ( "Part index "
-              <> T.pack (show (toInteger count + 1))
-              <> " is out of range for length "
-              <> T.pack (show count)
-              <> "."
-          )
-    | firstSelector < negate (toInteger count) =
-        EvaluationError
-          ( "Part index "
-              <> T.pack (show firstSelector)
-              <> " is out of range for length "
-              <> T.pack (show count)
-              <> "."
-          )
+  amountSelectors amount
+    | amount >= 0 = [1 .. amount]
+    | otherwise = [toInteger count + amount + 1 .. toInteger count]
+  validateSelectors = traverse resolveSelector
+  resolveSelector selector
+    | selector == 0 =
+        Left (EvaluationError "Only top-level Part specifications may use index 0.")
+    | Just index <- resolvePosition count selector = Right index
     | otherwise =
-        EvaluationError "Only top-level Part specifications may use index 0."
-   where
-    firstSelector = toInteger count + amount + 1
-  rangePositions :: Integer -> Integer -> Integer -> Either EvaluationError [Int]
-  rangePositions first last' step = do
-    start <- maybe (Left invalid) Right (resolvePosition count first)
-    finish <- maybe (Left invalid) Right (resolvePosition count last')
-    let startValue = toInteger start
-        finishValue = toInteger finish
-        indices
-          | step > 0 && startValue <= finishValue =
-              map fromInteger [startValue, startValue + step .. finishValue]
-          | step < 0 && startValue >= finishValue =
-              map fromInteger [startValue, startValue + step .. finishValue]
-          | otherwise = []
-    pure indices
+        Left
+          ( EvaluationError
+              ( "Part index "
+                  <> T.pack (show selector)
+                  <> " is out of range for length "
+                  <> T.pack (show count)
+                  <> "."
+              )
+          )
+  spanIndices spanArguments = case spanArguments of
+    [first, last'] -> expandSpan first last' (Integer 1)
+    [first, last', step] -> expandSpan first last' step
+    _ -> Left (EvaluationError "Span must contain two or three arguments.")
+  expandSpan first last' stepExpression = do
+    step <- case stepExpression of
+      Integer value -> Right value
+      _ -> Left (EvaluationError "Span steps must be integers.")
+    if step == 0
+      then Left (EvaluationError "Span step cannot be zero.")
+      else do
+        let start = spanEndpoint first 1
+            finish = spanEndpoint last' (toInteger count)
+            selectors = [start, start + step .. finish]
+        validateSelectors selectors
+  spanEndpoint endpoint defaultValue = case endpoint of
+    Symbol "All" -> toInteger count
+    Integer value
+      | value < 0 -> toInteger count + value + 1
+      | otherwise -> value
+    _ -> defaultValue
 
 resolvePosition :: Int -> Integer -> Maybe Int
 resolvePosition count position
@@ -9492,20 +12668,74 @@ resolvePosition count position
   , position >= negate (fromIntegral count) = Just (count + fromIntegral position)
   | otherwise = Nothing
 
-reduceJoin :: [Expr] -> Expr
+reduceJoin :: [Expr] -> Either EvaluationError Expr
+reduceJoin [] = Left (EvaluationError "Join expects at least one expression.")
 reduceJoin values
   | Just entryLists <- traverse associationEntries values =
-      associationExpr (concat entryLists)
+      Right (associationExpr (concat entryLists))
 reduceJoin values = case values of
   Call expressionHead _ : _ ->
     case traverse (matchingArguments expressionHead) values of
-      Just argumentLists -> Call expressionHead (concat argumentLists)
-      Nothing -> Call (Symbol "Join") values
+      Just argumentLists -> Right (Call expressionHead (concat argumentLists))
+      Nothing
+        | all isCall values ->
+            Left (EvaluationError "Join expects all expressions to have the same head.")
+        | otherwise -> Left (EvaluationError "Join expects a nonatomic expression.")
    where
     matchingArguments expected (Call actual arguments')
       | actual == expected = Just arguments'
     matchingArguments _ _ = Nothing
-  _ -> Call (Symbol "Join") values
+    isCall Call {} = True
+    isCall _ = False
+  _ -> Left (EvaluationError "Join expects a nonatomic expression.")
+
+reduceReverse :: [Expr] -> Either EvaluationError Expr
+reduceReverse = \case
+  [expression] -> Right (reverseAtLevels (Set.singleton 1) 1 expression)
+  [expression, levelSpecification] -> do
+    levels <- reverseLevels levelSpecification
+    Right (reverseAtLevels levels 1 expression)
+  _ -> Left (EvaluationError "Reverse expects one or two arguments.")
+
+reverseLevels :: Expr -> Either EvaluationError (Set.Set Integer)
+reverseLevels = \case
+  Integer level
+    | level >= 1 -> Right (Set.singleton level)
+    | otherwise ->
+        Left (EvaluationError "Reverse expects a positive integer level specification.")
+  Call (Symbol "List") [Integer level]
+    | level >= 1 -> Right (Set.singleton level)
+    | level == 0 -> Right Set.empty
+    | otherwise ->
+        Left (EvaluationError "Reverse expects a non-negative level specification.")
+  Call (Symbol "List") [Integer low, Integer high]
+    | low >= 1
+    , high >= low -> Right (Set.fromList [low .. high])
+    | otherwise ->
+        Left (EvaluationError "Reverse expects a positive {min, max} level range.")
+  _ ->
+    Left
+      ( EvaluationError
+          "Reverse currently supports an integer or {n}/{min, max} level spec."
+      )
+
+reverseAtLevels :: Set.Set Integer -> Integer -> Expr -> Expr
+reverseAtLevels levels currentLevel expression
+  | Just entries <- associationEntries expression =
+      let mapped =
+            [ AssociationEntry
+                ruleHead
+                key
+                (reverseAtLevels levels (currentLevel + 1) value)
+            | AssociationEntry ruleHead key value <- entries
+            ]
+       in associationExpr (if Set.member currentLevel levels then reverse mapped else mapped)
+reverseAtLevels levels currentLevel (Call expressionHead values) =
+  let mapped = map (reverseAtLevels levels (currentLevel + 1)) values
+   in normalizeEvaluatedCall
+        expressionHead
+        (if Set.member currentLevel levels then reverse mapped else mapped)
+reverseAtLevels _ _ expression = expression
 
 reduceFlatten :: [Expr] -> Either EvaluationError Expr
 reduceFlatten = \case
@@ -9597,32 +12827,287 @@ flattenNamedHead target remaining (Call expressionHead values) =
 flattenNamedHead _ _ expression = expression
 
 reduceDelete :: [Expr] -> Either EvaluationError Expr
-reduceDelete [subject, positions] =
-  foldM deleteOne subject (sortOperationPaths (positionPaths positions))
+reduceDelete [subject, positions] = do
+  (paths, invalid) <- expandOperationPaths subject positions
+  let uniquePaths = List.nub paths
+  if invalid || any null uniquePaths
+    then invalidPositions
+    else foldM deleteOne subject (sortOperationPaths uniquePaths)
  where
   deleteOne expression path = case deleteAtPath path expression of
     Just result -> Right result
-    Nothing -> Left (EvaluationError "Delete received an invalid position")
+    Nothing -> invalidPositions
+  invalidPositions =
+    Left
+      ( EvaluationError
+          ("Delete positions are invalid for " <> inputForm subject <> ".")
+      )
 reduceDelete values = Right (Call (Symbol "Delete") values)
 
 reduceInsert :: [Expr] -> Either EvaluationError Expr
-reduceInsert [subject, item, positions] =
-  foldM insertOne subject (sortOperationPaths (positionPaths positions))
+reduceInsert [sparse@(SparseArray [dimension] _ _), item, Integer position] =
+  sparseVectorInsert sparse item dimension position
+reduceInsert [sparse@SparseArray {}, item, positions] = do
+  dense <- sparseArrayNormal sparse
+  reduceInsert [dense, item, positions]
+reduceInsert [subject, item, positions] = do
+  paths <- insertPositionPaths positions
+  foldM insertOne subject (sortOperationPaths paths)
  where
   insertOne expression path = case insertAtPath path item expression of
     Just result -> Right result
-    Nothing -> Left (EvaluationError "Insert received an invalid position")
+    Nothing ->
+      Left
+        ( EvaluationError
+            ("Insert positions are invalid for " <> inputForm subject <> ".")
+        )
 reduceInsert values = Right (Call (Symbol "Insert") values)
 
-reduceReplacePart :: [Expr] -> Expr
-reduceReplacePart [subject, replacements] =
-  foldl applyReplacement subject (sortReplacementRules (replacePartRules replacements))
+sparseVectorInsert
+  :: Expr
+  -> Expr
+  -> Integer
+  -> Integer
+  -> Either EvaluationError Expr
+sparseVectorInsert sparse@(SparseArray _ entries fill) item dimension position = do
+  offset <-
+    maybe
+      ( Left
+          ( EvaluationError
+              ("Insert positions are invalid for " <> inputForm sparse <> ".")
+          )
+      )
+      Right
+      (sparseInsertOffset dimension position)
+  let insertionIndex = offset + 1
+      shifted =
+        [ ( [if index >= insertionIndex then index + 1 else index]
+          , value
+          )
+        | SparseEntry [index] value <- entries
+        ]
+      inserted = if item == fill then [] else [([insertionIndex], item)]
+  canonicalSparseArray [dimension + 1] (inserted <> shifted) fill
+sparseVectorInsert _ _ _ _ =
+  Left (EvaluationError "Insert expects a rank-one SparseArray value.")
+
+sparseInsertOffset :: Integer -> Integer -> Maybe Integer
+sparseInsertOffset dimension position
+  | position == 0 = Just 0
+  | position > 0 = valid (position - 1)
+  | otherwise = valid (dimension + position + 1)
  where
+  valid offset
+    | offset >= 0
+    , offset <= dimension = Just offset
+    | otherwise = Nothing
+
+reduceReplacePart :: [Expr] -> Either EvaluationError Expr
+reduceReplacePart [subject, replacements] = do
+  rules <- replacePartRuleExpressions replacements
+  planned <- foldM planRule [] rules
+  pure (foldl applyReplacement subject (sortReplacementRules planned))
+ where
+  planRule planned (position, replacement) = do
+    (paths, _invalid) <- expandOperationPaths subject position
+    pure
+      ( foldl
+          (\items path -> if any ((== path) . fst) items then items else items <> [(path, replacement)])
+          planned
+          paths
+      )
   applyReplacement expression (path, Symbol "Nothing") =
     maybe expression id (deleteAtPath path expression)
   applyReplacement expression (path, replacement) =
     maybe expression id (replaceAtPath path replacement expression)
-reduceReplacePart values = Call (Symbol "ReplacePart") values
+reduceReplacePart values = Right (Call (Symbol "ReplacePart") values)
+
+replacePartRuleExpressions :: Expr -> Either EvaluationError [(Expr, Expr)]
+replacePartRuleExpressions (Call (Symbol ruleHead) [position, replacement])
+  | systemHeadIn ["Rule", "RuleDelayed"] ruleHead =
+      Right [(position, replacement)]
+replacePartRuleExpressions (Call (Symbol ruleHead) _)
+  | systemHeadIn ["Rule", "RuleDelayed"] ruleHead =
+      Left (EvaluationError "ReplacePart rules must contain exactly two arguments.")
+replacePartRuleExpressions (Call (Symbol listHead) rules)
+  | systemHeadIn ["List"] listHead = traverse requireRule rules
+ where
+  requireRule (Call (Symbol ruleHead) [position, replacement])
+    | systemHeadIn ["Rule", "RuleDelayed"] ruleHead =
+        Right (position, replacement)
+  requireRule _ =
+    Left (EvaluationError "ReplacePart expects a rule or a list of rules.")
+replacePartRuleExpressions _ =
+  Left (EvaluationError "ReplacePart expects a rule or a list of rules.")
+
+insertPositionPaths :: Expr -> Either EvaluationError [[PathSelector]]
+insertPositionPaths (Integer position) = Right [[ArgumentSelector position]]
+insertPositionPaths (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead
+  , Just path <- traverse integerSelector values = Right [path]
+  | systemHeadIn ["List"] listHead = traverse explicitIntegerPath values
+ where
+  integerSelector (Integer position) = Just (ArgumentSelector position)
+  integerSelector _ = Nothing
+  explicitIntegerPath (Call (Symbol nestedHead) components)
+    | systemHeadIn ["List"] nestedHead
+    , Just path <- traverse integerSelector components = Right path
+  explicitIntegerPath _ = invalid
+  invalid =
+    Left
+      ( EvaluationError
+          "Insert expects an integer position, a position list, or a list of position lists."
+      )
+insertPositionPaths _ =
+  Left
+    ( EvaluationError
+        "Insert expects an integer position, a position list, or a list of position lists."
+    )
+
+-- Resolve destructive-operation paths against the original expression before
+-- applying edits.  This preserves negative-index and multi-position semantics
+-- when earlier deletions or replacements change argument counts.
+expandOperationPaths :: Expr -> Expr -> Either EvaluationError ([[PathSelector]], Bool)
+expandOperationPaths subject specification
+  | isPositionCollection specification
+  , Call _ positionExpressions <- specification = do
+      expanded <- traverse (expandPositionExpression subject) positionExpressions
+      pure (concatMap fst expanded, any snd expanded)
+  | isSinglePositionExpression specification =
+      expandPositionExpression subject specification
+  | otherwise =
+      Left
+        ( EvaluationError
+            ("Unsupported position specification: " <> inputForm specification <> ".")
+        )
+
+expandPositionExpression :: Expr -> Expr -> Either EvaluationError ([[PathSelector]], Bool)
+expandPositionExpression subject specification =
+  expandPositionComponents subject (positionComponents specification)
+
+positionComponents :: Expr -> [Expr]
+positionComponents (Call (Symbol listHead) values)
+  | systemHeadIn ["List"] listHead = values
+positionComponents selector = [selector]
+
+expandPositionComponents :: Expr -> [Expr] -> Either EvaluationError ([[PathSelector]], Bool)
+expandPositionComponents _ [] = Right ([[]], False)
+expandPositionComponents subject (component : remaining) = do
+  (selections, invalidHere) <- operationComponentSelections subject component
+  expanded <- traverse expandSelection selections
+  pure
+    ( concatMap fst expanded
+    , invalidHere || any snd expanded
+    )
+ where
+  expandSelection (selector, child) = do
+    (paths, invalid) <- expandPositionComponents child remaining
+    pure (map (selector :) paths, invalid)
+
+operationComponentSelections
+  :: Expr
+  -> Expr
+  -> Either EvaluationError ([(PathSelector, Expr)], Bool)
+operationComponentSelections _ (Integer 0) =
+  Left (EvaluationError "Position does not support index 0 in this position.")
+operationComponentSelections subject component
+  | Just entries <- associationEntries subject =
+      associationSelections entries component
+operationComponentSelections (Call _ values) component = do
+  (indices, invalid) <- resolveNumericPartSelectors (length values) component
+  pure
+    ( [(ArgumentSelector (fromIntegral index + 1), values !! index) | index <- indices]
+    , invalid
+    )
+operationComponentSelections _ _ = Right ([], True)
+
+associationSelections
+  :: [AssociationEntry]
+  -> Expr
+  -> Either EvaluationError ([(PathSelector, Expr)], Bool)
+associationSelections entries component
+  | Just selector <- associationPartSelector component =
+      case associationEntryIndex selector entries of
+        Nothing -> Right ([], True)
+        Just index ->
+          Right ([normalizedAssociationSelection entries selector index], False)
+associationSelections entries (Call (Symbol listHead) selectors)
+  | systemHeadIn ["List"] listHead
+  , all isPartKeySelector selectors =
+      foldM appendKey ([], False) selectors
+  | systemHeadIn ["List"] listHead
+  , any isPartKeySelector selectors =
+      Left
+        ( EvaluationError
+            "Association selector lists may not mix numeric and key selectors."
+        )
+ where
+  appendKey (selected, invalid) selector =
+    case associationPartSelector selector of
+      Nothing -> Right (selected, True)
+      Just path -> case associationEntryIndex path entries of
+        Nothing -> Right (selected, True)
+        Just index ->
+          Right
+            ( selected <> [normalizedAssociationSelection entries path index]
+            , invalid
+            )
+associationSelections entries component = do
+  (indices, invalid) <- resolveNumericPartSelectors (length entries) component
+  pure
+    ( [ normalizedAssociationSelection
+          entries
+          (ArgumentSelector (fromIntegral index + 1))
+          index
+      | index <- indices
+      ]
+    , invalid
+    )
+
+normalizedAssociationSelection
+  :: [AssociationEntry]
+  -> PathSelector
+  -> Int
+  -> (PathSelector, Expr)
+normalizedAssociationSelection entries selector index =
+  ( case selector of
+      KeySelector key -> KeySelector key
+      ArgumentSelector _ -> ArgumentSelector (fromIntegral index + 1)
+  , associationEntryValue (entries !! index)
+  )
+
+isPositionCollection :: Expr -> Bool
+isPositionCollection (Call (Symbol listHead) values) =
+  systemHeadIn ["List"] listHead
+    && not (null values)
+    && all isExplicitPosition values
+ where
+  isExplicitPosition (Call (Symbol nestedHead) components) =
+    systemHeadIn ["List"] nestedHead && all isPositionComponent components
+  isExplicitPosition _ = False
+isPositionCollection _ = False
+
+isSinglePositionExpression :: Expr -> Bool
+isSinglePositionExpression Integer {} = True
+isSinglePositionExpression expression
+  | isPartKeySelector expression = True
+isSinglePositionExpression (Call (Symbol listHead) components) =
+  systemHeadIn ["List"] listHead && all isPositionComponent components
+isSinglePositionExpression _ = False
+
+isPositionComponent :: Expr -> Bool
+isPositionComponent expression
+  | isPositionSelectorAtom expression = True
+isPositionComponent (Call (Symbol listHead) selectors) =
+  systemHeadIn ["List"] listHead && all isPositionSelectorAtom selectors
+isPositionComponent _ = False
+
+isPositionSelectorAtom :: Expr -> Bool
+isPositionSelectorAtom Integer {} = True
+isPositionSelectorAtom (Symbol allName) = systemHeadIn ["All"] allName
+isPositionSelectorAtom (Call (Symbol spanHead) _)
+  | systemHeadIn ["Span"] spanHead = True
+isPositionSelectorAtom expression = isPartKeySelector expression
 
 reduceMapAt :: [Expr] -> Expr
 reduceMapAt [function, subject, positions] =
@@ -9671,13 +13156,6 @@ hasMultiplePositionPaths (Call (Symbol "List") values) =
     maybe False (const True) (traverse pathSelector components)
   isExplicitPath _ = False
 hasMultiplePositionPaths _ = False
-
-replacePartRules :: Expr -> [([PathSelector], Expr)]
-replacePartRules (Call (Symbol "List") rules) = concatMap replacePartRules rules
-replacePartRules (Call (Symbol ruleHead) [position, replacement])
-  | ruleHead `elem` ["Rule", "RuleDelayed"] =
-      [(path, replacement) | path <- positionPaths position]
-replacePartRules _ = []
 
 sortOperationPaths :: [[PathSelector]] -> [[PathSelector]]
 sortOperationPaths = sortBy compareOperationPath
@@ -9815,6 +13293,249 @@ reduceMap [function, association]
 reduceMap [function, Call expressionHead values] =
   Call expressionHead [Call function [value] | value <- values]
 reduceMap values = Call (Symbol "Map") values
+
+reduceOperate :: [Expr] -> Either EvaluationError Expr
+reduceOperate = \case
+  [operator, subject] -> operateAtLevel operator subject 1
+  [operator, subject, Integer level]
+    | level >= 0 -> operateAtLevel operator subject level
+    | otherwise ->
+        Left (EvaluationError "Operate expects a non-negative integer level.")
+  [_, _, _] -> Left (EvaluationError "Operate expects an integer argument.")
+  _ ->
+    Left
+      ( EvaluationError
+          "Operate expects an operator, an expression, and an optional positive level."
+      )
+
+operateAtLevel :: Expr -> Expr -> Integer -> Either EvaluationError Expr
+operateAtLevel operator subject level
+  | level == 0 = applyTraversalCallable operator [subject]
+  | level > toInteger (callHeadDepth subject) = Right subject
+  | otherwise = descend level subject
+ where
+  descend 0 value = applyTraversalCallable operator [value]
+  descend remaining (Call expressionHead values) = do
+    operatedHead <- descend (remaining - 1) expressionHead
+    Right (Call operatedHead values)
+  descend _ value = Right value
+
+callHeadDepth :: Expr -> Int
+callHeadDepth (Call expressionHead _) = 1 + callHeadDepth expressionHead
+callHeadDepth _ = 0
+
+reduceThread :: [Expr] -> Either EvaluationError Expr
+reduceThread = \case
+  [subject] -> threadOverHead subject (Symbol "List")
+  [subject, threadHead] -> threadOverHead subject threadHead
+  _ -> Left (EvaluationError "Thread expects an expression and an optional thread head.")
+
+threadOverHead :: Expr -> Expr -> Either EvaluationError Expr
+threadOverHead subject@(Call expressionHead values) threadHead =
+  case threadedArguments of
+    [] -> Right subject
+    firstElements : remaining
+      | all ((== length firstElements) . length) remaining ->
+          Right
+            ( Call
+                threadHead
+                [ Call
+                    expressionHead
+                    [ case value of
+                        Call argumentHead elements
+                          | argumentHead == threadHead -> elements !! index
+                        scalar -> scalar
+                    | value <- values
+                    ]
+                | index <- [0 .. length firstElements - 1]
+                ]
+            )
+      | otherwise ->
+          Left
+            ( EvaluationError
+                "Thread expects all threaded arguments to have the same length."
+            )
+ where
+  threadedArguments =
+    [ elements
+    | Call argumentHead elements <- values
+    , argumentHead == threadHead
+    ]
+threadOverHead subject _ = Right subject
+
+reduceThrough :: [Expr] -> Either EvaluationError Expr
+reduceThrough = \case
+  [subject] -> throughExpression subject Nothing
+  [subject, targetHead] -> throughExpression subject (Just targetHead)
+  _ ->
+    Left
+      ( EvaluationError
+          "Through expects an expression and an optional restricting head."
+      )
+
+throughExpression
+  :: Expr
+  -> Maybe Expr
+  -> Either EvaluationError Expr
+throughExpression subject@Call {} targetHead = do
+  permitted <- throughTargetMatches subject targetHead
+  if permitted
+    then distributeThrough subject
+    else Right subject
+throughExpression subject _ = Right subject
+
+throughTargetMatches
+  :: Expr
+  -> Maybe Expr
+  -> Either EvaluationError Bool
+throughTargetMatches _ Nothing = Right True
+throughTargetMatches (Call functionsContainer _) (Just (Symbol targetName)) =
+  Right
+    ( case functionsContainer of
+        Call (Symbol containerHead) _ -> containerHead == targetName
+        _ -> False
+    )
+throughTargetMatches _ (Just _) =
+  Left
+    ( EvaluationError
+        "Through's second argument must be a Symbol head."
+    )
+
+distributeThrough :: Expr -> Either EvaluationError Expr
+distributeThrough subject@(Call functionsContainer callArguments)
+  | Just entries <- associationEntries functionsContainer = do
+      mapped <- traverse mapEntry entries
+      Right (associationExpr mapped)
+  | Call containerHead functions <- functionsContainer = do
+      mapped <- traverse (`applyTraversalCallable` callArguments) functions
+      Right
+        ( case containerHead of
+            Symbol {} -> rebuildWithSplicing containerHead mapped
+            _ -> Call containerHead mapped
+        )
+  | otherwise = Right subject
+ where
+  mapEntry (AssociationEntry ruleHead key function) =
+    AssociationEntry ruleHead key
+      <$> applyTraversalCallable function callArguments
+distributeThrough subject = Right subject
+
+reduceMapAll :: [Expr] -> Either EvaluationError Expr
+reduceMapAll values =
+  case stripMapAllHeadsOption values of
+    (_includeHeads, [_function]) ->
+      Right (Call (Symbol "MapAll") values)
+    (includeHeads, [function, subject]) ->
+      mapAllTree includeHeads function subject
+    _ ->
+      Left
+        ( EvaluationError
+            "MapAll currently supports exactly two arguments."
+        )
+
+stripMapAllHeadsOption :: [Expr] -> (Bool, [Expr])
+stripMapAllHeadsOption values = case reverse values of
+  Call (Symbol ruleHead) [Symbol "Heads", Symbol value] : rest
+    | systemHeadIn ["Rule", "RuleDelayed"] ruleHead
+    , value `elem` ["True", "False"] ->
+        (value == "True", reverse rest)
+  _ -> (False, values)
+
+mapAllTree :: Bool -> Expr -> Expr -> Either EvaluationError Expr
+mapAllTree includeHeads function expression
+  | Just entries <- associationEntries expression = do
+      mappedEntries <- traverse mapEntry entries
+      applyTraversalCallable function [associationExpr mappedEntries]
+  | Call expressionHead values <- expression = do
+      mappedValues <- traverse (mapAllTree includeHeads function) values
+      mappedHead <-
+        if includeHeads
+          then mapAllTree includeHeads function expressionHead
+          else Right expressionHead
+      applyTraversalCallable
+        function
+        [normalizeEvaluatedCall mappedHead mappedValues]
+  | otherwise = applyTraversalCallable function [expression]
+ where
+  mapEntry (AssociationEntry ruleHead key value) =
+    AssociationEntry ruleHead key <$> mapAllTree includeHeads function value
+
+reduceMapApply :: [Expr] -> Either EvaluationError Expr
+reduceMapApply = \case
+  [function] -> Right (Call (Symbol "MapApply") [function])
+  [function, subject] -> mapApplyImmediate function subject
+  [function, subject, levelSpecification] -> do
+    bounds <- normalizeLevelSpec levelSpecification
+    mapApplyTree function bounds 0 subject
+  _ ->
+    Left
+      ( EvaluationError
+          "MapApply expects a function, an expression, and an optional level specification."
+      )
+
+mapApplyImmediate :: Expr -> Expr -> Either EvaluationError Expr
+mapApplyImmediate function expression
+  | Just entries <- associationEntries expression =
+      associationExpr <$> traverse mapEntry entries
+  | Call expressionHead values <- expression =
+      normalizeEvaluatedCall expressionHead
+        <$> traverse (applyTraversalHead function) values
+  | otherwise = Right expression
+ where
+  mapEntry (AssociationEntry ruleHead key value) =
+    AssociationEntry ruleHead key <$> applyTraversalHead function value
+
+mapApplyTree
+  :: Expr
+  -> LevelBounds
+  -> Int
+  -> Expr
+  -> Either EvaluationError Expr
+mapApplyTree function bounds positive expression
+  | Just entries <- associationEntries expression = do
+      mappedEntries <- traverse mapEntry entries
+      let rebuilt = associationExpr mappedEntries
+      if selected
+        then applyTraversalHead function rebuilt
+        else Right rebuilt
+  | Call expressionHead values <- expression = do
+      mappedValues <-
+        traverse (mapApplyTree function bounds (positive + 1)) values
+      let rebuilt = normalizeEvaluatedCall expressionHead mappedValues
+      if selected
+        then applyTraversalHead function rebuilt
+        else Right rebuilt
+  | otherwise = Right expression
+ where
+  selected =
+    positive >= 1
+      && levelMatches
+        bounds
+        positive
+        (negate (expressionDepth expression))
+  mapEntry (AssociationEntry ruleHead key value) =
+    AssociationEntry ruleHead key
+      <$> mapApplyTree function bounds (positive + 1) value
+
+applyTraversalHead :: Expr -> Expr -> Either EvaluationError Expr
+applyTraversalHead function expression
+  | Just entries <- associationEntries expression =
+      applyTraversalCallable
+        function
+        [value | AssociationEntry _ _ value <- entries]
+  | Call _ values <- expression = applyTraversalCallable function values
+  | otherwise = Right expression
+
+applyTraversalCallable :: Expr -> [Expr] -> Either EvaluationError Expr
+applyTraversalCallable (Symbol nothingHead) _
+  | systemHeadIn ["Nothing"] nothingHead = Right (Symbol "Nothing")
+applyTraversalCallable function@(Call functionHead@(Symbol functionName) functionArguments) values
+  | systemHeadIn ["Function"] functionName = do
+      instantiated <- applyFunctionWithHead functionHead functionArguments values
+      if instantiated == Call function values
+        then Right instantiated
+        else evaluate instantiated
+applyTraversalCallable function values = evaluate (Call function values)
 
 reduceApply :: [Expr] -> Expr
 reduceApply [newHead, association]
@@ -10049,6 +13770,14 @@ rebuildWithSplicing expressionHead values =
     | otherwise = concatMap splice values
   splice (Call (Symbol sequenceHead) sequenceValues)
     | systemHeadIn ["Sequence"] sequenceHead = sequenceValues
+  splice (Call (Symbol spliceHead) [Call (Symbol listHead) spliceValues])
+    | systemHeadIn ["Splice"] spliceHead
+    , systemHeadIn ["List"] listHead
+    , expressionHead == Symbol "List" = spliceValues
+  splice (Call (Symbol spliceHead) [Call (Symbol listHead) spliceValues, target])
+    | systemHeadIn ["Splice"] spliceHead
+    , systemHeadIn ["List"] listHead
+    , target == expressionHead = spliceValues
   splice value = [value]
   filterNothing
     | expressionHead `elem` [Symbol "Association", Symbol "List"] =
@@ -10638,12 +14367,382 @@ isInteger :: Expr -> Bool
 isInteger Integer {} = True
 isInteger _ = False
 
-isNumber :: Expr -> Bool
-isNumber Integer {} = True
-isNumber Rational {} = True
-isNumber Real {} = True
-isNumber Complex {} = True
-isNumber _ = False
+transparentUnaryPredicate :: Text -> (Expr -> Bool) -> [Expr] -> Expr
+transparentUnaryPredicate headName predicate =
+  unary headName (boolean . predicate) . map stripDirectUnevaluated
+ where
+  stripDirectUnevaluated = \case
+    Call (Symbol unevaluatedHead) [value]
+      | systemHeadIn ["Unevaluated"] unevaluatedHead -> value
+    value -> value
+
+isMachineInteger :: Expr -> Bool
+isMachineInteger (Integer value) =
+  value >= negate (2 ^ (63 :: Integer))
+    && value <= 2 ^ (63 :: Integer) - 1
+isMachineInteger _ = False
+
+isMachineNumber :: Expr -> Bool
+isMachineNumber value@Real {} = isMachineReal value
+isMachineNumber (Complex realPart imaginaryPart) =
+  isMachineReal realPart && isMachineReal imaginaryPart
+isMachineNumber value
+  | Just (realPart, imaginaryPart) <- explicitComplexParts value =
+      all isExplicitReal [realPart, imaginaryPart]
+        && any isMachineReal [realPart, imaginaryPart]
+isMachineNumber _ = False
+
+isExactNumber :: Expr -> Bool
+isExactNumber value =
+  maybe False (const (not (containsInexactReal value))) (numericValueReality value)
+
+isInexactNumber :: Expr -> Bool
+isInexactNumber Real {} = True
+isInexactNumber value
+  | isSpecialRealValue value = True
+isInexactNumber (Complex realPart imaginaryPart) =
+  containsInexactReal realPart || containsInexactReal imaginaryPart
+isInexactNumber value
+  | Just (realPart, imaginaryPart) <- explicitComplexParts value =
+      containsInexactReal realPart || containsInexactReal imaginaryPart
+isInexactNumber _ = False
+
+isNumericValue :: Expr -> Bool
+isNumericValue = maybe False (const True) . numericValueReality
+
+isRealValuedNumber :: Expr -> Bool
+isRealValuedNumber value = numericValueReality value == Just True
+
+isTrueSymbol :: Expr -> Bool
+isTrueSymbol (Symbol "True") = True
+isTrueSymbol _ = False
+
+-- Python's numeric predicates use a deliberately bounded symbolic bridge:
+-- explicit numeric atoms and Root values, seven named constants, arithmetic,
+-- and the supported transcendental family.  The Bool records whether the
+-- bridge can also prove that the value is real.
+numericValueReality :: Expr -> Maybe Bool
+numericValueReality = \case
+  Integer {} -> Just True
+  Rational {} -> Just True
+  Real {} -> Just True
+  SpecialReal {} -> Just True
+  Complex {} -> Just False
+  rootValue@Root {} -> Just (rootValueIsReal rootValue)
+  Symbol name -> Map.lookup name numericConstantReality
+  special
+    | isSpecialRealValue special -> Just True
+  rootCall@(Call (Symbol rootHead) _)
+    | systemHeadIn ["Root"] rootHead -> rootCallReality rootCall
+  Call (Symbol headName) values -> numericCallReality headName values
+  _ -> Nothing
+
+numericConstantReality :: Map.Map Text Bool
+numericConstantReality =
+  Map.fromList
+    [ ("Catalan", True)
+    , ("Degree", True)
+    , ("E", True)
+    , ("EulerGamma", True)
+    , ("GoldenRatio", True)
+    , ("I", False)
+    , ("Pi", True)
+    ]
+
+numericCallReality :: Text -> [Expr] -> Maybe Bool
+numericCallReality headName values
+  | headName `elem` ["Plus", "Times"] =
+      allNumericReality values
+  | headName == "Power" = case values of
+      [base, powerExpression] -> do
+        baseIsReal <- numericValueReality base
+        powerIsReal <- numericValueReality powerExpression
+        pure
+          ( baseIsReal
+              && powerIsReal
+              && (isInteger powerExpression || knownNonNegative base)
+          )
+      _ -> Nothing
+  | headName `elem` ["Abs", "Exp", "Sqrt"] = case values of
+      [value] -> do
+        valueIsReal <- numericValueReality value
+        pure $ case headName of
+          "Abs" -> True
+          "Exp" -> valueIsReal
+          _ -> valueIsReal && knownNonNegative value
+      _ -> Nothing
+  | headName == "Log" = case values of
+      [value] -> numericPositiveArgumentsAreReal [value]
+      [base, value] -> numericPositiveArgumentsAreReal [base, value]
+      _ -> Nothing
+  | headName == "ArcTan" = case values of
+      [value] -> unaryRealFunction value
+      [x, y] -> allNumericReality [x, y]
+      _ -> Nothing
+  | headName `elem` alwaysRealUnaryNumericHeads = case values of
+      [value] -> unaryRealFunction value
+      _ -> Nothing
+  | headName `elem` boundedRealUnaryNumericHeads = case values of
+      [value] -> boundedUnaryReality headName value
+      _ -> Nothing
+  | otherwise = Nothing
+
+allNumericReality :: [Expr] -> Maybe Bool
+allNumericReality values = and <$> traverse numericValueReality values
+
+unaryRealFunction :: Expr -> Maybe Bool
+unaryRealFunction value = numericValueReality value
+
+numericPositiveArgumentsAreReal :: [Expr] -> Maybe Bool
+numericPositiveArgumentsAreReal values = do
+  realities <- traverse numericValueReality values
+  pure (and realities && all knownPositive values)
+
+alwaysRealUnaryNumericHeads :: [Text]
+alwaysRealUnaryNumericHeads =
+  [ "ArcCot"
+  , "ArcCotDegrees"
+  , "ArcSinh"
+  , "ArcTanDegrees"
+  , "Cos"
+  , "CosDegrees"
+  , "Cosh"
+  , "Cot"
+  , "CotDegrees"
+  , "Coth"
+  , "Csc"
+  , "CscDegrees"
+  , "Csch"
+  , "Gudermannian"
+  , "Haversine"
+  , "Sec"
+  , "SecDegrees"
+  , "Sech"
+  , "Sin"
+  , "SinDegrees"
+  , "Sinh"
+  , "Tan"
+  , "TanDegrees"
+  , "Tanh"
+  ]
+
+boundedRealUnaryNumericHeads :: [Text]
+boundedRealUnaryNumericHeads =
+  [ "ArcCos"
+  , "ArcCosDegrees"
+  , "ArcCosh"
+  , "ArcCoth"
+  , "ArcCsc"
+  , "ArcCscDegrees"
+  , "ArcCsch"
+  , "ArcSec"
+  , "ArcSecDegrees"
+  , "ArcSech"
+  , "ArcSin"
+  , "ArcSinDegrees"
+  , "ArcTanh"
+  , "InverseGudermannian"
+  , "InverseHaversine"
+  ]
+
+boundedUnaryReality :: Text -> Expr -> Maybe Bool
+boundedUnaryReality headName value = do
+  valueIsReal <- numericValueReality value
+  pure
+    ( valueIsReal
+        && case explicitRealExact value of
+          Nothing -> False
+          Just exactValue -> case headName of
+            "ArcCos" -> inClosedUnitInterval exactValue
+            "ArcCosDegrees" -> inClosedUnitInterval exactValue
+            "ArcCosh" -> compareExact exactValue oneExact /= LT
+            "ArcCoth" -> outsideClosedUnitInterval exactValue
+            "ArcCsc" -> outsideOpenUnitInterval exactValue
+            "ArcCscDegrees" -> outsideOpenUnitInterval exactValue
+            "ArcCsch" -> compareExact exactValue zeroExact /= EQ
+            "ArcSec" -> outsideOpenUnitInterval exactValue
+            "ArcSecDegrees" -> outsideOpenUnitInterval exactValue
+            "ArcSech" ->
+              compareExact exactValue zeroExact == GT
+                && compareExact exactValue oneExact /= GT
+            "ArcSin" -> inClosedUnitInterval exactValue
+            "ArcSinDegrees" -> inClosedUnitInterval exactValue
+            "ArcTanh" -> inOpenUnitInterval exactValue
+            "InverseHaversine" ->
+              compareExact exactValue zeroExact /= LT
+                && compareExact exactValue oneExact /= GT
+            -- The real Gudermannian range is (-Pi/2, Pi/2).  Exact rational
+            -- values with magnitude at most one are a safe proved subset.
+            "InverseGudermannian" -> inClosedUnitInterval exactValue
+            _ -> False
+    )
+ where
+  zeroExact = Exact 0 1
+  oneExact = Exact 1 1
+  negativeOneExact = Exact (-1) 1
+  inClosedUnitInterval exactValue =
+    compareExact exactValue negativeOneExact /= LT
+      && compareExact exactValue oneExact /= GT
+  inOpenUnitInterval exactValue =
+    compareExact exactValue negativeOneExact == GT
+      && compareExact exactValue oneExact == LT
+  outsideOpenUnitInterval exactValue =
+    compareExact exactValue negativeOneExact /= GT
+      || compareExact exactValue oneExact /= LT
+  outsideClosedUnitInterval exactValue =
+    compareExact exactValue negativeOneExact == LT
+      || compareExact exactValue oneExact == GT
+
+knownNonNegative :: Expr -> Bool
+knownNonNegative value = case explicitRealExact value of
+  Just exactValue -> compareExact exactValue (Exact 0 1) /= LT
+  Nothing -> case value of
+    Symbol name -> name `elem` ["Catalan", "Degree", "E", "EulerGamma", "GoldenRatio", "Pi"]
+    Call (Symbol headName) [_] -> headName `elem` ["Abs", "Exp", "Sqrt"]
+    _ -> False
+
+knownPositive :: Expr -> Bool
+knownPositive value = case explicitRealExact value of
+  Just exactValue -> compareExact exactValue (Exact 0 1) == GT
+  Nothing -> case value of
+    Symbol name -> name `elem` ["Catalan", "Degree", "E", "EulerGamma", "GoldenRatio", "Pi"]
+    Call (Symbol headName) [_] -> headName `elem` ["Exp"]
+    Call (Symbol headName) [base, exponentValue]
+      | systemHeadIn ["Power"] headName ->
+          knownPositive base
+            && numericValueReality exponentValue == Just True
+    _ -> False
+
+containsInexactReal :: Expr -> Bool
+containsInexactReal Real {} = True
+containsInexactReal value
+  | isSpecialRealValue value = True
+containsInexactReal (Complex realPart imaginaryPart) =
+  containsInexactReal realPart || containsInexactReal imaginaryPart
+containsInexactReal (Call _ values) = any containsInexactReal values
+containsInexactReal _ = False
+
+isSpecialRealValue :: Expr -> Bool
+isSpecialRealValue SpecialReal {} = True
+isSpecialRealValue _ = False
+
+rootValueIsReal :: Expr -> Bool
+rootValueIsReal (Root coefficients _ _) =
+  polynomialHasOnlyRealLinearOrQuadraticRoots
+    ( Map.fromList
+        [ (degree, Exact coefficient 1)
+        | (degree, coefficient) <- zip [0 ..] coefficients
+        , coefficient /= 0
+        ]
+    )
+rootValueIsReal _ = False
+
+rootCallReality :: Expr -> Maybe Bool
+rootCallReality (Call _ values) = do
+  function <- case values of
+    [function, Integer rootIndex]
+      | rootIndex >= 1 -> Just function
+    [function, Integer rootIndex, Integer _]
+      | rootIndex >= 1 -> Just function
+    _ -> Nothing
+  polynomial <- rootFunctionPolynomial function
+  if Map.null polynomial || fst (Map.findMax polynomial) < 1
+    then Nothing
+    else Just (polynomialHasOnlyRealLinearOrQuadraticRoots polynomial)
+rootCallReality _ = Nothing
+
+type PredicatePolynomial = Map.Map Integer Exact
+
+rootFunctionPolynomial :: Expr -> Maybe PredicatePolynomial
+rootFunctionPolynomial = \case
+  Call (Symbol functionHead) [body]
+    | systemHeadIn ["Function"] functionHead ->
+        predicatePolynomial isSlotOne body
+  Call (Symbol functionHead) [parameter@(Symbol _), body]
+    | systemHeadIn ["Function"] functionHead ->
+        predicatePolynomial (== parameter) body
+  _ -> Nothing
+ where
+  isSlotOne (Call (Symbol slotHead) [Integer 1]) =
+    systemHeadIn ["Slot"] slotHead
+  isSlotOne _ = False
+
+predicatePolynomial :: (Expr -> Bool) -> Expr -> Maybe PredicatePolynomial
+predicatePolynomial isVariable expression
+  | isVariable expression = Just (Map.singleton 1 (Exact 1 1))
+predicatePolynomial _ expression
+  | Just exactValue <- toExact expression = Just (constantPolynomial exactValue)
+predicatePolynomial isVariable (Call (Symbol headName) values)
+  | systemHeadIn ["Plus"] headName = do
+      terms <- traverse (predicatePolynomial isVariable) values
+      foldM polynomialAdd Map.empty terms
+  | systemHeadIn ["Times"] headName = do
+      factors <- traverse (predicatePolynomial isVariable) values
+      foldM polynomialMultiply (Map.singleton 0 (Exact 1 1)) factors
+predicatePolynomial isVariable (Call (Symbol headName) [base, Integer powerValue])
+  | systemHeadIn ["Power"] headName
+  , powerValue >= 0 = do
+      polynomial <- predicatePolynomial isVariable base
+      polynomialPower polynomial powerValue
+predicatePolynomial _ _ = Nothing
+
+constantPolynomial :: Exact -> PredicatePolynomial
+constantPolynomial exactValue@(Exact numerator _)
+  | numerator == 0 = Map.empty
+  | otherwise = Map.singleton 0 exactValue
+
+polynomialAdd :: PredicatePolynomial -> PredicatePolynomial -> Maybe PredicatePolynomial
+polynomialAdd left right = boundedPolynomial (Map.unionWith addExact left right)
+
+polynomialMultiply :: PredicatePolynomial -> PredicatePolynomial -> Maybe PredicatePolynomial
+polynomialMultiply left right =
+  boundedPolynomial
+    ( Map.fromListWith
+        addExact
+        [ (leftDegree + rightDegree, multiplyExact leftCoefficient rightCoefficient)
+        | (leftDegree, leftCoefficient) <- Map.toList left
+        , (rightDegree, rightCoefficient) <- Map.toList right
+        ]
+    )
+
+polynomialPower :: PredicatePolynomial -> Integer -> Maybe PredicatePolynomial
+polynomialPower base powerValue = go (Map.singleton 0 (Exact 1 1)) base powerValue
+ where
+  go result _ 0 = Just result
+  go result factor 1 = polynomialMultiply result factor
+  go result factor remaining
+    | odd remaining = do
+        updated <- polynomialMultiply result factor
+        squared <- polynomialMultiply factor factor
+        go updated squared (remaining `div` 2)
+    | otherwise = do
+        squared <- polynomialMultiply factor factor
+        go result squared (remaining `div` 2)
+
+boundedPolynomial :: PredicatePolynomial -> Maybe PredicatePolynomial
+boundedPolynomial polynomial =
+  let retained = Map.filter (\(Exact numerator _) -> numerator /= 0) polynomial
+   in if Map.size retained > 4096
+        then Nothing
+        else Just retained
+
+polynomialHasOnlyRealLinearOrQuadraticRoots :: PredicatePolynomial -> Bool
+polynomialHasOnlyRealLinearOrQuadraticRoots polynomial
+  | Map.null polynomial = False
+  | degree == 1 = True
+  | degree == 2 =
+      compareExact discriminant (Exact 0 1) /= LT
+  | otherwise = False
+ where
+  degree = fst (Map.findMax polynomial)
+  coefficient power = Map.findWithDefault (Exact 0 1) power polynomial
+  a = coefficient 2
+  b = coefficient 1
+  c = coefficient 0
+  discriminant =
+    addExact
+      (multiplyExact b b)
+      (negateExact (multiplyExact (Exact 4 1) (multiplyExact a c)))
 
 isString :: Expr -> Bool
 isString String {} = True

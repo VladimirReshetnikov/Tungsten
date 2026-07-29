@@ -254,7 +254,14 @@ matchStringPatternStatesM evaluator originalPattern source start bindings prefer
     _ -> unsupported (Symbol originalName)
 
   matchCall headName arguments' = case headName of
-    "Optional" -> unsupported (Call (Symbol headName) arguments')
+    "Optional" -> case arguments' of
+      inner : _ ->
+        throwE
+          ( "Unsupported Wolfram string-pattern form in the current Tungsten subset: "
+              <> fullForm inner
+              <> ".."
+          )
+      [] -> unsupported (Call (Symbol headName) arguments')
     "OptionsPattern" -> unsupported (Call (Symbol headName) arguments')
     "HoldPattern" -> case arguments' of
       [inner] -> recurse inner bindings preferLongest

@@ -62,6 +62,102 @@ void evaluation_result_tests() {
         "EvaluationResult owns independent effect snapshots");
 }
 
+void current_message_list_tests() {
+    const auto held = [](const std::string& head, const std::string& tag) {
+        return "HoldForm[MessageName[" + head + ", \"" + tag + "\"]]";
+    };
+
+    tungsten::Evaluator outside_quiet;
+    const auto outside = outside_quiet.evaluate_result(
+        tungsten::parse_input_form("Quiet[Message[f::a]]; $MessageList"));
+    check_equal(outside.result.to_full_form(),
+        "List[" + held("f", "a") + "]",
+        "$MessageList outside Quiet includes a suppressed generated message");
+    check(outside.messages.empty(),
+        "Quiet-suppressed generated messages stay out of public effects");
+    check_equal(outside_quiet.evaluate(tungsten::symbol("$MessageList")).to_full_form(),
+        "List[]", "$MessageList generation state clears for each root evaluation");
+
+    tungsten::Evaluator inside_quiet;
+    const auto inside = inside_quiet.evaluate_result(tungsten::parse_input_form(
+        "Quiet[Message[f::a]; $MessageList]"));
+    check_equal(inside.result.to_full_form(),
+        "List[" + held("f", "a") + "]",
+        "$MessageList inside Quiet sees the suppressed generated message");
+    check(inside.messages.empty(),
+        "reading $MessageList inside Quiet does not make the message visible");
+
+    tungsten::Evaluator duplicates;
+    const auto duplicate = duplicates.evaluate_result(tungsten::parse_input_form(
+        "Message[d::x]; Quiet[Message[d::x]]; $MessageList"));
+    check_equal(duplicate.result.to_full_form(),
+        "List[" + held("d", "x") + ", " + held("d", "x") + "]",
+        "$MessageList retains generated duplicates in order");
+    check(duplicate.messages.size() == 1,
+        "only the visible duplicate enters public message effects");
+
+    tungsten::Evaluator checks;
+    const auto quiet_inside_check = checks.evaluate_result(
+        tungsten::parse_input_form(
+            "{Check[Quiet[Message[c::x]], fallback], $MessageList}"));
+    check_equal(quiet_inside_check.result.to_full_form(),
+        "List[Null, List[" + held("c", "x") + "]]",
+        "an inner Quiet shields Check while $MessageList records generation");
+    check(quiet_inside_check.messages.empty(),
+        "inner Quiet leaves no public Check message effect");
+    const auto check_inside_quiet = checks.evaluate_result(
+        tungsten::parse_input_form(
+            "Quiet[{Check[Message[k::x], fallback], $MessageList}]"));
+    check_equal(check_inside_quiet.result.to_full_form(),
+        "List[fallback, List[" + held("k", "x") + "]]",
+        "Check inside Quiet triggers before final visibility suppression");
+    check(check_inside_quiet.messages.empty(),
+        "an outer Quiet still suppresses Check's generated message publicly");
+
+    tungsten::Evaluator disabled;
+    const auto off = disabled.evaluate_result(tungsten::parse_input_form(
+        "Off[o::x]; Message[o::x]; $MessageList"));
+    check_equal(off.result.to_full_form(), "List[]",
+        "Off-disabled messages do not enter $MessageList");
+    check(off.messages.empty(),
+        "Off-disabled messages do not enter public effects");
+}
+
+void message_list_without_session_tests() {
+    tungsten::Evaluator evaluator;
+
+    const auto malformed = evaluator.evaluate_result(
+        tungsten::parse_input_form(
+            R"WL(MessageList[Print["must not run"], 1])WL"));
+    check_equal(malformed.result.to_full_form(), "List[]",
+        "MessageList without a session returns an empty list before arity validation");
+    check(malformed.prints.empty() && malformed.messages.empty(),
+        "MessageList without a session evaluates no arguments or diagnostics");
+
+    const auto qualified = evaluator.evaluate_result(
+        tungsten::parse_input_form(R"WL(System`MessageList[Unevaluated[x++]])WL"));
+    check_equal(qualified.result.to_full_form(), "List[]",
+        "qualified MessageList without a session is also empty");
+    check(qualified.prints.empty() && qualified.messages.empty(),
+        "qualified no-session MessageList preserves its held boundary");
+
+    const auto global = evaluator.evaluate_result(
+        tungsten::parse_input_form(R"WL(Global`MessageList[Print["global"]])WL"));
+    check_equal(global.result.to_full_form(), "Global`MessageList[Null]",
+        "Global MessageList stays inert without a session");
+    check(global.prints == std::vector<std::string>{"global"}
+            && global.messages.empty(),
+        "Global MessageList follows ordinary argument evaluation");
+
+    const auto alias = evaluator.evaluate_result(tungsten::parse_input_form(
+        R"WL(mlNoSessionAlias = System`MessageList; mlNoSessionAlias[Print["alias"]])WL"));
+    check_equal(alias.result.to_full_form(), "System`MessageList[Null]",
+        "an alias to MessageList does not acquire raw dispatch");
+    check(alias.prints == std::vector<std::string>{"alias"}
+            && alias.messages.empty(),
+        "an inert MessageList alias still evaluates its argument once");
+}
+
 void symbol_info_tests() {
     tungsten::Evaluator evaluator;
     const auto plus = evaluator.symbol_info(tungsten::symbol("Plus"));
@@ -345,6 +441,8 @@ void module_memoization_regression_tests() {
 
 int main() {
     evaluation_result_tests();
+    current_message_list_tests();
+    message_list_without_session_tests();
     symbol_info_tests();
     concurrent_registry_isolation_tests();
     canonical_own_attribute_and_scope_tests();

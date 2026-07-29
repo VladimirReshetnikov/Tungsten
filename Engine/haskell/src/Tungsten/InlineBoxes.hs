@@ -91,9 +91,9 @@ extractBoxExpressions = stableUnique . collect
       [ stringSegmentBoxExpression segment
       | segment@StringInlineBoxSegment {} <- inlineBoxSegments value
       ]
-    Call (Symbol "BoxData") (value : _) -> [fullForm value]
+    Call (Symbol "BoxData") (value : _) -> [inputForm value]
     expression@(Call (Symbol headName) _)
-      | "Box" `T.isSuffixOf` headName && headName /= "BoxData" -> [fullForm expression]
+      | "Box" `T.isSuffixOf` headName && headName /= "BoxData" -> [inputForm expression]
     Call (Symbol headName) values
       | headName `elem` ["TextData", "Row", "List"] -> concatMap collect values
     Call (Symbol "Cell") (value : _) -> collect value

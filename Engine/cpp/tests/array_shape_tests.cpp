@@ -59,6 +59,18 @@ void dense_shape_tests() {
 
 void sparse_shape_tests() {
     check_case(
+        "Dimensions[SparseArray[{}, {18446744073709551616}]]",
+        "List[18446744073709551616]");
+    check_case(
+        "Length[SparseArray[{}, {18446744073709551616}]]",
+        "18446744073709551616");
+    check_case(
+        "Length[SparseArray[{}, {2,18446744073709551616}]]", "2");
+    check_case(
+        "AtomQ[SparseArray[{}, {18446744073709551616}]]", "True");
+    check_case(
+        "SparseArrayQ[SparseArray[{}, {18446744073709551616}]]", "True");
+    check_case(
         "Dimensions[SparseArray[{}, {4294967296,4294967296}]]",
         "List[4294967296, 4294967296]");
     check_case(
@@ -86,6 +98,10 @@ void sparse_shape_tests() {
     check_case(
         "SparseArray[{{2}->a,{1}->b},{3},z][\"ExplicitPositions\"]",
         "List[List[1], List[2]]");
+    check_case(
+        "SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}][\"ExplicitPositions\"]",
+        "List[List[18446744073709551616]]");
     check_case(
         "SparseArray[{}, {0,1000000000},z][\"ExplicitLength\"]",
         "0");
@@ -133,6 +149,35 @@ void predicate_and_message_tests() {
 }
 
 void materialization_guard_tests() {
+    check_case(
+        "Normal[SparseArray[{}, {18446744073709551616}]]",
+        "Normal[SparseArray[List[], List[18446744073709551616]]]",
+        {"Normal::error: SparseArray dimensions exceed the native materialization limit."});
+    check_case(
+        "Part[SparseArray[{}, {18446744073709551616}],"
+        "18446744073709551616]",
+        "0");
+    check_case(
+        "Part[SparseArray[{}, {18446744073709551616}],-1]", "0");
+    check_case(
+        "Part[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}],18446744073709551616]",
+        "a");
+    check_case(
+        "Part[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}],-1]",
+        "a");
+    check_case(
+        "Part[SparseArray[{{18446744073709551616}->a},"
+        "{18446744073709551616}],All]",
+        "SparseArray[List[Rule[List[18446744073709551616], a]], "
+        "List[18446744073709551616]]");
+    check_case(
+        "Part[SparseArray[{}, {18446744073709551616}],"
+        "18446744073709551617]",
+        "Part[SparseArray[List[], List[18446744073709551616]], "
+        "18446744073709551617]",
+        {"Part::error: Part specifications are invalid for SparseArray."});
     check_case(
         "Normal[SparseArray[{}, {4294967296}]]",
         "Normal[SparseArray[List[], List[4294967296]]]",

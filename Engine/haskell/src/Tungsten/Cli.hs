@@ -27,6 +27,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TextIO
 import System.Directory (makeAbsolute)
+import System.FilePath (dropExtension, takeFileName)
 import Text.Read (readMaybe)
 import System.IO
   ( BufferMode (LineBuffering)
@@ -53,15 +54,18 @@ import Tungsten.ParserCorpus
 import Tungsten.Repl (runRepl)
 import Tungsten.Session
   ( EvaluationMessage (..)
+  , EvaluationSession (..)
   , emptySession
   , evaluateInSession
   , sessionPrints
   , sessionVisibleMessages
   )
+import qualified Tungsten.TextualForms as TextualForms
 import Tungsten.WolframString (WolframStringSegment (..))
 
 data CliCommand
   = ProtocolCommand
+  | EvaluatorBatchCommand !Bool
   | ReplCommand !Bool
   | EnvironmentCommand !Bool
   | KernelCommand !SourceSpec !(Maybe FilePath) !Bool !Bool
@@ -73,6 +77,7 @@ data CliCommand
   | ParserCorpusCliCommand !ParserCorpusCommand
   | AssistantCliCommand !AssistantCommand
   | HelpCommand
+  | VersionCommand
   deriving (Eq, Show)
 
 data ExpressionCommand = ParseCommand | EvaluateCommand
@@ -144,15 +149,25 @@ data FrontEndCommand
   deriving (Eq, Show)
 
 parseCliArguments :: [String] -> Either Text CliCommand
-parseCliArguments = \case
-  [] -> Right ProtocolCommand
+parseCliArguments arguments'
+  | hasStandaloneHelp arguments' = Right HelpCommand
+parseCliArguments arguments' = parseCliArgumentsWithoutHelp arguments'
+
+parseCliArgumentsWithoutHelp :: [String] -> Either Text CliCommand
+parseCliArgumentsWithoutHelp = \case
+  [] -> Right (ReplCommand True)
   ["protocol"] -> Right ProtocolCommand
+  ["eval-batch"] -> Right (EvaluatorBatchCommand False)
+  ["eval-batch", "--stateful"] -> Right (EvaluatorBatchCommand True)
   ["repl"] -> Right (ReplCommand True)
   ["repl", "--no-banner"] -> Right (ReplCommand False)
   ["env", "show"] -> Right (EnvironmentCommand False)
   ["env", "show", "--probe"] -> Right (EnvironmentCommand True)
   ["--help"] -> Right HelpCommand
   ["-h"] -> Right HelpCommand
+  ["--version"] -> Right VersionCommand
+  "parse" : arguments' -> parseExpressionArguments ParseCommand arguments'
+  "eval" : arguments' -> parseExpressionArguments EvaluateCommand arguments'
   "expr" : "parse" : arguments' -> parseExpressionArguments ParseCommand arguments'
   "expr" : "evaluate" : arguments' -> parseExpressionArguments EvaluateCommand arguments'
   "kernel" : "eval" : arguments' -> parseKernelArguments arguments'
@@ -179,6 +194,25 @@ parseCliArguments = \case
   "assistant" : "prepare-inline" : arguments' -> parseAssistantPrepareInlineArguments arguments'
   "assistant" : "capture-inline" : arguments' -> parseAssistantCaptureInlineArguments arguments'
   _ -> Left "expected 'protocol', 'repl', an 'expr' command, or a 'notebook' command"
+
+hasStandaloneHelp :: [String] -> Bool
+hasStandaloneHelp arguments' =
+  any isHelp (zip (Nothing : map Just arguments') arguments')
+ where
+  isHelp (previous, value) =
+    value `elem` ["--help", "-h"]
+      && maybe True (`notElem` cliValueOptions) previous
+  cliValueOptions =
+    [ "--code", "--file", "--working-directory", "--index-path", "--path"
+    , "--spec", "--out", "--title", "--cell", "--form", "--prompt"
+    , "--question", "--system-prompt", "--extra-instructions", "--tool"
+    , "--model-service", "--model-name", "--cell-index", "--cell-path"
+    , "--expression-uuid", "--cell-id", "--cell-tag", "--prefix"
+    , "--box-expr", "--suffix", "--object-index", "--limit"
+    , "--corpus-root", "--extension", "--include-glob", "--exclude-glob"
+    , "--max-files", "--seed", "--out-dir", "--max-file-mb", "--max-bytes"
+    , "--kernel-batch-size", "--tungsten-workers", "--preview-chars"
+    ]
 
 parseAssistantAskArguments :: [String] -> Either Text CliCommand
 parseAssistantAskArguments = go Nothing Nothing Nothing Nothing Nothing [] False
@@ -505,7 +539,9 @@ parseDocumentationSearchArguments query = go 10 Nothing False
     Right (DocumentationCliCommand (SearchDocumentationCommand query limit indexPath rebuild))
   go _ indexPath rebuild ("--limit" : value : rest) = do
     limit <- parseIntegerOption "--limit" value
-    go limit indexPath rebuild rest
+    if limit < 0
+      then Left "--limit must be nonnegative"
+      else go limit indexPath rebuild rest
   go limit Nothing rebuild ("--index-path" : value : rest) =
     go limit (Just value) rebuild rest
   go _ (Just _) _ ("--index-path" : _ : _) = Left "--index-path may be supplied only once"
@@ -621,6 +657,7 @@ parseCellPath source
   parseComponent value =
     maybe (Left ("invalid cell path component: " <> value)) Right (readMaybe (T.unpack value))
   pathComponent (JsonNumber value) = parseComponent value
+  pathComponent (JsonBool value) = Right (if value then 1 else 0)
   pathComponent _ = Left "JSON cell paths must be arrays of integers"
   requireNonempty [] = Left "cell paths must contain at least one integer"
   requireNonempty values = Right values
@@ -760,7 +797,9 @@ parseExpressionArguments expressionCommand = go Nothing "input"
     addSource source (InlineSource (T.pack value)) >>= \updated -> go (Just updated) form rest
   go source form ("--file" : value : rest) =
     addSource source (FileSource value) >>= \updated -> go (Just updated) form rest
-  go source _ ("--form" : value : rest) = go source (T.pack value) rest
+  go source _ ("--form" : value : rest)
+    | value `elem` ["input", "fullform", "standard"] = go source (T.pack value) rest
+    | otherwise = Left "--form must be input, fullform, or standard"
   go _ _ [flag]
     | flag `elem` ["--code", "--file", "--form"] = Left (T.pack flag <> " requires a value")
   go _ _ (flag : _) = Left ("unknown expression option: " <> T.pack flag)
@@ -771,10 +810,13 @@ runCli :: [String] -> IO Int
 runCli arguments' = case parseCliArguments arguments' of
   Left message -> do
     TextIO.hPutStrLn stderr ("tungsten-hs: " <> message)
-    TextIO.hPutStrLn stderr usage
-    pure 2
+    if message == "notebook cells must use STYLE:TEXT"
+      then pure 1
+      else TextIO.hPutStrLn stderr usage *> pure 2
   Right HelpCommand -> TextIO.putStrLn usage *> pure 0
+  Right VersionCommand -> TextIO.putStrLn "tungsten-hs 0.1.0" *> pure 0
   Right ProtocolCommand -> configureHandles *> serveProtocol *> pure 0
+  Right (EvaluatorBatchCommand stateful) -> configureHandles *> runEvaluatorBatch stateful
   Right (ReplCommand showBanner) -> configureHandles *> runRepl showBanner
   Right (EnvironmentCommand includeProbe) -> do
     installation <- discoverInstallation
@@ -941,6 +983,65 @@ serveProtocol = do
       TextIO.putStr (encodeResponseLine response)
       serveProtocol
 
+-- | Evaluate one JSON-encoded InputForm string per line.  This deliberately
+-- matches the native evaluator batch protocol used by the Python-reference
+-- differential suites, including a process-local stateful mode.
+runEvaluatorBatch :: Bool -> IO Int
+runEvaluatorBatch stateful = loop emptySession
+ where
+  loop session = do
+    finished <- hIsEOF stdin
+    if finished
+      then pure 0
+      else do
+        line <- TextIO.hGetLine stdin
+        case parseJson line of
+          Left jsonError -> do
+            emitJson (batchFailurePayload (jsonErrorMessage jsonError))
+            loop session
+          Right (JsonString source) ->
+            case parseInputForm source of
+              Left parseError -> do
+                emitJson (batchFailurePayload (parseErrorMessage parseError))
+                loop session
+              Right expression ->
+                evaluateInSession session expression >>= \case
+                  Left evaluationError -> do
+                    emitJson (batchFailurePayload (evaluationErrorMessage evaluationError))
+                    loop session
+                  Right (result, updatedSession) -> do
+                    emitJson (batchSuccessPayload result updatedSession)
+                    loop (if stateful then updatedSession else emptySession)
+          Right _ -> do
+            emitJson (batchFailurePayload "eval-batch input must contain one JSON string per line")
+            loop session
+
+batchSuccessPayload :: Expr -> EvaluationSession -> JsonValue
+batchSuccessPayload result session =
+  JsonObject
+    ( Map.fromList
+        [ ("full_form", JsonString (fullForm result))
+        , ("message_texts", JsonArray (map (JsonString . evaluationMessageText) messages))
+        , ("messages", JsonArray (map (JsonString . fullForm . evaluationMessageFullName) messages))
+        , ("prints", JsonArray (map JsonString (sessionPrints session)))
+        , ("success", JsonBool True)
+        ]
+    )
+ where
+  messages = sessionVisibleMessages session
+
+batchFailurePayload :: Text -> JsonValue
+batchFailurePayload message =
+  JsonObject
+    ( Map.fromList
+        [ ("error", JsonString message)
+        , ("message_texts", JsonArray [])
+        , ("messages", JsonArray [])
+        , ("prints", JsonArray [])
+        , ("success", JsonBool False)
+        ]
+    )
+
 runExpressionCommand :: ExpressionCommand -> SourceSpec -> Text -> IO Int
 runExpressionCommand command sourceSpec requestedForm = do
   sourceResult <- readSource sourceSpec
@@ -960,26 +1061,46 @@ runExpressionCommand command sourceSpec requestedForm = do
           emitJson (parsePayload normalizedForm source expression)
           pure 0
         EvaluateCommand ->
-          evaluateInSession emptySession expression >>= \case
-            Left evaluationError ->
-              emitError
-                command
-                normalizedForm
-                (Just source)
-                "WolframEvaluationError"
-                (evaluationErrorMessage evaluationError)
-                (Just expression)
-            Right (result, updatedSession) -> do
-              emitJson
-                ( evaluationPayload
-                    normalizedForm
-                    source
-                    expression
-                    result
-                    (sessionVisibleMessages updatedSession)
-                    (sessionPrints updatedSession)
-                )
-              pure 0
+          let activeSession =
+                emptySession
+                  { sessionHistoryLine = Just 1
+                  , sessionInputHistory = Map.singleton 1 expression
+                  , sessionInputStringHistory = Map.singleton 1 source
+                  }
+           in cliExitCode activeSession expression >>= \case
+            Just requestedExitCode -> pure requestedExitCode
+            Nothing -> evaluateInSession activeSession expression >>= \case
+              Left evaluationError ->
+                emitError
+                  command
+                  normalizedForm
+                  (Just source)
+                  "WolframEvaluationError"
+                  (evaluationErrorMessage evaluationError)
+                  (Just expression)
+              Right (result, updatedSession) -> do
+                emitJson
+                  ( evaluationPayload
+                      normalizedForm
+                      source
+                      expression
+                      result
+                      (sessionVisibleMessages updatedSession)
+                      (sessionPrints updatedSession)
+                  )
+                pure 0
+
+cliExitCode :: EvaluationSession -> Expr -> IO (Maybe Int)
+cliExitCode session = \case
+  Call (Symbol headName) []
+    | headName `elem` ["Exit", "Quit", "System`Exit", "System`Quit"] ->
+        pure (Just 0)
+  Call (Symbol headName) [argument]
+    | headName `elem` ["Exit", "Quit", "System`Exit", "System`Quit"] ->
+        evaluateInSession session argument >>= \case
+          Right (Integer code, _) -> pure (Just (fromInteger code))
+          _ -> pure Nothing
+  _ -> pure Nothing
 
 readSource :: SourceSpec -> IO (Either Text Text)
 readSource (InlineSource source) = pure (Right source)
@@ -996,13 +1117,13 @@ runNotebookCommand = \case
       Right source -> case parseNotebook source of
         Left notebookError ->
           emitNotebookError "inspect" "NotebookError" (notebookErrorMessage notebookError)
-        Right document -> emitJson (notebookPayload document) *> pure 0
+        Right document -> emitJson (notebookPayload (Just path) document) *> pure 0
   CreateNotebookCommand path title cells -> do
     let document = createNotebook title cells
     writeResult <- try (TextIO.writeFile path (renderNotebook document))
     case (writeResult :: Either IOException ()) of
       Left exception -> emitNotebookError "create" "OutputError" (T.pack (show exception))
-      Right () -> emitJson (notebookPayload document) *> pure 0
+      Right () -> emitJson (notebookPayload (Just path) document) *> pure 0
   PatchNotebookCommand notebookPath specPath outputPath -> do
     notebookSource <- readSource (FileSource notebookPath)
     specSource <- readSource (FileSource specPath)
@@ -1024,7 +1145,7 @@ runNotebookCommand = \case
                 writeResult <- try (TextIO.writeFile destination (renderNotebook patched))
                 case (writeResult :: Either IOException ()) of
                   Left exception -> emitNotebookError "patch" "OutputError" (T.pack (show exception))
-                  Right () -> emitJson (notebookPayload patched) *> pure 0
+                  Right () -> emitJson (notebookPayload (Just destination) patched) *> pure 0
 
 runInlineBoxCommand :: InlineBoxCommand -> IO Int
 runInlineBoxCommand = \case
@@ -1044,7 +1165,11 @@ runInlineBoxCommand = \case
             document selector prefix suffix objectIndex allObjects of
               Left inlineError -> do
                 emitJson (inlineBoxErrorPayload inlineError)
-                pure (if requireSuccess then 1 else 0)
+                pure
+                  ( if requireSuccess || inlineBoxErrorType inlineError == "CellSelectorNotFound"
+                      then 1
+                      else 0
+                  )
               Right selection -> do
                 emitJson (inlineBoxSelectionPayload absolutePath selection)
                 pure 0
@@ -1211,7 +1336,7 @@ documentationRecordPayload :: DocumentationRecord -> JsonValue
 documentationRecordPayload record =
   JsonObject
     ( Map.fromList
-        [ ("category", JsonString (documentationCategory record))
+        ( [ ("category", JsonString (documentationCategory record))
         , ("kind", JsonString (documentationKind record))
         , ("paclet", JsonString (documentationPaclet record))
         , ("path", JsonString (T.pack (documentationPath record)))
@@ -1219,6 +1344,8 @@ documentationRecordPayload record =
         , ("text", JsonString (documentationText record))
         , ("title", JsonString (documentationTitle record))
         ]
+            <> maybe [] (pure . ("id",) . jsonInteger) (documentationId record)
+        )
     )
 
 documentationHitPayload :: DocumentationHit -> JsonValue
@@ -1321,20 +1448,24 @@ pathValue key (JsonArray values) = traverse component values
  where
   component (JsonNumber source) =
     maybe (Left ("patch path must contain integers: " <> key)) Right (readMaybe (T.unpack source))
+  component (JsonBool value) = Right (if value then 1 else 0)
   component _ = Left ("patch path must contain integers: " <> key)
 pathValue key _ = Left ("patch path must be an integer array: " <> key)
 
-notebookPayload :: NotebookDocument -> JsonValue
-notebookPayload document =
+notebookPayload :: Maybe FilePath -> NotebookDocument -> JsonValue
+notebookPayload path document =
   JsonObject
     ( Map.fromList
         [ ("cell_count", jsonInteger (fromIntegral (cellCount document)))
         , ("cells", JsonArray (map cellRecordPayload (flattenCells document)))
         , ("group_count", jsonInteger (fromIntegral (groupCount document)))
-        , ("options", JsonArray (map (JsonString . fullForm) (notebookOptions document)))
-        , ("title", maybe JsonNull JsonString (notebookTitle document))
+        , ("options", JsonArray (map (JsonString . notebookOptionText) (notebookOptions document)))
+        , ("path", maybe JsonNull (JsonString . T.pack) path)
+        , ("title", maybe JsonNull JsonString resolvedTitle)
         ]
     )
+ where
+  resolvedTitle = notebookTitle document <|> (T.pack . dropExtension . takeFileName <$> path)
 
 cellRecordPayload :: CellRecord -> JsonValue
 cellRecordPayload record =
@@ -1346,7 +1477,7 @@ cellRecordPayload record =
         , ("expression_uuid", maybe JsonNull JsonString (expressionUuid cell))
         , ("index", jsonInteger (fromIntegral (cellRecordIndex record)))
         , ("kind", JsonString "cell")
-        , ("options", JsonArray (map (JsonString . fullForm) (cellOptions cell)))
+        , ("options", JsonArray (map (JsonString . notebookOptionText) (cellOptions cell)))
         , ("path", JsonArray (map (jsonInteger . fromIntegral) (cellRecordPath record)))
         , ("preview", JsonString (cellRecordPreview record))
         , ("style", maybe JsonNull JsonString (cellRecordStyle record))
@@ -1354,6 +1485,12 @@ cellRecordPayload record =
     )
  where
   cell = cellRecordCell record
+
+notebookOptionText :: Expr -> Text
+notebookOptionText (Call (Symbol ruleHead) [left, right])
+  | ruleHead == "Rule" || ruleHead == "System`Rule" =
+      inputForm left <> "->" <> inputForm right
+notebookOptionText expression = inputForm expression
 
 emitNotebookError :: Text -> Text -> Text -> IO Int
 emitNotebookError command errorType message = do
@@ -1449,23 +1586,29 @@ runFrontEndCommand command = do
     Left documentationError -> emitDocumentationError "frontend open-doc" documentationError
     Right (result, requireSuccess) -> do
       emitJson (kernelPayload result)
-      pure (kernelCommandExit requireSuccess result)
+      pure (frontEndCommandExit requireSuccess result)
 
-kernelCommandExit :: Bool -> KernelEvaluationResult -> Int
-kernelCommandExit requireSuccess result
-  | requireSuccess && kernelSuccess result == Just False = 1
-  | kernelEvaluationAvailable result = 0
-  | otherwise = 2
+frontEndCommandExit :: Bool -> KernelEvaluationResult -> Int
+frontEndCommandExit requireSuccess result
+  | requireSuccess && kernelSuccess result /= Just True = 1
+  | otherwise = 0
 
 parseSource :: Text -> Text -> Either Text (Text, Expr)
 parseSource requestedForm source = case T.toLower (T.strip requestedForm) of
   "input" -> parseWith "input" parseInputForm
   "inputform" -> parseWith "input" parseInputForm
-  "full" -> parseWith "fullform" parseFullForm
-  "fullform" -> parseWith "fullform" parseFullForm
+  "fullform" ->
+    parseWith
+      "fullform"
+      (\value -> parseFullForm value `orElseParse` parseInputForm value)
+  "standard" ->
+    ("standard",) <$> first ("standard form parse failed: " <>)
+      (TextualForms.parseStandardFormSource source)
   other -> Left ("unsupported expression form: " <> other)
  where
   parseWith normalized parser = (normalized,) <$> first parseErrorMessage (parser source)
+  orElseParse (Right value) _ = Right value
+  orElseParse (Left _) fallback = fallback
 
 parsePayload :: Text -> Text -> Expr -> JsonValue
 parsePayload form source expression =
@@ -1675,6 +1818,7 @@ usage =
   T.unlines
     [ "Usage:"
     , "  tungsten-hs protocol"
+    , "  tungsten-hs eval-batch [--stateful]"
     , "  tungsten-hs repl [--no-banner]"
     , "  tungsten-hs env show"
     , "  tungsten-hs kernel eval (--code TEXT | --file PATH) [--working-directory PATH] [--front-end] [--require-success]"
@@ -1683,8 +1827,8 @@ usage =
     , "  tungsten-hs frontend open-notebook --file PATH [--require-success]"
     , "  tungsten-hs frontend open-doc IDENTIFIER [--index-path PATH] [--require-success]"
     , "  tungsten-hs frontend token TOKEN [--file PATH] [--require-success]"
-    , "  tungsten-hs expr parse (--code TEXT | --file PATH) [--form input|fullform]"
-    , "  tungsten-hs expr evaluate (--code TEXT | --file PATH) [--form input|fullform]"
+    , "  tungsten-hs expr parse (--code TEXT | --file PATH) [--form input|fullform|standard]"
+    , "  tungsten-hs expr evaluate (--code TEXT | --file PATH) [--form input|fullform|standard]"
     , "  tungsten-hs parser-corpus discover [DISCOVERY OPTIONS] [--sample N]"
     , "  tungsten-hs parser-corpus compare [DISCOVERY OPTIONS] [--skip-wolfram] [--no-write] [--include-results]"
     , "    DISCOVERY OPTIONS: --corpus-root PATH [--extension EXT ...] [--include-glob GLOB ...] [--exclude-glob GLOB ...] [--max-files N] [--shuffle] [--seed N]"

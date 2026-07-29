@@ -8,6 +8,8 @@
 #include <charconv>
 #include <cmath>
 #include <locale>
+#include <limits>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -25,7 +27,9 @@ struct ExprNode {
     std::size_t index = 0;
     long method = 0;
     std::vector<std::uint8_t> byte_values;
-    std::vector<std::size_t> dimensions;
+    std::vector<mpz_class> dimensions;
+    std::vector<std::size_t> native_dimensions;
+    std::optional<std::size_t> native_length;
     std::vector<SparseEntry> entries;
     std::shared_ptr<const ExprNode> fill;
     std::vector<Expr> arguments;
@@ -186,6 +190,19 @@ std::shared_ptr<const ExprNode> require_node(const std::shared_ptr<const ExprNod
     return value;
 }
 
+std::optional<std::size_t> native_dimension(const mpz_class& value) {
+    static const mpz_class maximum(
+        std::to_string(std::numeric_limits<std::size_t>::max()), 10);
+    if (value < 0 || value > maximum) return std::nullopt;
+    std::size_t result = 0;
+    const auto text = value.get_str();
+    const auto parsed = std::from_chars(
+        text.data(), text.data() + text.size(), result);
+    if (parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size())
+        return std::nullopt;
+    return result;
+}
+
 } // namespace
 
 Expr::Expr() : node_(std::make_shared<ExprNode>()) {}
@@ -201,7 +218,9 @@ ExprKind Expr::kind() const noexcept { return node_->kind; }
 
 std::size_t Expr::length() const noexcept {
     if (kind() == ExprKind::SparseArray) {
-        return node_->dimensions.empty() ? 0 : node_->dimensions.front();
+        if (node_->dimensions.empty()) return 0;
+        return node_->native_length.value_or(
+            std::numeric_limits<std::size_t>::max());
     }
     if (kind() == ExprKind::ByteArray) {
         return node_->byte_values.size();
@@ -308,7 +327,15 @@ const std::vector<mpz_class>& Expr::root_coefficients() const { return node_->co
 std::size_t Expr::root_index() const { return node_->index; }
 long Expr::root_method() const { return node_->method; }
 const std::vector<std::uint8_t>& Expr::bytes() const { return node_->byte_values; }
-const std::vector<std::size_t>& Expr::dimensions() const { return node_->dimensions; }
+const std::vector<std::size_t>& Expr::dimensions() const {
+    if (node_->native_dimensions.size() != node_->dimensions.size())
+        throw std::overflow_error(
+            "SparseArray dimensions exceed the native representation limit.");
+    return node_->native_dimensions;
+}
+const std::vector<mpz_class>& Expr::sparse_dimensions() const noexcept {
+    return node_->dimensions;
+}
 const std::vector<SparseEntry>& Expr::sparse_entries() const { return node_->entries; }
 
 Expr Expr::fill_value() const {
@@ -341,11 +368,13 @@ std::string Expr::to_full_form() const {
         std::vector<Expr> rules;
         for (const auto& entry : node_->entries) {
             std::vector<Expr> indices;
-            for (const auto index : entry.indices) indices.push_back(integer(index));
+            for (const auto& index : entry.indices)
+                indices.push_back(integer(index));
             rules.push_back(call("Rule", {list(std::move(indices)), entry.value}));
         }
         std::vector<Expr> dimensions;
-        for (const auto dimension : node_->dimensions) dimensions.push_back(integer(dimension));
+        for (const auto& dimension : node_->dimensions)
+            dimensions.push_back(integer(dimension));
         std::vector<Expr> arguments{list(std::move(rules)), list(std::move(dimensions))};
         if (Expr(node_->fill) != integer(0L)) arguments.push_back(Expr(node_->fill));
         return call("SparseArray", std::move(arguments)).to_full_form();
@@ -419,7 +448,7 @@ std::string Expr::to_json() const {
         output << R"({"type":"sparse_array","dimensions":[)";
         for (std::size_t index = 0; index < node_->dimensions.size(); ++index) {
             if (index != 0) output << ',';
-            output << node_->dimensions[index];
+            output << node_->dimensions[index].get_str();
         }
         output << R"(],"fill_value":)" << Expr(node_->fill).to_json() << R"(,"entries":[)";
         for (std::size_t index = 0; index < node_->entries.size(); ++index) {
@@ -427,7 +456,7 @@ std::string Expr::to_json() const {
             output << R"({"indices":[)";
             for (std::size_t part = 0; part < node_->entries[index].indices.size(); ++part) {
                 if (part != 0) output << ',';
-                output << node_->entries[index].indices[part];
+                output << node_->entries[index].indices[part].get_str();
             }
             output << R"(],"value":)" << node_->entries[index].value.to_json() << '}';
         }
@@ -535,13 +564,44 @@ Expr root(std::vector<mpz_class> coefficients, std::size_t index, long method) {
         call("Function", {body}), integer(std::move(one_based_index)), integer(method)};
     return Expr(std::move(node));
 }
-Expr sparse_array(std::vector<std::size_t> dimensions, std::vector<SparseEntry> entries, Expr fill_value) {
-    std::sort(entries.begin(), entries.end(),
+Expr sparse_array(std::vector<mpz_class> dimensions, std::vector<SparseEntry> entries, Expr fill_value) {
+    if (std::any_of(dimensions.begin(), dimensions.end(),
+            [](const mpz_class& dimension) { return dimension < 0; }))
+        throw std::invalid_argument(
+            "SparseArray dimensions must be non-negative.");
+    std::set<std::vector<mpz_class>> seen;
+    std::vector<SparseEntry> normalized_entries;
+    normalized_entries.reserve(entries.size());
+    for (auto& entry : entries) {
+        if (entry.indices.size() != dimensions.size())
+            throw std::invalid_argument(
+                "SparseArray rule positions must match the array rank.");
+        for (std::size_t axis = 0; axis < entry.indices.size(); ++axis)
+            if (entry.indices[axis] < 1
+                || entry.indices[axis] > dimensions[axis])
+                throw std::invalid_argument(
+                    "SparseArray rule positions must be inside the array dimensions.");
+        if (!seen.insert(entry.indices).second) continue;
+        if (entry.value != fill_value)
+            normalized_entries.push_back(std::move(entry));
+    }
+    std::sort(normalized_entries.begin(), normalized_entries.end(),
         [](const SparseEntry& left, const SparseEntry& right) {
             return left.indices < right.indices;
         });
     auto node = std::make_shared<ExprNode>(); node->kind = ExprKind::SparseArray;
-    node->dimensions = std::move(dimensions); node->entries = std::move(entries); node->fill = fill_value.node_;
+    if (!dimensions.empty())
+        node->native_length = native_dimension(dimensions.front());
+    node->native_dimensions.reserve(dimensions.size());
+    for (const auto& dimension : dimensions) {
+        const auto native = native_dimension(dimension);
+        if (!native) {
+            node->native_dimensions.clear();
+            break;
+        }
+        node->native_dimensions.push_back(*native);
+    }
+    node->dimensions = std::move(dimensions); node->entries = std::move(normalized_entries); node->fill = fill_value.node_;
     return Expr(std::move(node));
 }
 Expr call(Expr head, std::vector<Expr> args) {
