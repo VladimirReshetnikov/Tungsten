@@ -846,6 +846,8 @@ reduceBuiltin headName values = case headName of
   "Plus" -> reduceSparseArithmetic "Plus" values
   "Times" -> reduceSparseArithmetic "Times" values
   "Power" -> Right (reducePower values)
+  "Simplify" -> Right (reduceNumericSimplify headName values)
+  "FullSimplify" -> Right (reduceNumericSimplify headName values)
   "Factorial" -> Right (reduceFactorial values)
   "Factorial2" -> Right (reduceFactorial2 values)
   "Abs" -> Right (reduceAbs values)
@@ -1004,6 +1006,7 @@ reduceBuiltin headName values = case headName of
   "PadRight" -> reducePad False values
   "Min" -> Right (reduceMinMax True headName values)
   "Max" -> Right (reduceMinMax False headName values)
+  "UnitStep" -> Right (reduceUnitStep values)
   "Mean" -> reduceMean values
   "Median" -> reduceMedian values
   "Variance" -> reduceVariance values
@@ -2365,6 +2368,8 @@ complexExpandDegreeBase headName = do
 broadComplexParts :: Expr -> Maybe (Expr, Expr)
 broadComplexParts value
   | Just components <- explicitComplexParts value = Just components
+  | rootValue@Root {} <- value
+  , Just components <- complexExpandRootComponents rootValue = Just components
   | numericValueReality value == Just True = Just (value, Integer 0)
 broadComplexParts (Call (Symbol headName) values)
   | systemHeadIn ["Plus"] headName = do
@@ -2945,7 +2950,11 @@ formatFixedExact (Exact numerator denominator) scale negativeZero =
 
 reducePlus :: [Expr] -> Expr
 reducePlus originalValues =
-  case NumericPrecision.approximateInexactNumericCall "Plus" originalValues of
+  case
+      if any isExplicitComplexExpression originalValues
+        then Nothing
+        else NumericPrecision.approximateInexactNumericCall "Plus" originalValues
+    of
     Just approximated -> approximated
     Nothing ->
       let values = concatMap (flattenHead "Plus") originalValues
@@ -2964,6 +2973,9 @@ reducePlus originalValues =
                     Just factored -> factored
                     Nothing -> Call (Symbol "Plus") combined
  where
+  isExplicitComplexExpression Complex {} = True
+  isExplicitComplexExpression _ = False
+
   collectLikeTerms terms = retainFirst Set.empty decomposed
    where
     decomposed = map termCoefficient terms
@@ -3280,6 +3292,10 @@ reducePower [base, Integer exponentValue]
   , exponentValue > 0 =
       reduceTimes [reducePower [factor, Integer exponentValue] | factor <- factors]
 reducePower [base, exponentValue]
+  | Symbol baseName <- base
+  , systemHeadIn ["E"] baseName
+  , Call (Symbol logHead) [value] <- exponentValue
+  , systemHeadIn ["Log"] logHead = value
   | Just result <- reduceExactFractionalPower base exponentValue = result
   | Just result <-
       NumericPrecision.approximateInexactNumericCall "Power" [base, exponentValue] = result
@@ -6638,6 +6654,44 @@ reduceMinMax minimumMode headName originalValues =
     isOrderableReal value
       || NumericPrecision.compareNumericRealExpressions value value == Just EQ
 
+reduceUnitStep :: [Expr] -> Expr
+reduceUnitStep values
+  | null values = Integer 1
+  | Just orderings <- traverse (`compareOrderableReal` Integer 0) values =
+      Integer (if all (/= LT) orderings then 1 else 0)
+  | otherwise = Call (Symbol "UnitStep") values
+
+reduceNumericSimplify :: Text -> [Expr] -> Expr
+reduceNumericSimplify headName = \case
+  [value]
+    | isNumericPythagoreanIdentity value -> Integer 1
+    | Just reduced <-
+        AlgebraicRoots.reduceAlgebraicRootBuiltin
+          algebraicRootContext
+          "RootReduce"
+          [value]
+    , reduced /= value -> reduced
+    | otherwise -> value
+  values -> Call (Symbol headName) values
+
+isNumericPythagoreanIdentity :: Expr -> Bool
+isNumericPythagoreanIdentity (Call (Symbol plusHead) terms)
+  | systemHeadIn ["Plus"] plusHead
+  , [left, right] <- terms =
+      case (squaredTrig left, squaredTrig right) of
+        (Just (leftName, leftArgument), Just (rightName, rightArgument)) ->
+          leftArgument == rightArgument
+            && Set.fromList [leftName, rightName] == Set.fromList ["Cos", "Sin"]
+            && numericValueReality leftArgument /= Nothing
+        _ -> False
+ where
+  squaredTrig (Call (Symbol powerHead) [Call (Symbol trigHead) [argument], Integer 2])
+    | systemHeadIn ["Power"] powerHead
+    , Just normalizedTrig <- normalizeSystemSymbolName trigHead
+    , normalizedTrig `elem` ["Cos", "Sin"] = Just (normalizedTrig, argument)
+  squaredTrig _ = Nothing
+isNumericPythagoreanIdentity _ = False
+
 flattenMinMaxArgument :: Text -> Expr -> [Expr]
 flattenMinMaxArgument headName (Call (Symbol nestedHead) values)
   | nestedHead == "List" || nestedHead == headName =
@@ -7358,7 +7412,12 @@ orderingFunctionCompare (Just function) = compareWithFunction
 reduceOrder :: [Expr] -> Either EvaluationError Expr
 reduceOrder [left, right] = Right (Integer result)
  where
-  result = case canonicalCompare left right of
+  ordering
+    | left /= right
+    , compareOrderableReal left right == Just EQ =
+        compare (numericKindRank left, fullForm left) (numericKindRank right, fullForm right)
+    | otherwise = canonicalCompare left right
+  result = case ordering of
     LT -> 1
     EQ -> 0
     GT -> -1

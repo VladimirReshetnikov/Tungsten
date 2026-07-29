@@ -286,7 +286,34 @@ approximateInexactNumericCall :: Text -> [Expr] -> Maybe Expr
 approximateInexactNumericCall headName values = do
   let expression = Call (Symbol headName) values
   target <- inexactCallTarget expression
-  approximateExpression target expression
+  result <- approximateExpression target expression
+  pure
+    ( case target of
+        DecimalTarget _
+          | headName `elem` ["Plus", "Times", "Power"] ->
+              trimArithmeticDecimalPadding result
+        _ -> result
+    )
+
+trimArithmeticDecimalPadding :: Expr -> Expr
+trimArithmeticDecimalPadding (Real source) = Real (trimRealSource source)
+trimArithmeticDecimalPadding (Complex realPart imaginaryPart) =
+  Complex
+    (trimArithmeticDecimalPadding realPart)
+    (trimArithmeticDecimalPadding imaginaryPart)
+trimArithmeticDecimalPadding expression = expression
+
+trimRealSource :: Text -> Text
+trimRealSource source =
+  let (mantissaWithMarker, marker) = T.breakOn "`" source
+      trimmedMantissa
+        | "." `T.isInfixOf` mantissaWithMarker =
+            let withoutZeros = T.dropWhileEnd (== '0') mantissaWithMarker
+             in if T.isSuffixOf "." withoutZeros
+                  then withoutZeros <> "0"
+                  else withoutZeros
+        | otherwise = mantissaWithMarker
+   in trimmedMantissa <> marker
 
 inexactCallTarget :: Expr -> Maybe NumericTarget
 inexactCallTarget (Call (Symbol headName) values)

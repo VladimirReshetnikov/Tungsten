@@ -74,7 +74,8 @@ library
     text       >= 2.1  && < 2.2,
     time       >= 1.12 && < 1.15,
     template-haskell >= 2.23 && < 2.24,
-    transformers >= 0.6 && < 0.7
+    transformers >= 0.6 && < 0.7,
+    zlib       >= 0.7  && < 0.8
   other-modules:
     Tungsten.NamedCharacterTH
     Tungsten.NumericPrecision

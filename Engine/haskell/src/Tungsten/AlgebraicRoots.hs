@@ -10,6 +10,7 @@
 -- the Python implementation's best-effort dispatch.
 module Tungsten.AlgebraicRoots
   ( AlgebraicRootContext (..)
+  , canonicalizeNestedAlgebraicRoots
   , defaultAlgebraicRootContext
   , reduceAlgebraicRootBuiltin
   , expandRootSumForNormal
@@ -505,7 +506,15 @@ sortPolynomialRoots values = sortBy (comparing orderingKey) normalized
     | value <- values
     ]
   orderingKey value =
-    (not (rootIsNumericallyReal value), Complex.realPart value, Complex.imagPart value)
+    ( not (rootIsNumericallyReal value)
+    , stableComponent (Complex.realPart value)
+    , stableComponent (Complex.imagPart value)
+    , Complex.realPart value
+    , Complex.imagPart value
+    )
+  stableComponent :: Double -> Double
+  stableComponent component =
+    fromIntegral (round (component * 1.0e10) :: Integer) / 1.0e10
 
 approximatePolynomialRoots :: QPoly -> Maybe [Complex Double]
 approximatePolynomialRoots polynomial@(QPoly coefficients)
@@ -927,6 +936,9 @@ algebraicFromExpr context (Complex realPart imaginaryPart) = do
   algebraicAdd context (rationalAlgebraic realValue) scaledImaginary
 algebraicFromExpr _ (Root coefficients index _) = algebraicRootValue coefficients index
 algebraicFromExpr context expression
+  | Just ("Root", values) <- callHead expression
+  , Just (Root coefficients index _) <- reduceRoot context values =
+      algebraicRootValue coefficients index
   | Just ("Plus", values) <- callHead expression = do
       terms <- traverse (algebraicFromExpr context) values
       foldM (algebraicAdd context) (rationalAlgebraic 0) terms
@@ -1124,13 +1136,15 @@ reduceRoot context values = do
     _ -> Nothing
   guard (oneBasedIndex > 0)
   expressionPolynomialValue <- functionExpressionPolynomial context True function
-  let originalDegree = fst (Map.findMax expressionPolynomialValue)
+  let normalizedPolynomialValue =
+        Map.map (normalizeNestedRootCalls context) expressionPolynomialValue
+      originalDegree = fst (Map.findMax normalizedPolynomialValue)
       zeroBasedIndex = oneBasedIndex - 1
   guard
     ( zeroBasedIndex < toInteger originalDegree
         && toInteger originalDegree <= maximumAlgebraicRootDegree context
     )
-  case rationalPolynomialFromExprPoly expressionPolynomialValue of
+  case rationalPolynomialFromExprPoly normalizedPolynomialValue of
     Just polynomial -> do
       roots <- approximateRootsWithMultiplicity polynomial
       guard (zeroBasedIndex < toInteger (length roots))
@@ -1140,13 +1154,33 @@ reduceRoot context values = do
         (roots !! fromInteger zeroBasedIndex)
         method
     Nothing -> do
-      (norm, roots) <- algebraicCoefficientNorm context expressionPolynomialValue
+      (norm, roots) <- algebraicCoefficientNorm context normalizedPolynomialValue
       guard (zeroBasedIndex < toInteger (length roots))
       canonicalRootFromPolynomial
         context
         norm
         (roots !! fromInteger zeroBasedIndex)
         method
+
+normalizeNestedRootCalls :: AlgebraicRootContext -> Expr -> Expr
+normalizeNestedRootCalls context expression = case expression of
+  Call expressionHead values ->
+    let normalizedHead = normalizeNestedRootCalls context expressionHead
+        normalizedValues = map (normalizeNestedRootCalls context) values
+        normalizedCall = Call normalizedHead normalizedValues
+     in case normalizedHead of
+          Symbol headName
+            | systemHeadIs "Root" headName ->
+                fromMaybe normalizedCall (reduceRoot context normalizedValues)
+          _ -> normalizedCall
+  Complex realPart imaginaryPart ->
+    Complex
+      (normalizeNestedRootCalls context realPart)
+      (normalizeNestedRootCalls context imaginaryPart)
+  _ -> expression
+
+canonicalizeNestedAlgebraicRoots :: AlgebraicRootContext -> Expr -> Expr
+canonicalizeNestedAlgebraicRoots = normalizeNestedRootCalls
 
 reduceRootReduce :: AlgebraicRootContext -> [Expr] -> Maybe Expr
 reduceRootReduce context [Call (Symbol headName) values]
@@ -1962,7 +1996,33 @@ solveSquareLinear context variables equations = do
   let coefficients = map fst forms
       rhsValues = map (expressionNegate context . snd) forms
   solutions <- linearSystemSolution context coefficients rhsValues
-  pure (listExpr [listExpr (zipWith ruleExpr variables solutions)])
+  pure
+    ( listExpr
+        [ listExpr
+            (zipWith ruleExpr variables (map (expandLinearSolution context) solutions))
+        ]
+    )
+
+expandLinearSolution :: AlgebraicRootContext -> Expr -> Expr
+expandLinearSolution context expression
+  | Just ("Plus", values) <- callHead expression =
+      simplifyCall context "Plus" (map (expandLinearSolution context) values)
+  | Just ("Times", values) <- callHead expression
+  , Just (prefix, terms, suffix) <- splitFirstPlus values =
+      expandLinearSolution
+        context
+        ( simplifyCall
+            context
+            "Plus"
+            [simplifyCall context "Times" (prefix <> [term] <> suffix) | term <- terms]
+        )
+  | otherwise = expression
+ where
+  splitFirstPlus = go []
+  go _ [] = Nothing
+  go prefix (value : rest)
+    | Just ("Plus", terms) <- callHead value = Just (prefix, terms, rest)
+    | otherwise = go (prefix <> [value]) rest
 
 reduceSolve :: AlgebraicRootContext -> [Expr] -> Maybe Expr
 reduceSolve context [equationSpecification, variableSpecification] = do

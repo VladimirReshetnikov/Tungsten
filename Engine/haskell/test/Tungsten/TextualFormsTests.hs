@@ -100,6 +100,7 @@ valueCases =
   , ("raw string byte array import", "ImportByteArray[ByteArray[{97,98,99}],\"String\"]", "\"abc\"")
   , ("byte array export", "Normal[ExportByteArray[{97,98,99},\"Byte\"]]", "List[97, 98, 99]")
   , ("RawJSON byte-array round trip", "ImportByteArray[ExportByteArray[<|\"a\"->1|>,\"RawJSON\"],\"RawJSON\"]", "Association[Rule[\"a\", 1]]")
+  , ("GZIP string round trip", "ImportString[ExportString[\"hello\",{\"GZIP\",\"String\"}],{\"GZIP\",\"String\"}]", "\"hello\"")
   ]
 
 errorCases :: [(Text, Text, Text)]
@@ -113,7 +114,6 @@ errorCases =
   , ("ImportString validates input", "ImportString[1,\"Text\"]", "ImportString expects the source data to be a string.")
   , ("ExportString validates bytes", "ExportString[{256},\"Byte\"]", "ByteArray values must be integers between 0 and 255.")
   , ("RawJSON rejects rule lists", "ExportString[{\"a\"->1},\"RawJSON\"]", "ExportString RawJSON export expects associations for JSON objects, not lists of rules.")
-  , ("compression boundary is explicit", "ExportString[\"hello\",{\"GZIP\",\"String\"}]", "Unsupported compression wrapper: GZIP.")
   ]
 
 checkValue :: (Text, Text, Text) -> IO Bool

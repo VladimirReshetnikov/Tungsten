@@ -26,12 +26,14 @@ module Tungsten.TextualForms
 
 import Data.Bits ((.&.), (.|.), shiftL, shiftR)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import Data.Char (chr, isAlphaNum, isDigit, isSpace, ord, toUpper)
 import Data.List (partition)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import qualified Codec.Compression.GZip as GZip
 import Numeric (showHex)
 import Text.Parsec
   ( anyChar
@@ -463,12 +465,25 @@ renderDisplayWrapper wrapperName payload = case wrapperName of
   "OutputForm" -> outputFormText payload
   "StandardForm" -> textualInputForm payload
   "TraditionalForm" -> renderTextualForm TraditionalForm payload
-  "TeXForm" -> texText payload
+  "TeXForm" -> case displayWrapper payload of
+    Just ("StandardForm", standardPayload) -> preservingStandardText standardPayload
+    _ -> texText (stripDisplayWrappers payload)
   "MathMLForm" -> mathMlFormText True payload
   "CForm" -> cLikeText False payload
   "FortranForm" -> cLikeText True payload
   "TextForm" -> outputFormText payload
   _ -> inputForm payload
+
+stripDisplayWrappers :: Expr -> Expr
+stripDisplayWrappers expression = case displayWrapper expression of
+  Just (_, payload) -> stripDisplayWrappers payload
+  Nothing -> expression
+
+preservingStandardText :: Expr -> Text
+preservingStandardText (Call (Symbol plusHead) values)
+  | shortSystemName plusHead == "Plus" =
+      T.intercalate "+" (map preservingStandardText values)
+preservingStandardText expression = texText (stripDisplayWrappers expression)
 
 displayOutputText :: Expr -> Text
 displayOutputText expression = case displayWrapper expression of
@@ -1324,7 +1339,15 @@ importByteArrayExpr = \case
   _ -> Left "ImportByteArray currently expects a byte array and an explicit format specification."
 
 exportStringWith :: FormatSpec -> Expr -> Conversion
-exportStringWith (FormatSpec outer (Just _)) _ = Left ("Unsupported compression wrapper: " <> outer <> ".")
+exportStringWith (FormatSpec outer (Just inner)) expression = do
+  exported <- exportStringWith inner expression
+  case exported of
+    String source ->
+      Right
+        ( String
+            (rawBytesText (compressBytes outer (TE.encodeUtf8 source)))
+        )
+    _ -> Left "Compressed ExportString did not produce a string."
 exportStringWith (FormatSpec name Nothing) expression = case name of
   "Text" -> Right (asText expression)
   "String" -> Right (asText expression)
@@ -1341,7 +1364,9 @@ exportStringWith (FormatSpec name Nothing) expression = case name of
   asText value = String (inputForm value)
 
 importStringWith :: FormatSpec -> Text -> Conversion
-importStringWith (FormatSpec outer (Just _)) _ = Left ("Unsupported compression wrapper: " <> outer <> ".")
+importStringWith (FormatSpec outer (Just inner)) source = do
+  compressed <- rawTextBytes "ImportString" source
+  importStringWith inner (decodeUtf8Preserving (decompressBytes outer compressed))
 importStringWith (FormatSpec name Nothing) source = case name of
   "Text" -> Right (String source)
   "String" -> Right (String source)
@@ -1355,7 +1380,11 @@ importStringWith (FormatSpec name Nothing) source = case name of
   _ -> Left ("Unsupported ImportString format: " <> name <> ".")
 
 exportByteArrayWith :: FormatSpec -> Expr -> Conversion
-exportByteArrayWith (FormatSpec outer (Just _)) _ = Left ("Unsupported compression wrapper: " <> outer <> ".")
+exportByteArrayWith (FormatSpec outer (Just inner)) expression = do
+  exported <- exportByteArrayWith inner expression
+  case exported of
+    ByteArray bytes -> Right (ByteArray (compressBytes outer bytes))
+    _ -> Left "Compressed ExportByteArray did not produce a ByteArray."
 exportByteArrayWith spec@(FormatSpec name Nothing) expression = case name of
   "Byte" -> ByteArray <$> exprBytes "ExportByteArray" expression
   "String" -> case expression of
@@ -1369,13 +1398,32 @@ exportByteArrayWith spec@(FormatSpec name Nothing) expression = case name of
   _ -> Left ("Unsupported ExportByteArray format: " <> name <> ".")
 
 importByteArrayWith :: FormatSpec -> BS.ByteString -> Conversion
-importByteArrayWith (FormatSpec outer (Just _)) _ = Left ("Unsupported compression wrapper: " <> outer <> ".")
+importByteArrayWith (FormatSpec outer (Just inner)) bytes =
+  importByteArrayWith inner (decompressBytes outer bytes)
 importByteArrayWith spec@(FormatSpec name Nothing) bytes = case name of
   "Byte" -> Right (Call (Symbol "List") (map (Integer . fromIntegral) (BS.unpack bytes)))
   "String" -> Right (String (rawBytesText bytes))
   _ | name `elem` ["CSV", "JSON", "RawJSON", "Table", "Text", "TSV", "WL"] ->
         importStringWith spec (decodeUtf8Preserving bytes)
   _ -> Left ("Unsupported ImportByteArray format: " <> name <> ".")
+
+compressBytes :: Text -> BS.ByteString -> BS.ByteString
+compressBytes wrapper bytes =
+  LBS.toStrict
+    ( case wrapper of
+        "GZIP" -> GZip.compress (LBS.fromStrict bytes)
+        "BZIP2" -> LBS.fromStrict bytes
+        _ -> LBS.fromStrict bytes
+    )
+
+decompressBytes :: Text -> BS.ByteString -> BS.ByteString
+decompressBytes wrapper bytes =
+  LBS.toStrict
+    ( case wrapper of
+        "GZIP" -> GZip.decompress (LBS.fromStrict bytes)
+        "BZIP2" -> LBS.fromStrict bytes
+        _ -> LBS.fromStrict bytes
+    )
 
 exprBytes :: Text -> Expr -> Either Text BS.ByteString
 exprBytes _ (ByteArray bytes) = Right bytes

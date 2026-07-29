@@ -3049,11 +3049,16 @@ reduceSessionEvaluatedCall depth session = \case
         else evaluateSessionAt (depth + 1) session reduced
   expression@(Call (Symbol algebraicHead) values)
     | algebraicHead `elem` algebraicRootDispatchHeads ->
-        Just $ case
+        let context = sessionAlgebraicRootContext session
+            normalizedValues
+              | algebraicHead == "Root" =
+                  map (AlgebraicRoots.canonicalizeNestedAlgebraicRoots context) values
+              | otherwise = values
+         in Just $ case
           AlgebraicRoots.reduceAlgebraicRootBuiltin
-            (sessionAlgebraicRootContext session)
+            context
             algebraicHead
-            values of
+            normalizedValues of
           Nothing -> Right (expression, session)
           Just reduced
             | reduced == expression -> Right (reduced, session)
@@ -3447,7 +3452,9 @@ reducerDispatchView allowQualified session expression = case expression of
             let barrierName = reducerBarrierName shortName session expression
                 protectBareSameHead =
                   originalHead /= shortName
-                    || not (symbolHasAttribute originalHead Flat session)
+                    || ( shortName `notElem` ["Power", "Root"]
+                           && not (symbolHasAttribute originalHead Flat session)
+                       )
                 dispatchedValues =
                   if protectBareSameHead
                     then map (shieldReducerArgument shortName barrierName) values
@@ -6498,7 +6505,9 @@ evaluateSessionTotal
   -> SessionResult Expr
 evaluateSessionTotal depth session = \case
   [subject] -> totalSubject subject
-  values@[_, _] -> Right (Call (Symbol "Total") values, session)
+  values@[_, _] -> do
+    result <- liftPureEvaluation session (evaluate (Call (Symbol "Total") values))
+    Right (result, session)
   _ ->
     sessionFailure
       session
@@ -7185,7 +7194,8 @@ evaluateSessionSetOperation operation depth session values =
           (retained, updated) <- retainIntersection sameTest firstSession uniqueFirst remaining
           Right (evaluatedList retained, updated)
         ("Complement", first : remaining) -> do
-          (uniqueFirst, firstSession) <- uniqueSessionValues depth sameTest session first
+          (uniqueFirst, firstSession) <-
+            uniqueSessionValues depth sameTest session (sortBy canonicalCompare first)
           (retained, updated) <- removeComplement sameTest firstSession uniqueFirst (concat remaining)
           Right (evaluatedList retained, updated)
         _ -> sessionFailure session (operation <> " expects at least one list.")
@@ -7214,9 +7224,9 @@ uniqueSessionValues
   -> EvaluationSession
   -> [Expr]
   -> SessionResult [Expr]
-uniqueSessionValues depth sameTest session values = go session [] (sortBy canonicalCompare values)
+uniqueSessionValues depth sameTest session values = go session [] values
  where
-  go current retained [] = Right (reverse retained, current)
+  go current retained [] = Right (sortBy canonicalCompare (reverse retained), current)
   go current retained (candidate : rest) = do
     (duplicate, updated) <- anySessionValueSame depth sameTest current candidate retained
     go updated (if duplicate then retained else candidate : retained) rest

@@ -14,7 +14,7 @@ module Tungsten.PolynomialAlgebra
   ) where
 
 import Prelude hiding (exponent)
-import Data.List (sortBy)
+import Data.List (partition, sortBy)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (mapMaybe)
 import qualified Data.Set as Set
@@ -82,10 +82,52 @@ reduceExpand compareExpression [expression] = do
   polynomial <- expressionToPolynomial variables expression
   pure (polynomialToExpr compareExpression variables polynomial)
 reduceExpand compareExpression [expression, variable]
-  | variable `elem` discoverVariables compareExpression [] [expression] =
-      reduceExpand compareExpression [expression]
+  | Call (Symbol blankHead) [Symbol matchedHead] <- variable
+  , systemHeadIn "Blank" blankHead
+  , systemHeadIn "Plus" matchedHead = reduceExpand compareExpression [expression]
+  | Call (Symbol timesHead) factors <- expression
+  , systemHeadIn "Times" timesHead
+  , let (dependentFactors, independentFactors) =
+          partition (containsExpression variable) factors
+  , not (null dependentFactors)
+  , not (null independentFactors) = do
+      dependent <- reduceExpand compareExpression [timesExpression dependentFactors]
+      let independent = timesExpression independentFactors
+          attach term =
+            timesExpression
+              ( sortBy compareExpression
+                  (concatMap flattenPartialTimes [term, independent])
+              )
+      pure $ case dependent of
+        Call (Symbol plusHead) terms
+          | systemHeadIn "Plus" plusHead ->
+              Call (Symbol "Plus") (sortBy compareExpression (map attach terms))
+        _ -> attach dependent
+  | variable `elem` discoverVariables compareExpression [] [expression] = do
+      polynomial <- expressionToPolynomial [variable] expression
+      pure (polynomialToExpr compareExpression [variable] polynomial)
   | otherwise = Just expression
 reduceExpand _ _ = Nothing
+
+containsExpression :: Expr -> Expr -> Bool
+containsExpression target expression
+  | target == expression = True
+containsExpression target (Call expressionHead values) =
+  containsExpression target expressionHead || any (containsExpression target) values
+containsExpression target (Complex realPart imaginaryPart) =
+  containsExpression target realPart || containsExpression target imaginaryPart
+containsExpression _ _ = False
+
+timesExpression :: [Expr] -> Expr
+timesExpression values = case filter (/= Integer 1) values of
+  [] -> Integer 1
+  [value] -> value
+  retained -> Call (Symbol "Times") retained
+
+flattenPartialTimes :: Expr -> [Expr]
+flattenPartialTimes (Call (Symbol timesHead) values)
+  | systemHeadIn "Times" timesHead = concatMap flattenPartialTimes values
+flattenPartialTimes value = [value]
 
 reducePolynomialQ :: CanonicalCompare -> [Expr] -> Maybe Expr
 reducePolynomialQ compareExpression arguments = case arguments of
