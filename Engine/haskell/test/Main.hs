@@ -805,6 +805,7 @@ checkEvaluator = do
         , ("drop range", "Drop[f[a, b, c, d, e], {2, 5, 2}]", "f[a, c, e]")
         , ("multi-axis take", "Take[{{1, 2, 3}, {4, 5, 6}}, 2, 2]", "List[List[1, 2], List[4, 5]]")
         , ("multi-axis drop", "Drop[{{1, 2, 3}, {4, 5, 6}}, 1, 1]", "List[List[5, 6]]")
+        , ("take family normalizes selected unevaluated sequences", "{Take[Unevaluated[f[Sequence[a,b]]],All], TakeDrop[Unevaluated[f[Sequence[a,b]]],All], TakeList[Unevaluated[Sequence[a,b]],{All}]}", "List[f[a, b], List[f[a, b], f[]], List[a, b]]")
         , ("append preserving head", "Append[f[a], b]", "f[a, b]")
         , ("prepend preserving head", "Prepend[f[a], b]", "f[b, a]")
         , ("join preserving head", "Join[f[a], f[b, c]]", "f[a, b, c]")

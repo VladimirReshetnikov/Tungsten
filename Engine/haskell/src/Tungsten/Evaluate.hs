@@ -10562,8 +10562,8 @@ partitionAlignment window value
 
 reduceTakeList :: [Expr] -> Either EvaluationError Expr
 reduceTakeList [expression, Call (Symbol "List") specifications] = do
-  (taken, _) <- foldM consume ([], expression) specifications
-  Right (evaluatedList taken)
+  (taken, _) <- foldM consume ([], stripTakeDropUnevaluated expression) specifications
+  Right (normalizeEvaluatedCall (Symbol "List") taken)
  where
   consume (taken, remaining) (Symbol "All") = do
     let emptied = case requireDenseSequence "TakeList" remaining of
@@ -10582,7 +10582,7 @@ reduceTakeDropPair :: [Expr] -> Either EvaluationError Expr
 reduceTakeDropPair [expression, specification] = do
   taken <- reduceTakeDrop True [expression, specification]
   dropped <- reduceTakeDrop False [expression, specification]
-  Right (evaluatedList [taken, dropped])
+  Right (normalizeEvaluatedCall (Symbol "List") [taken, dropped])
 reduceTakeDropPair _ = Left (EvaluationError "TakeDrop expects exactly two arguments.")
 
 data SequenceSearchMode
@@ -11921,7 +11921,7 @@ matrixPower expression power = do
 
 reduceTakeDrop :: Bool -> [Expr] -> Either EvaluationError Expr
 reduceTakeDrop takeMode (subject : specifications@(_ : _)) =
-  applySpecifications subject specifications
+  applySpecifications (stripTakeDropUnevaluated subject) specifications
  where
   operationName = if takeMode then "Take" else "Drop"
   applySpecifications expression [] = Right expression
@@ -11933,18 +11933,43 @@ reduceTakeDrop takeMode (subject : specifications@(_ : _)) =
         Call expressionHead values ->
           Call expressionHead <$> traverse (`applySpecifications` remaining) values
         _ -> Left (EvaluationError (operationName <> " encountered an atom before consuming every specification"))
+  applySpecification expression specification
+    | Just _ <- associationEntries expression
+    , associationKeySelectorList specification =
+        Left
+          ( EvaluationError
+              ( operationName
+                  <> " on associations currently supports only numeric or span selectors; "
+                  <> "key-list selectors such as ``{Key[a], …}`` are not yet implemented."
+              )
+          )
   applySpecification (Call expressionHead values) specification = do
     selected <- specificationIndices operationName (length values) specification
     pure
-      ( Call expressionHead
+      ( normalizeEvaluatedCall expressionHead
           ( if takeMode
               then [values !! index | index <- selected]
               else [value | (index, value) <- zip [0 ..] values, index `notElem` selected]
           )
       )
-  applySpecification _ _ = Left (EvaluationError (operationName <> " expects an expression with arguments"))
+  applySpecification _ _ = Left (EvaluationError (operationName <> " expects a nonatomic expression."))
 reduceTakeDrop takeMode values =
   Right (Call (Symbol (if takeMode then "Take" else "Drop")) values)
+
+stripTakeDropUnevaluated :: Expr -> Expr
+stripTakeDropUnevaluated = \case
+  Call (Symbol headName) [value]
+    | systemHeadIn ["Unevaluated"] headName -> value
+  value -> value
+
+associationKeySelectorList :: Expr -> Bool
+associationKeySelectorList (Call (Symbol "List") selectors) =
+  any isKeySelector selectors
+ where
+  isKeySelector String {} = True
+  isKeySelector (Call (Symbol headName) _values) = systemHeadIn ["Key"] headName
+  isKeySelector _ = False
+associationKeySelectorList _ = False
 
 specificationIndices :: Text -> Int -> Expr -> Either EvaluationError [Int]
 specificationIndices operationName count specification =
@@ -11955,6 +11980,11 @@ specificationIndices operationName count specification =
     Call (Symbol "Span") spanArguments -> spanIndices spanArguments
     Call (Symbol "List") [Integer position] -> validateSelectors [position]
     Call (Symbol "List") [Symbol "All"] -> Right [0 .. count - 1]
+    Call (Symbol "List") [_] ->
+      Left
+        ( EvaluationError
+            (operationName <> " single-element list specifications must contain an integer or All.")
+        )
     Call (Symbol "List") [first, last'] -> spanIndices [first, last']
     Call (Symbol "List") [first, last', step] -> spanIndices [first, last', step]
     Call (Symbol "List") _ ->
